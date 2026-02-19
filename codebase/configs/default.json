@@ -1,0 +1,24 @@
+{
+  "format_bootstrap": {
+    "epochs": 1,
+    "max_examples": 1000,
+    "target_valid_action_rate": 0.98
+  },
+  "sdft": {
+    "epochs": 1,
+    "max_examples": 1000,
+    "reverse_kl_coef": 1.0,
+    "demo_uplift_eval_every": 200
+  },
+  "step_sdpo": {
+    "epochs": 1,
+    "max_episodes": 200,
+    "topk_distill": 64,
+    "feedback_truncate_tokens": 4096
+  },
+  "terminal_hindsight": {
+    "enabled": true,
+    "last_k_steps": 4,
+    "sample_rate": 0.5
+  }
+}
