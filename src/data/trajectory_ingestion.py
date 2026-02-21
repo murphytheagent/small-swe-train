@@ -44,6 +44,14 @@ class _StepEntry:
     thinking: str | None
 
 
+@dataclass(frozen=True)
+class _ToolCallEntry:
+    tool_name: str
+    args: dict[str, Any]
+    thinking: str | None
+    source: Mapping[str, Any] | None
+
+
 class SupportsOffsetsTokenizer(Protocol):
     """Minimal tokenizer protocol used by ingestion helpers."""
 
@@ -220,14 +228,16 @@ def run_ingestion(
 ) -> dict[str, int]:
     """Run end-to-end ingestion and return summary stats."""
     raw_records = load_raw_records(input_path)
-    episodes = build_episodes(raw_records)
+    raw_record_count = len(raw_records)
+    records_for_ingestion: Sequence[Mapping[str, Any]] = raw_records
     if max_episodes is not None:
-        episodes = episodes[:max_episodes]
+        records_for_ingestion = raw_records[:max_episodes]
+    episodes = build_episodes(records_for_ingestion)
     tokenizer = load_qwen_tokenizer(tokenizer_model)
     training_records = build_training_records(episodes, tokenizer=tokenizer)
     write_training_records(training_records, output_path)
     return {
-        "raw_records": len(raw_records),
+        "raw_records": raw_record_count,
         "episodes_ingested": len(episodes),
         "records_written": len(training_records),
     }
@@ -286,11 +296,15 @@ def _iter_step_entries(record: Mapping[str, Any]) -> Iterable[_StepEntry]:
     for key in _TRAJECTORY_KEYS:
         candidate = record.get(key)
         if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
+            yielded = False
             for raw_step in candidate:
                 if not isinstance(raw_step, Mapping):
                     continue
-                yield from _entries_from_step(raw_step)
-            return
+                for entry in _entries_from_step(raw_step):
+                    yielded = True
+                    yield entry
+            if yielded:
+                return
 
     history = record.get("history")
     if isinstance(history, Sequence) and not isinstance(history, (str, bytes)):
@@ -299,7 +313,7 @@ def _iter_step_entries(record: Mapping[str, Any]) -> Iterable[_StepEntry]:
 
 
 def _entries_from_history(history: Sequence[Any]) -> Iterable[_StepEntry]:
-    pending_calls: list[tuple[str, dict[str, Any], str | None]] = []
+    pending_calls: list[_ToolCallEntry] = []
     for item in history:
         if not isinstance(item, Mapping):
             continue
@@ -309,34 +323,39 @@ def _entries_from_history(history: Sequence[Any]) -> Iterable[_StepEntry]:
             pending_calls = _extract_tool_calls_from_payload(item)
             if not pending_calls:
                 continue
-            direct_output = _extract_tool_output(item, call=None, call_index=0)
+            direct_output = _extract_tool_output(
+                item,
+                call=None,
+                call_index=0,
+                include_content_fallback=False,
+            )
             if direct_output:
-                for tool_name, args, thinking in pending_calls:
+                for call_entry in pending_calls:
                     yield _StepEntry(
-                        tool_name=tool_name,
-                        args=args,
+                        tool_name=call_entry.tool_name,
+                        args=call_entry.args,
                         tool_output=direct_output,
-                        thinking=thinking,
+                        thinking=call_entry.thinking,
                     )
                 pending_calls = []
             continue
 
         if role in {"tool", "environment", "observation"} and pending_calls:
             output = _extract_tool_output(item, call=None, call_index=0)
-            tool_name, args, thinking = pending_calls.pop(0)
+            call_entry = pending_calls.pop(0)
             yield _StepEntry(
-                tool_name=tool_name,
-                args=args,
+                tool_name=call_entry.tool_name,
+                args=call_entry.args,
                 tool_output=output,
-                thinking=thinking,
+                thinking=call_entry.thinking,
             )
 
-    for tool_name, args, thinking in pending_calls:
+    for call_entry in pending_calls:
         yield _StepEntry(
-            tool_name=tool_name,
-            args=args,
+            tool_name=call_entry.tool_name,
+            args=call_entry.args,
             tool_output={},
-            thinking=thinking,
+            thinking=call_entry.thinking,
         )
 
 
@@ -345,18 +364,22 @@ def _entries_from_step(step: Mapping[str, Any]) -> Iterable[_StepEntry]:
     if not calls:
         return
 
-    for call_index, (tool_name, args, thinking) in enumerate(calls):
-        output = _extract_tool_output(step, call=step, call_index=call_index)
+    for call_index, call_entry in enumerate(calls):
+        output = _extract_tool_output(
+            step,
+            call=call_entry.source,
+            call_index=call_index,
+        )
         yield _StepEntry(
-            tool_name=tool_name,
-            args=args,
+            tool_name=call_entry.tool_name,
+            args=call_entry.args,
             tool_output=output,
-            thinking=thinking,
+            thinking=call_entry.thinking,
         )
 
 
-def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[tuple[str, dict[str, Any], str | None]]:
-    extracted: list[tuple[str, dict[str, Any], str | None]] = []
+def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCallEntry]:
+    extracted: list[_ToolCallEntry] = []
     top_level_thinking = _extract_thinking(payload)
 
     tool_calls = payload.get("tool_calls")
@@ -369,7 +392,14 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[tuple[s
                 continue
             args = _extract_tool_args(call, default_source=payload, tool_name=tool_name)
             thinking = _extract_thinking(call) or top_level_thinking
-            extracted.append((tool_name, args, thinking))
+            extracted.append(
+                _ToolCallEntry(
+                    tool_name=tool_name,
+                    args=args,
+                    thinking=thinking,
+                    source=call,
+                )
+            )
         if extracted:
             return extracted
 
@@ -379,13 +409,27 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[tuple[s
             tool_name = _extract_tool_name(call)
             if tool_name:
                 args = _extract_tool_args(call, default_source=payload, tool_name=tool_name)
-                extracted.append((tool_name, args, _extract_thinking(call) or top_level_thinking))
+                extracted.append(
+                    _ToolCallEntry(
+                        tool_name=tool_name,
+                        args=args,
+                        thinking=_extract_thinking(call) or top_level_thinking,
+                        source=call,
+                    )
+                )
                 return extracted
 
     direct_tool_name = _extract_tool_name(payload)
     if direct_tool_name:
         args = _extract_tool_args(payload, default_source=payload, tool_name=direct_tool_name)
-        extracted.append((direct_tool_name, args, top_level_thinking))
+        extracted.append(
+            _ToolCallEntry(
+                tool_name=direct_tool_name,
+                args=args,
+                thinking=top_level_thinking,
+                source=payload,
+            )
+        )
 
     return extracted
 
@@ -470,6 +514,7 @@ def _extract_tool_output(
     *,
     call: Mapping[str, Any] | None,
     call_index: int,
+    include_content_fallback: bool = True,
 ) -> dict[str, Any]:
     if call is not None:
         for key in _TOOL_OUTPUT_KEYS:
@@ -486,7 +531,7 @@ def _extract_tool_output(
         if key in step:
             return _coerce_tool_output(step.get(key))
 
-    if "content" in step:
+    if include_content_fallback and "content" in step:
         return _coerce_tool_output(step.get("content"))
     return {}
 

@@ -10,6 +10,7 @@ from data.trajectory_ingestion import (
     build_episode_from_record,
     build_training_record,
     load_raw_records,
+    run_ingestion,
     write_training_records,
 )
 
@@ -93,6 +94,81 @@ def test_build_episode_from_swe_bench_history_record() -> None:
     assert episode.environment_steps[0].thinking == "Run the failing test first."
     assert episode.feedback_packets[0].canonical_feedback.actionable_error_text is not None
     assert "tests/test_app.py::test_x" in episode.feedback_packets[0].canonical_feedback.artifact_identities
+
+
+def test_history_uses_tool_message_over_assistant_empty_content() -> None:
+    record = {
+        "instance_id": "swe-bench-empty-content",
+        "history": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "bash",
+                        "arguments": {"command": "pytest tests/test_app.py::test_x"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "real tool output",
+            },
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert len(episode.environment_steps) == 1
+    assert episode.environment_steps[0].response.stdout == "real tool output"
+
+
+def test_step_prefers_non_empty_trajectory_variant() -> None:
+    record = {
+        "instance_id": "trajectory-fallback",
+        "trajectory": [],
+        "steps": [
+            {
+                "tool": "bash",
+                "args": {"command": "pytest -q"},
+                "output": {"stdout": "ok", "exit_code": 0},
+            }
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert len(episode.environment_steps) == 1
+    assert episode.environment_steps[0].request.tool == "bash"
+    assert episode.environment_steps[0].response.stdout == "ok"
+
+
+def test_step_reads_tool_call_local_outputs() -> None:
+    record = {
+        "instance_id": "tool-call-output",
+        "trajectory": [
+            {
+                "tool_calls": [
+                    {
+                        "name": "bash",
+                        "arguments": {"command": "echo first"},
+                        "output": {"stdout": "first out", "exit_code": 0},
+                    },
+                    {
+                        "name": "bash",
+                        "arguments": {"command": "echo second"},
+                        "output": {"stdout": "second out", "exit_code": 0},
+                    },
+                ]
+            }
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert len(episode.environment_steps) == 2
+    assert episode.environment_steps[0].response.stdout == "first out"
+    assert episode.environment_steps[1].response.stdout == "second out"
 
 
 def test_build_training_record_applies_stage_masks() -> None:
@@ -179,3 +255,42 @@ def test_write_training_records_parquet(tmp_path: Path) -> None:
     table = pq.read_table(output_path)
     assert table.num_rows == 1
     assert table.column("episode_id")[0].as_py() == "ep-1"
+
+
+def test_run_ingestion_respects_max_episodes_before_parsing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    input_path = tmp_path / "records.jsonl"
+    input_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "instance_id": "ok-1",
+                        "trajectory": [
+                            {
+                                "tool": "bash",
+                                "args": {"command": "echo ok"},
+                                "output": {"stdout": "ok", "exit_code": 0},
+                            }
+                        ],
+                    }
+                ),
+                json.dumps({"instance_id": "bad-2", "trajectory": [123]}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "prepared.jsonl"
+
+    monkeypatch.setattr("data.trajectory_ingestion.load_qwen_tokenizer", lambda _model: CharTokenizer())
+
+    stats = run_ingestion(
+        input_path=input_path,
+        output_path=output_path,
+        tokenizer_model="ignored-for-test",
+        max_episodes=1,
+    )
+
+    assert stats == {"raw_records": 2, "episodes_ingested": 1, "records_written": 1}
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
