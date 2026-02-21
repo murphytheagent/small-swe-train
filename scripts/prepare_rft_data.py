@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Prepare deterministic RFT-ready records from SWE trajectory samples."""
+"""Prepare RFT-ready records from SWE trajectories."""
 
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any, Mapping, Sequence
 
-try:
-    from verl_integration.data_preprocessor import preprocess_trajectories
-except ModuleNotFoundError:
-    import sys
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    from verl_integration.data_preprocessor import preprocess_trajectories
+def _ensure_src_on_path() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    src_path = repo_root / "src"
+    if str(src_path) not in sys.path:
+        sys.path.insert(0, str(src_path))
 
 
 def _load_json_rows(path: Path) -> list[Mapping[str, Any]]:
@@ -68,35 +68,80 @@ def _summarize_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, type=Path, help="Path to input JSON/JSONL trajectories.")
-    parser.add_argument("--output", required=True, type=Path, help="Path for output JSONL rows.")
+    parser.add_argument(
+        "--mode",
+        choices=("ingest", "preprocess"),
+        default="ingest",
+        help="Pipeline mode: `ingest` (trajectory_ingestion) or `preprocess` (verl adapter rows).",
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="Path to raw trajectory JSON/JSONL input (or directory in ingest mode).",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Output path for prepared records (.jsonl/.parquet/.arrow for ingest, .jsonl for preprocess).",
+    )
+
+    parser.add_argument(
+        "--tokenizer-model",
+        default="Qwen/Qwen3-4B",
+        help="Hugging Face tokenizer model name (ingest mode).",
+    )
+    parser.add_argument(
+        "--max-episodes",
+        type=int,
+        default=None,
+        help="Optional cap on number of episodes to ingest (ingest mode).",
+    )
+
     parser.add_argument(
         "--summary-output",
         type=Path,
-        help="Optional path to write a JSON summary report.",
+        help="Optional path to write a JSON summary report (preprocess mode).",
     )
-    parser.add_argument("--max-tool-calls", type=int, default=3)
-    parser.add_argument("--limit", type=int, default=0, help="Optional input row limit (0 means no limit).")
+    parser.add_argument("--max-tool-calls", type=int, default=3, help="Max tool calls per row (preprocess mode).")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Optional input row limit (0 means no limit, preprocess mode).",
+    )
     parser.add_argument(
         "--validate-min-rows",
         type=int,
         default=100,
-        help="Require at least this many rows after preprocessing (0 disables check).",
+        help="Require at least this many rows after preprocessing (0 disables check, preprocess mode).",
     )
     parser.add_argument(
         "--min-format-valid-rate",
         type=float,
         default=0.0,
-        help="Require format_valid_rate >= threshold (0 disables check).",
+        help="Require format_valid_rate >= threshold (0 disables check, preprocess mode).",
     )
     return parser
 
 
-def main() -> None:
-    parser = _build_parser()
-    args = parser.parse_args()
+def _run_ingest_mode(args: argparse.Namespace) -> None:
+    from data.trajectory_ingestion import run_ingestion
+
+    stats = run_ingestion(
+        input_path=args.input,
+        output_path=args.output,
+        tokenizer_model=args.tokenizer_model,
+        max_episodes=args.max_episodes,
+    )
+    print(json.dumps(stats, ensure_ascii=True, sort_keys=True))
+
+
+def _run_preprocess_mode(args: argparse.Namespace) -> None:
+    from verl_integration.data_preprocessor import preprocess_trajectories
 
     samples = _load_json_rows(args.input)
     if args.limit > 0:
@@ -125,6 +170,18 @@ def main() -> None:
         )
 
     print(json.dumps(summary, ensure_ascii=True, sort_keys=True))
+
+
+def main() -> None:
+    _ensure_src_on_path()
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    if args.mode == "preprocess":
+        _run_preprocess_mode(args)
+        return
+
+    _run_ingest_mode(args)
 
 
 if __name__ == "__main__":

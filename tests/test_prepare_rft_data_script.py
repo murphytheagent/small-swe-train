@@ -29,6 +29,8 @@ def test_prepare_rft_data_script_processes_100_rows(tmp_path: Path) -> None:
     cmd = [
         sys.executable,
         "scripts/prepare_rft_data.py",
+        "--mode",
+        "preprocess",
         "--input",
         str(input_path),
         "--output",
@@ -77,6 +79,8 @@ def test_prepare_rft_data_script_enforces_min_row_validation(tmp_path: Path) -> 
     cmd = [
         sys.executable,
         "scripts/prepare_rft_data.py",
+        "--mode",
+        "preprocess",
         "--input",
         str(input_path),
         "--output",
