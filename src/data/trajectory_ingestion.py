@@ -51,6 +51,7 @@ class _ToolCallEntry:
     thinking: str | None
     call_id: str | None
     source: Mapping[str, Any] | None
+    source_index: int
 
 
 class SupportsOffsetsTokenizer(Protocol):
@@ -331,11 +332,11 @@ def _entries_from_history(history: Sequence[Any]) -> Iterable[_StepEntry]:
                 continue
             unresolved_calls: list[_ToolCallEntry] = []
             allow_scalar_step_output = len(new_calls) == 1
-            for call_index, call_entry in enumerate(new_calls):
+            for call_entry in new_calls:
                 inline_output = _extract_tool_output(
                     item,
                     call=call_entry.source,
-                    call_index=call_index,
+                    call_index=call_entry.source_index,
                     include_content_fallback=False,
                     include_step_output_fallback=allow_scalar_step_output,
                 )
@@ -380,11 +381,11 @@ def _entries_from_step(step: Mapping[str, Any]) -> Iterable[_StepEntry]:
     if not calls:
         return
 
-    for call_index, call_entry in enumerate(calls):
+    for call_entry in calls:
         output = _extract_tool_output(
             step,
             call=call_entry.source,
-            call_index=call_index,
+            call_index=call_entry.source_index,
         )
         yield _StepEntry(
             tool_name=call_entry.tool_name,
@@ -400,7 +401,7 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
 
     tool_calls = payload.get("tool_calls")
     if isinstance(tool_calls, Sequence) and not isinstance(tool_calls, (str, bytes)):
-        for call in tool_calls:
+        for call_index, call in enumerate(tool_calls):
             if not isinstance(call, Mapping):
                 continue
             tool_name = _extract_tool_name(call)
@@ -415,6 +416,7 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
                     thinking=thinking,
                     call_id=_extract_tool_call_id(call, allow_generic_id=True),
                     source=call,
+                    source_index=call_index,
                 )
             )
         if extracted:
@@ -433,6 +435,7 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
                         thinking=_extract_thinking(call) or top_level_thinking,
                         call_id=_extract_tool_call_id(call, allow_generic_id=True),
                         source=call,
+                        source_index=0,
                     )
                 )
                 return extracted
@@ -447,6 +450,7 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
                 thinking=top_level_thinking,
                 call_id=_extract_tool_call_id(payload, allow_generic_id=True),
                 source=payload,
+                source_index=0,
             )
         )
 

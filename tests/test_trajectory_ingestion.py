@@ -152,6 +152,46 @@ def test_history_uses_per_call_inline_outputs() -> None:
     assert episode.environment_steps[1].response.stdout == "second output"
 
 
+def test_history_preserves_tool_call_indexes_when_invalid_calls_are_skipped() -> None:
+    record = {
+        "instance_id": "swe-bench-inline-output-indexes",
+        "history": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "invalid-call",
+                        "arguments": {"command": "ignored"},
+                    },
+                    {
+                        "id": "call-1",
+                        "name": "bash",
+                        "arguments": {"command": "echo first"},
+                    },
+                    {
+                        "id": "call-2",
+                        "name": "bash",
+                        "arguments": {"command": "echo second"},
+                    },
+                ],
+                "outputs": [
+                    {"stdout": "invalid output", "exit_code": 0},
+                    {"stdout": "first output", "exit_code": 0},
+                    {"stdout": "second output", "exit_code": 0},
+                ],
+            }
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert len(episode.environment_steps) == 2
+    assert episode.environment_steps[0].request.args["command"] == "echo first"
+    assert episode.environment_steps[0].response.stdout == "first output"
+    assert episode.environment_steps[1].request.args["command"] == "echo second"
+    assert episode.environment_steps[1].response.stdout == "second output"
+
+
 def test_history_keeps_pending_calls_across_assistant_non_call_turns() -> None:
     record = {
         "instance_id": "swe-bench-pending-retained",
