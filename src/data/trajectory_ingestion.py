@@ -413,7 +413,7 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
                     tool_name=tool_name,
                     args=args,
                     thinking=thinking,
-                    call_id=_extract_tool_call_id(call),
+                    call_id=_extract_tool_call_id(call, allow_generic_id=True),
                     source=call,
                 )
             )
@@ -431,7 +431,7 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
                         tool_name=tool_name,
                         args=args,
                         thinking=_extract_thinking(call) or top_level_thinking,
-                        call_id=_extract_tool_call_id(call),
+                        call_id=_extract_tool_call_id(call, allow_generic_id=True),
                         source=call,
                     )
                 )
@@ -445,7 +445,7 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
                 tool_name=direct_tool_name,
                 args=args,
                 thinking=top_level_thinking,
-                call_id=_extract_tool_call_id(payload),
+                call_id=_extract_tool_call_id(payload, allow_generic_id=True),
                 source=payload,
             )
         )
@@ -453,8 +453,9 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
     return extracted
 
 
-def _extract_tool_call_id(payload: Mapping[str, Any]) -> str | None:
-    for key in ("tool_call_id", "call_id", "id"):
+def _extract_tool_call_id(payload: Mapping[str, Any], *, allow_generic_id: bool = False) -> str | None:
+    keys = ("tool_call_id", "call_id", "id") if allow_generic_id else ("tool_call_id", "call_id")
+    for key in keys:
         value = payload.get(key)
         if isinstance(value, str):
             stripped = value.strip()

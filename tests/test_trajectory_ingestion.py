@@ -272,6 +272,47 @@ def test_history_ignores_unmatched_tool_call_id_until_matching_output_arrives() 
     assert episode.environment_steps[1].response.stdout == "first output"
 
 
+def test_history_tool_messages_with_message_id_use_fifo_pending_match() -> None:
+    record = {
+        "instance_id": "swe-bench-tool-message-id",
+        "history": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "bash",
+                        "arguments": {"command": "echo first"},
+                    },
+                    {
+                        "id": "call-2",
+                        "name": "bash",
+                        "arguments": {"command": "echo second"},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "id": "message-1",
+                "content": "first output",
+            },
+            {
+                "role": "tool",
+                "id": "message-2",
+                "content": "second output",
+            },
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert len(episode.environment_steps) == 2
+    assert episode.environment_steps[0].request.args["command"] == "echo first"
+    assert episode.environment_steps[0].response.stdout == "first output"
+    assert episode.environment_steps[1].request.args["command"] == "echo second"
+    assert episode.environment_steps[1].response.stdout == "second output"
+
+
 def test_step_prefers_non_empty_trajectory_variant() -> None:
     record = {
         "instance_id": "trajectory-fallback",
