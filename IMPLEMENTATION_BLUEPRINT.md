@@ -458,6 +458,7 @@ flash-attn>=2.7               # compiled from source
 peft>=0.13                     # LoRA
 vllm>=0.8.4                   # rollout inference
 ray>=2.40                      # distributed orchestration
+verl @ git+https://github.com/lasgroup/SDPO.git  # SDPO fork package
 omegaconf>=2.3                 # verl config
 hydra-core>=1.3               # verl config
 wandb>=0.19                    # experiment tracking
@@ -537,3 +538,5 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-21 09:55 UTC] Test status: `pytest` passing (`28 passed`).
 - [2026-02-21 10:13 UTC] Addressed PR feedback: corrected SDFT launcher override to `actor_rollout_ref.actor.policy_loss.loss_mode=sdft`; updated preprocessor null handling so `assistant_response: null` falls back to `external_tool_calls`; added regression test coverage.
 - [2026-02-21 10:13 UTC] Test status: `pytest` passing (`29 passed`).
+- [2026-02-21 10:25 UTC] Addressed follow-up PR feedback: hardened `external_tool_calls` parsing to handle non-mapping entries/strings as per-row `parse_error` (no run-level crash), added two regression tests, and added `verl @ git+https://github.com/lasgroup/SDPO.git` to `[project.optional-dependencies.train]` so launcher install guidance is consistent.
+- [2026-02-21 10:25 UTC] Test status: `pytest --override-ini addopts=''` passing (`31 passed`).

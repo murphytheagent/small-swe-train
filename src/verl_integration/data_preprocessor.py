@@ -19,9 +19,13 @@ def _parse_assistant_response(assistant_response: str, *, max_tool_calls: int) -
     return parse_assistant_turn_payload(stripped, max_tool_calls=max_tool_calls)
 
 
-def _adapt_external_calls(external_calls: Sequence[Mapping[str, Any]]) -> tuple[ToolCall, ...]:
+def _adapt_external_calls(external_calls: Sequence[Any]) -> tuple[ToolCall, ...]:
     adapted_calls: list[ToolCall] = []
-    for raw_call in external_calls:
+    for call_index, raw_call in enumerate(external_calls):
+        if not isinstance(raw_call, Mapping):
+            raise ValueError(
+                f"external_tool_calls[{call_index}] must be a mapping with 'tool' and 'args'."
+            )
         tool_name = raw_call.get("tool")
         args = raw_call.get("args", {})
         if not isinstance(tool_name, str):
@@ -88,7 +92,9 @@ def preprocess_trajectories(
                 tool_calls = envelope.tool_calls
             else:
                 external_calls = sample.get("external_tool_calls", [])
-                if not isinstance(external_calls, Sequence):
+                if isinstance(external_calls, (str, bytes)) or not isinstance(
+                    external_calls, Sequence
+                ):
                     raise ValueError("external_tool_calls must be a sequence of call objects")
                 tool_calls = _adapt_external_calls(external_calls)
                 envelope = ActionEnvelope(tool_calls=tool_calls, thinking=sample.get("thinking"))

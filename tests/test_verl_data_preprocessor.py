@@ -76,3 +76,34 @@ def test_preprocess_trajectories_records_parse_error() -> None:
 
     assert rows[0]["format_valid"] is False
     assert rows[0]["parse_error"] is not None
+
+
+def test_preprocess_trajectories_records_parse_error_for_non_mapping_external_call() -> None:
+    trajectories = [
+        {
+            "prompt": "Submit answer",
+            "assistant_response": "",
+            "external_tool_calls": ["submit"],
+        }
+    ]
+
+    rows = preprocess_trajectories(trajectories)
+
+    assert rows[0]["format_valid"] is False
+    assert rows[0]["parse_error"] is not None
+    assert "external_tool_calls[0]" in rows[0]["parse_error"]
+
+
+def test_preprocess_trajectories_rejects_string_external_tool_calls_field() -> None:
+    trajectories = [
+        {
+            "prompt": "Submit answer",
+            "assistant_response": "",
+            "external_tool_calls": "submit",
+        }
+    ]
+
+    rows = preprocess_trajectories(trajectories)
+
+    assert rows[0]["format_valid"] is False
+    assert rows[0]["parse_error"] == "external_tool_calls must be a sequence of call objects"

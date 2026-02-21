@@ -23,6 +23,7 @@ train = [
   "peft>=0.13",
   "vllm>=0.8.4",
   "ray>=2.40",
+  "verl @ git+https://github.com/lasgroup/SDPO.git",
   "omegaconf>=2.3",
   "hydra-core>=1.3",
   "wandb>=0.19",
