@@ -1,4 +1,4 @@
-"""SWE-bench Lite evaluation scaffold signatures."""
+"""SWE-bench Lite evaluation helpers."""
 
 from __future__ import annotations
 
@@ -13,10 +13,60 @@ class EpisodeResult:
     summary: str
 
 
+def _prediction_lookup(
+    predictions: Sequence[Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    lookup: dict[str, Mapping[str, Any]] = {}
+    for prediction in predictions:
+        instance_id = prediction.get("instance_id")
+        if isinstance(instance_id, str) and instance_id:
+            lookup[instance_id] = prediction
+    return lookup
+
+
 def evaluate_swebench_lite(
     *,
     episodes: Sequence[Mapping[str, Any]],
     predictions: Sequence[Mapping[str, Any]],
 ) -> list[EpisodeResult]:
-    """Return per-episode evaluation records (scaffold only)."""
-    raise NotImplementedError("Benchmark evaluator wiring is not implemented yet.")
+    """Return per-episode resolution records from evaluator outputs.
+
+    A prediction resolves an episode when ``resolved`` is true, or when
+    ``score`` is a numeric value greater than or equal to 1.0.
+    """
+    predictions_by_instance = _prediction_lookup(predictions)
+
+    results: list[EpisodeResult] = []
+    for episode in episodes:
+        instance_id = str(episode.get("instance_id", "")).strip()
+        if not instance_id:
+            raise ValueError("Every episode must provide a non-empty 'instance_id'.")
+
+        prediction = predictions_by_instance.get(instance_id)
+        if prediction is None:
+            results.append(
+                EpisodeResult(
+                    instance_id=instance_id,
+                    resolved=False,
+                    summary="missing prediction",
+                )
+            )
+            continue
+
+        raw_score = prediction.get("score")
+        numeric_score = float(raw_score) if isinstance(raw_score, (int, float)) else None
+
+        resolved = bool(prediction.get("resolved", False))
+        if numeric_score is not None:
+            resolved = resolved or numeric_score >= 1.0
+
+        summary = str(prediction.get("summary") or ("resolved" if resolved else "unresolved"))
+        results.append(
+            EpisodeResult(
+                instance_id=instance_id,
+                resolved=resolved,
+                summary=summary,
+            )
+        )
+
+    return results
