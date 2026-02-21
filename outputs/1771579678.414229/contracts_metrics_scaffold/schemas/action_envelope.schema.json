@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "action_envelope.schema.json",
+  "title": "Small SWE Train Action Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "args"],
+  "properties": {
+    "tool": {
+      "type": "string",
+      "enum": ["bash", "search", "edit", "submit"]
+    },
+    "args": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "bash"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "args": {
+            "$ref": "tool_args.schema.json#/$defs/bashArgs"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "search"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "args": {
+            "$ref": "tool_args.schema.json#/$defs/searchArgs"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "edit"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "args": {
+            "$ref": "tool_args.schema.json#/$defs/editArgs"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "tool": {
+            "const": "submit"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "args": {
+            "$ref": "tool_args.schema.json#/$defs/submitArgs"
+          }
+        }
+      }
+    }
+  ]
+}

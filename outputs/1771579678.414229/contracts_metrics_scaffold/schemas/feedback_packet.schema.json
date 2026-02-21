@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "feedback_packet.schema.json",
+  "title": "Small SWE Train Feedback Packet v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "step_index",
+    "tool",
+    "tool_input",
+    "tool_output",
+    "self_containment_checks"
+  ],
+  "properties": {
+    "step_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "tool": {
+      "type": "string",
+      "enum": ["bash", "search", "edit", "submit"]
+    },
+    "tool_input": {
+      "type": "object"
+    },
+    "tool_output": {
+      "type": "object",
+      "properties": {
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": true
+    },
+    "self_containment_checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "has_failing_artifact_identity",
+        "has_actionable_error_text",
+        "has_localization_hint"
+      ],
+      "properties": {
+        "has_failing_artifact_identity": {
+          "type": "boolean"
+        },
+        "has_actionable_error_text": {
+          "type": "boolean"
+        },
+        "has_localization_hint": {
+          "type": "boolean"
+        }
+      }
+    },
+    "is_self_contained": {
+      "type": "boolean",
+      "description": "True iff all three self-containment checks are true."
+    },
+    "include_student_attempt_for_teacher": {
+      "type": "boolean",
+      "description": "True when feedback is not self-contained."
+    }
+  }
+}

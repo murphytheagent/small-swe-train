@@ -1,0 +1,53 @@
+{
+  "generated_utc": "2026-02-21 03:43 UTC",
+  "thread_ts": "1771579678.414229",
+  "pipeline": {
+    "pre_main_sequence": [
+      "rft",
+      "sdft_optional",
+      "sdpo_main"
+    ],
+    "sdft_enabled_default": true,
+    "sdft_token_budget_fraction_range": [
+      0.05,
+      0.1
+    ]
+  },
+  "teacher": {
+    "regularization": "ema",
+    "ema_beta_default": 0.005,
+    "ema_beta_sweep": [
+      0.001,
+      0.01
+    ],
+    "top_k_distillation": {
+      "k": 100,
+      "schedule_enabled": false
+    },
+    "include_student_attempt_when_feedback_not_self_contained": true
+  },
+  "feedback_processing": {
+    "deterministic_truncation": {
+      "head_tokens": 768,
+      "tail_tokens": 768,
+      "apply_after_payload_canonicalization": true,
+      "apply_before_teacher_prompt_wrapping": true
+    }
+  },
+  "adaptation": {
+    "mode": "lora",
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj"
+    ],
+    "compute_precision": "bf16"
+  },
+  "runtime": {
+    "sandbox": "docker",
+    "internet_access": true,
+    "filesystem_access": "read_write",
+    "bash_policy": "allowlist_and_denylist"
+  }
+}
