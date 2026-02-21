@@ -1,0 +1,45 @@
+# verl config for RFT (Rejection Fine-Tuning) pre-training stage
+# Supervised cross-entropy on formatted tool-call trajectories from SWE-smith.
+# Think tokens are EXCLUDED from loss (§6 masking policy).
+#
+# Hardware target: single node, 8× A100/H100 GPUs
+# Model: Qwen3-4B with LoRA
+#
+# This stage must pass format quality gates before entering step-SDPO.
+# Gate thresholds are in configs/runtime/phase_transition_gates.v1.json.
+
+defaults:
+  - sft_trainer
+  - user
+  - _self_
+
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen3-4B
+    enable_gradient_checkpointing: true
+
+  actor:
+    optim:
+      lr: 5.0e-5
+      lr_warmup_steps: 50
+      weight_decay: 0.01
+      lr_scheduler_type: cosine
+
+    grad_clip: 1.0
+
+    fsdp_config:
+      dtype: bfloat16
+
+    use_remove_padding: true
+
+# Maximum sequence length for RFT data (shorter than SDPO — no reprompt overhead)
+max_model_len: 12288
+
+data:
+  train_batch_size: 64
+  max_epochs: 3
+
+trainer:
+  save_freq: 200
+  val_freq: 100
+  group_name: small-swe-rft

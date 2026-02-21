@@ -98,11 +98,16 @@ Computed from canonical feedback fields: `has_failing_artifact_identity`, `has_a
 
 ```text
 small-swe-train/
+  IMPLEMENTATION_BLUEPRINT.md    # architecture, data flow, milestones
   pyproject.toml
   configs/
     runtime/
       training_policy_defaults.v1.json
       phase_transition_gates.v1.json
+    verl/                        # verl/SDPO training configs
+      sdpo_swe.yaml              # step-SDPO (main objective)
+      rft_swe.yaml               # RFT supervised pre-training
+      user.yaml                  # user-local path overrides
     data/
     experiments/
   src/
@@ -130,6 +135,12 @@ small-swe-train/
       contracts.py             # FormatMetrics, rate()
     eval/
       swebench_lite.py         # STUB — EpisodeResult
+    verl_integration/            # adapter layer: our modules ↔ verl
+      reward_function.py         # PLANNED — verl reward_fn
+      reprompt_adapter.py        # PLANNED — 6-block teacher prompt
+      mask_injector.py           # PLANNED — stage-aware response_mask
+      env_bridge.py              # PLANNED — Docker sandbox bridge
+      data_preprocessor.py       # PLANNED — SWE trajectories → parquet
   scripts/
     prepare_rft_data.py
     run_rft.sh
@@ -202,7 +213,30 @@ small-swe-train/
 
 5. **Step-SDPO loop** — the main training objective. Depends on (3) for format quality gates and (4) for on-policy rollouts.
 
-## 12) Sources
+## 12) Training infrastructure decision
+
+### 12.1 Framework
+- **Trainer & rollout**: `lasgroup/SDPO` (a fork of [verl](https://github.com/verl-project/verl)) used as-is.
+- **Rollout engine**: vLLM (via verl's colocated rollout worker).
+- **Training engine**: FSDP `FULL_SHARD` across 8 GPUs (via verl's `DataParallelPPOActor`).
+- FSDP is needed not for model size (Qwen3-4B ≈ 8 GB bf16) but for **activation memory headroom** with long SWE-bench trajectories (8K–16K tokens).
+
+### 12.2 Hardware target
+- Single node, 8× A100 or H100 GPUs (80 GB each).
+- GPUs alternate between vLLM inference and FSDP training each global step.
+
+### 12.3 Config files
+- `configs/verl/sdpo_swe.yaml` — step-SDPO training (main objective).
+- `configs/verl/rft_swe.yaml` — RFT supervised pre-training.
+- `configs/verl/user.yaml` — user-local path overrides.
+
+### 12.4 Integration layer
+- New package `src/verl_integration/` bridges our protocol modules with verl hooks.
+- Full architecture, data flow, and milestone plan in `IMPLEMENTATION_BLUEPRINT.md`.
+
+## 13) Sources
 - Qwen3 tokenizer chat template: https://huggingface.co/Qwen/Qwen3-4B/blob/main/tokenizer_config.json
 - SDPO baseline: https://github.com/lasgroup/SDPO
+- verl framework: https://github.com/verl-project/verl
 - Thread review: https://github.com/murphytheagent/small-swe-train/pull/2#discussion_r2835868321
+- Implementation blueprint: `IMPLEMENTATION_BLUEPRINT.md` (this repo)
