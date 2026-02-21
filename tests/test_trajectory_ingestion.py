@@ -434,3 +434,32 @@ def test_run_ingestion_zero_max_episodes_skips_tokenizer(tmp_path: Path, monkeyp
     assert stats == {"raw_records": 1, "episodes_ingested": 0, "records_written": 0}
     assert output_path.exists()
     assert output_path.read_text(encoding="utf-8") == ""
+
+
+def test_run_ingestion_rejects_negative_max_episodes(tmp_path: Path) -> None:
+    input_path = tmp_path / "records.jsonl"
+    input_path.write_text(
+        json.dumps(
+            {
+                "instance_id": "ok-1",
+                "trajectory": [
+                    {
+                        "tool": "bash",
+                        "args": {"command": "echo ok"},
+                        "output": {"stdout": "ok", "exit_code": 0},
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "prepared.jsonl"
+
+    with pytest.raises(ValueError, match=r"max_episodes must be >= 0"):
+        run_ingestion(
+            input_path=input_path,
+            output_path=output_path,
+            tokenizer_model="ignored-for-test",
+            max_episodes=-1,
+        )

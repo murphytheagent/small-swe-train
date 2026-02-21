@@ -228,6 +228,9 @@ def run_ingestion(
     max_episodes: int | None = None,
 ) -> dict[str, int]:
     """Run end-to-end ingestion and return summary stats."""
+    if max_episodes is not None and max_episodes < 0:
+        raise ValueError(f"max_episodes must be >= 0; got {max_episodes}")
+
     raw_records = load_raw_records(input_path)
     raw_record_count = len(raw_records)
     records_for_ingestion: Sequence[Mapping[str, Any]] = raw_records
