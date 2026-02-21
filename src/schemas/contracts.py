@@ -1,12 +1,18 @@
-"""Typed protocol contracts shared across parser, adapters, and trainer scaffolds."""
+"""Typed protocol contracts shared across parser, adapters, and trainer scaffolds.
+
+This module is the **single source of truth** for tool names, argument shapes,
+and validation constraints.  ``TOOL_SCHEMAS`` is the registry;
+``validate_tool_call()`` checks a parsed ``ToolCall`` against it.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping, TypedDict, cast
+from typing import Any, Literal, Mapping, TypedDict, cast, get_type_hints
 
 AllowedTool = Literal["bash", "search", "edit", "submit"]
-_ALLOWED_TOOLS = {"bash", "search", "edit", "submit"}
+ALLOWED_TOOLS: tuple[str, ...] = ("bash", "search", "edit", "submit")
+_ALLOWED_TOOLS = set(ALLOWED_TOOLS)
 
 
 class BashArgs(TypedDict, total=False):
@@ -174,3 +180,108 @@ def make_tool_call(payload: Mapping[str, Any]) -> ToolCall:
     if not isinstance(tool_raw, str):
         raise ValueError("'tool' must be a string.")
     return ToolCall(tool=canonical_tool_name(tool_raw), args=dict(args))
+
+
+# ---------------------------------------------------------------------------
+# Tool schema registry + validator
+# ---------------------------------------------------------------------------
+# Each entry maps a canonical tool name to:
+#   source      – TypedDict defining the allowed fields and their types
+#   required    – which fields must be present
+#   constraints – per-field validation rules (min_length, minimum, maximum)
+# ---------------------------------------------------------------------------
+
+TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "bash": {
+        "source": BashArgs,
+        "required": ["command"],
+        "constraints": {
+            "command": {"min_length": 1},
+            "cwd": {"min_length": 1},
+            "timeout_sec": {"minimum": 1, "maximum": 600},
+        },
+    },
+    "search": {
+        "source": SearchArgs,
+        "required": ["query"],
+        "constraints": {
+            "query": {"min_length": 1},
+            "top_k": {"minimum": 1, "maximum": 50},
+        },
+    },
+    "edit": {
+        "source": EditArgs,
+        "required": ["path", "patch"],
+        "constraints": {
+            "path": {"min_length": 1},
+            "patch": {"min_length": 1},
+        },
+    },
+    "submit": {
+        "source": SubmitArgs,
+        "required": ["final_response"],
+        "constraints": {
+            "final_response": {"min_length": 1},
+            "confidence": {"minimum": 0.0, "maximum": 1.0},
+        },
+    },
+}
+
+_TYPE_MAP: dict[type, tuple[type, ...]] = {
+    str: (str,),
+    int: (int,),
+    float: (int, float),
+    bool: (bool,),
+}
+
+
+def validate_tool_call(tool_call: ToolCall) -> list[str]:
+    """Validate *tool_call* against ``TOOL_SCHEMAS``.
+
+    Returns a list of human-readable error strings.  Empty list means valid.
+    """
+    schema = TOOL_SCHEMAS.get(tool_call.tool)
+    if schema is None:
+        return [f"Unknown tool: {tool_call.tool!r}"]
+
+    errors: list[str] = []
+    hints = get_type_hints(schema["source"])
+    allowed_fields = set(hints)
+    required = set(schema.get("required", ()))
+    constraints: dict[str, dict[str, Any]] = schema.get("constraints", {})
+
+    for key in tool_call.args:
+        if key not in allowed_fields:
+            errors.append(f"Unknown arg '{key}' for tool '{tool_call.tool}'")
+
+    for key in required:
+        if key not in tool_call.args:
+            errors.append(f"Missing required arg '{key}' for tool '{tool_call.tool}'")
+
+    for key, value in tool_call.args.items():
+        if key not in allowed_fields:
+            continue
+
+        expected = hints[key]
+        origin = getattr(expected, "__origin__", None)
+        acceptable = _TYPE_MAP.get(expected if origin is None else origin)
+        if acceptable and not isinstance(value, acceptable):
+            errors.append(
+                f"Arg '{key}': expected {expected.__name__}, "
+                f"got {type(value).__name__}"
+            )
+
+        c = constraints.get(key, {})
+        if isinstance(value, str):
+            ml = c.get("min_length")
+            if ml is not None and len(value) < ml:
+                errors.append(f"Arg '{key}': length must be >= {ml}")
+        if isinstance(value, (int, float)):
+            lo = c.get("minimum")
+            hi = c.get("maximum")
+            if lo is not None and value < lo:
+                errors.append(f"Arg '{key}': must be >= {lo}")
+            if hi is not None and value > hi:
+                errors.append(f"Arg '{key}': must be <= {hi}")
+
+    return errors

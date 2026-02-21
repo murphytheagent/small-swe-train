@@ -25,3 +25,4 @@ class EnvironmentStep:
     step_index: int
     request: ToolRequest
     response: ToolResponse
+    thinking: str | None = None

@@ -1,0 +1,10 @@
+model_family: qwen3
+delimiters:
+  role_start: "<|im_start|>"
+  role_end: "<|im_end|>"
+  think_start: "<think>"
+  think_end: "</think>"
+  tool_call_start: "<tool_call>"
+  tool_call_end: "</tool_call>"
+  tool_response_start: "<tool_response>"
+  tool_response_end: "</tool_response>"
