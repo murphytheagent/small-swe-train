@@ -66,3 +66,18 @@ def test_reward_fn_handles_invalid_step_index_without_aborting_batch() -> None:
     assert rewards == [0.0, 1.0]
     assert "step_index must be an integer >= 0" in info["validation_errors"][0]
     assert "STDOUT:" in info["feedback"][1]
+
+
+def test_reward_fn_treats_string_false_resolved_as_unresolved() -> None:
+    data = [
+        {
+            "response_text": "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"needle\"}}</tool_call>",
+            "resolved": "false",
+        }
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [0.0]
+    assert info["parse_valid"] == [True]
+    assert info["validation_errors"] == [[]]

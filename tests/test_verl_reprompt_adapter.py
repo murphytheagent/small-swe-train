@@ -61,3 +61,26 @@ def test_build_self_distillation_batch_falls_back_on_invalid_step_index() -> Non
     assert batch["self_distillation_mask"] == [True]
     assert batch["step_index_warnings"] == ["step_index must be an integer >= 0"]
     assert batch["feedback_packets"][0]["step_index"] == 0
+
+
+def test_build_self_distillation_batch_treats_false_string_as_unresolved(monkeypatch) -> None:
+    def _stub_prompt_builder(
+        sample,
+        *,
+        step_index,
+        include_student_attempt_for_teacher,
+        max_reprompt_len,
+    ):
+        _ = (sample, step_index, include_student_attempt_for_teacher, max_reprompt_len)
+        return "prompt", False, {"feedback_packet": {}, "prompt_truncated": False}
+
+    monkeypatch.setattr(
+        "verl_integration.reprompt_adapter._build_prompt_for_sample",
+        _stub_prompt_builder,
+    )
+
+    samples = [{"resolved": "false"}]
+
+    batch = build_self_distillation_batch(samples)
+
+    assert batch["self_distillation_mask"] == [False]

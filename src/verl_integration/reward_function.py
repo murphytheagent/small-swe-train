@@ -9,6 +9,9 @@ from metrics.contracts import FormatMetrics, rate
 from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
 from schemas import ActionEnvelope, validate_tool_call
 
+_TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
+_FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
+
 
 def _parse_response_text(response_text: str, *, max_tool_calls: int) -> ActionEnvelope:
     stripped = response_text.strip()
@@ -48,6 +51,24 @@ def _coerce_step_index(value: Any, *, fallback: int) -> int:
     return coerced
 
 
+def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, float):
+        return value != 0.0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+    return fallback
+
+
 def reward_fn(
     data: Sequence[Mapping[str, Any]],
     *,
@@ -74,7 +95,7 @@ def reward_fn(
 
     for index, sample in enumerate(data):
         response_text = str(sample.get("response_text") or sample.get("assistant_response") or "")
-        resolved = bool(sample.get("resolved", False))
+        resolved = _coerce_bool_flag(sample.get("resolved"), fallback=False)
 
         sample_errors: list[str] = []
         parse_valid = True
@@ -131,8 +152,9 @@ def reward_fn(
                 tool=first_call.tool,
                 tool_input=first_call.args,
                 tool_output=tool_output,
-                include_student_attempt_for_teacher=bool(
-                    sample.get("include_student_attempt_for_teacher", True)
+                include_student_attempt_for_teacher=_coerce_bool_flag(
+                    sample.get("include_student_attempt_for_teacher"),
+                    fallback=True,
                 ),
             )
             feedback_text = (

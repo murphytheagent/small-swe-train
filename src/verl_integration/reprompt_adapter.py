@@ -7,6 +7,9 @@ from typing import Any, Mapping, Sequence
 from data.feedback_canonicalizer import build_feedback_packet
 from teacher.prompt_builder import TeacherPromptInputs, build_teacher_prompt
 
+_TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
+_FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
+
 
 def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str, bool]:
     if max_reprompt_len <= 0:
@@ -43,6 +46,24 @@ def _coerce_step_index(value: Any, *, fallback: int) -> int:
     if coerced < 0:
         raise ValueError("step_index must be an integer >= 0")
     return coerced
+
+
+def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, float):
+        return value != 0.0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+    return fallback
 
 
 def _build_prompt_for_sample(
@@ -143,7 +164,7 @@ def build_self_distillation_batch(
 
         # Keep alignment with SDPO batch semantics: enable distillation only
         # when we have either explicit success labels or actionable feedback.
-        sample_resolved = bool(sample.get("resolved", False))
+        sample_resolved = _coerce_bool_flag(sample.get("resolved"), fallback=False)
         self_distillation_mask.append(sample_resolved or has_teacher_signal)
 
         feedback_packets.append(metadata["feedback_packet"])

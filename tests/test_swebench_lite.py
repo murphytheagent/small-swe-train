@@ -62,3 +62,14 @@ def test_compare_resolve_rates_returns_delta() -> None:
     assert comparison["baseline_resolve_rate"] == 0.5
     assert comparison["candidate_resolve_rate"] == 1.0
     assert comparison["resolve_rate_delta"] == 0.5
+
+
+def test_evaluate_swebench_lite_treats_false_string_as_unresolved() -> None:
+    results = evaluate_swebench_lite(
+        episodes=[{"instance_id": "swe-1"}],
+        predictions=[{"instance_id": "swe-1", "resolved": "false"}],
+    )
+
+    assert len(results) == 1
+    assert results[0].resolved is False
+    assert results[0].summary == "unresolved"

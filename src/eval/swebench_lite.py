@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+_TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
+_FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
+
 
 @dataclass(frozen=True)
 class EpisodeResult:
@@ -30,6 +33,24 @@ def _prediction_lookup(
         if isinstance(instance_id, str) and instance_id:
             lookup[instance_id] = prediction
     return lookup
+
+
+def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, float):
+        return value != 0.0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+    return fallback
 
 
 def evaluate_swebench_lite(
@@ -64,7 +85,7 @@ def evaluate_swebench_lite(
         raw_score = prediction.get("score")
         numeric_score = float(raw_score) if isinstance(raw_score, (int, float)) else None
 
-        resolved = bool(prediction.get("resolved", False))
+        resolved = _coerce_bool_flag(prediction.get("resolved"), fallback=False)
         if numeric_score is not None:
             resolved = resolved or numeric_score >= 1.0
 

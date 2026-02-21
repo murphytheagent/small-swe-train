@@ -545,3 +545,5 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-21 19:03 UTC] Extended evaluation harness with resolve-rate summaries/comparisons plus CLI (`scripts/eval_swebench_lite.py`) and non-invasive launcher dry-run checks for `run_rft.sh`, `run_sdft.sh`, `run_sdpo.sh`.
 - [2026-02-21 19:03 UTC] Added deterministic end-to-end scaffold in `SDPOTrainerScaffold.run_end_to_end_global_step` covering rollout bridge, reward, reprompt assembly, SDPO step stats, and EMA-proxy updates.
 - [2026-02-21 19:03 UTC] Test status: `pytest --override-ini addopts=''` passing (`44 passed`).
+- [2026-02-21 23:32 UTC] Addressed new PR review findings on string-typed `resolved` values by adding explicit bool coercion in `src/verl_integration/reward_function.py`, `src/verl_integration/reprompt_adapter.py`, and `src/eval/swebench_lite.py`, with regressions in `tests/test_verl_reward_function.py`, `tests/test_verl_reprompt_adapter.py`, and `tests/test_swebench_lite.py`.
+- [2026-02-21 23:32 UTC] Test status: `pytest --override-ini addopts=''` passing (`67 passed, 1 skipped`).
