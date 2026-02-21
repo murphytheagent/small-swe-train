@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "feedback_packet.schema.json",
+  "title": "Small SWE Train Feedback Packet v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "step_index",
+    "tool",
+    "tool_input",
+    "tool_output",
+    "canonical_feedback",
+    "self_containment_checks",
+    "is_self_contained",
+    "include_student_attempt_for_teacher"
+  ],
+  "properties": {
+    "step_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "tool": {
+      "type": "string",
+      "enum": ["bash", "search", "edit", "submit"]
+    },
+    "tool_input": {
+      "type": "object"
+    },
+    "tool_output": {
+      "type": "object",
+      "properties": {
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": true
+    },
+    "canonical_feedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normalization_version",
+        "normalized_text",
+        "truncated",
+        "raw_sha256",
+        "artifact_identities",
+        "actionable_error_text",
+        "localization_hints"
+      ],
+      "properties": {
+        "normalization_version": {
+          "type": "string"
+        },
+        "normalized_text": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifact_identities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "actionable_error_text": {
+          "type": ["string", "null"]
+        },
+        "localization_hints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "self_containment_checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "has_failing_artifact_identity",
+        "has_actionable_error_text",
+        "has_localization_hint"
+      ],
+      "properties": {
+        "has_failing_artifact_identity": {
+          "type": "boolean"
+        },
+        "has_actionable_error_text": {
+          "type": "boolean"
+        },
+        "has_localization_hint": {
+          "type": "boolean"
+        }
+      }
+    },
+    "is_self_contained": {
+      "type": "boolean",
+      "description": "Derived: true iff all three self-containment checks are true."
+    },
+    "include_student_attempt_for_teacher": {
+      "type": "boolean",
+      "default": true,
+      "description": "Runtime policy flag. v1.6 default is true (always include); retained for future ablations."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "self_containment_checks": {
+            "type": "object",
+            "properties": {
+              "has_failing_artifact_identity": {
+                "const": true
+              },
+              "has_actionable_error_text": {
+                "const": true
+              },
+              "has_localization_hint": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "is_self_contained": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "anyOf": [
+          {
+            "properties": {
+              "self_containment_checks": {
+                "properties": {
+                  "has_failing_artifact_identity": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "self_containment_checks": {
+                "properties": {
+                  "has_actionable_error_text": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "self_containment_checks": {
+                "properties": {
+                  "has_localization_hint": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "is_self_contained": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}
