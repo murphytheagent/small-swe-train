@@ -233,8 +233,10 @@ def run_ingestion(
     if max_episodes is not None:
         records_for_ingestion = raw_records[:max_episodes]
     episodes = build_episodes(records_for_ingestion)
-    tokenizer = load_qwen_tokenizer(tokenizer_model)
-    training_records = build_training_records(episodes, tokenizer=tokenizer)
+    training_records: list[dict[str, Any]] = []
+    if episodes:
+        tokenizer = load_qwen_tokenizer(tokenizer_model)
+        training_records = build_training_records(episodes, tokenizer=tokenizer)
     write_training_records(training_records, output_path)
     return {
         "raw_records": raw_record_count,
@@ -323,21 +325,29 @@ def _entries_from_history(history: Sequence[Any]) -> Iterable[_StepEntry]:
             pending_calls = _extract_tool_calls_from_payload(item)
             if not pending_calls:
                 continue
-            direct_output = _extract_tool_output(
-                item,
-                call=None,
-                call_index=0,
-                include_content_fallback=False,
-            )
-            if direct_output:
-                for call_entry in pending_calls:
+            emitted_inline = False
+            remaining_calls: list[_ToolCallEntry] = []
+            allow_scalar_step_output = len(pending_calls) == 1
+            for call_index, call_entry in enumerate(pending_calls):
+                inline_output = _extract_tool_output(
+                    item,
+                    call=call_entry.source,
+                    call_index=call_index,
+                    include_content_fallback=False,
+                    include_step_output_fallback=allow_scalar_step_output,
+                )
+                if inline_output:
+                    emitted_inline = True
                     yield _StepEntry(
                         tool_name=call_entry.tool_name,
                         args=call_entry.args,
-                        tool_output=direct_output,
+                        tool_output=inline_output,
                         thinking=call_entry.thinking,
                     )
-                pending_calls = []
+                    continue
+                remaining_calls.append(call_entry)
+            if emitted_inline:
+                pending_calls = remaining_calls
             continue
 
         if role in {"tool", "environment", "observation"} and pending_calls:
@@ -515,6 +525,7 @@ def _extract_tool_output(
     call: Mapping[str, Any] | None,
     call_index: int,
     include_content_fallback: bool = True,
+    include_step_output_fallback: bool = True,
 ) -> dict[str, Any]:
     if call is not None:
         for key in _TOOL_OUTPUT_KEYS:
@@ -527,9 +538,10 @@ def _extract_tool_output(
             if call_index < len(value):
                 return _coerce_tool_output(value[call_index])
 
-    for key in _TOOL_OUTPUT_KEYS:
-        if key in step:
-            return _coerce_tool_output(step.get(key))
+    if include_step_output_fallback:
+        for key in _TOOL_OUTPUT_KEYS:
+            if key in step:
+                return _coerce_tool_output(step.get(key))
 
     if include_content_fallback and "content" in step:
         return _coerce_tool_output(step.get("content"))

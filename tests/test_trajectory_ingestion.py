@@ -123,6 +123,35 @@ def test_history_uses_tool_message_over_assistant_empty_content() -> None:
     assert episode.environment_steps[0].response.stdout == "real tool output"
 
 
+def test_history_uses_per_call_inline_outputs() -> None:
+    record = {
+        "instance_id": "swe-bench-inline-per-call",
+        "history": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "name": "bash",
+                        "arguments": {"command": "echo first"},
+                        "output": {"stdout": "first output", "exit_code": 0},
+                    },
+                    {
+                        "name": "bash",
+                        "arguments": {"command": "echo second"},
+                        "output": {"stdout": "second output", "exit_code": 0},
+                    },
+                ],
+            }
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert len(episode.environment_steps) == 2
+    assert episode.environment_steps[0].response.stdout == "first output"
+    assert episode.environment_steps[1].response.stdout == "second output"
+
+
 def test_step_prefers_non_empty_trajectory_variant() -> None:
     record = {
         "instance_id": "trajectory-fallback",
@@ -294,3 +323,40 @@ def test_run_ingestion_respects_max_episodes_before_parsing(tmp_path: Path, monk
     assert stats == {"raw_records": 2, "episodes_ingested": 1, "records_written": 1}
     lines = output_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
+
+
+def test_run_ingestion_zero_max_episodes_skips_tokenizer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    input_path = tmp_path / "records.jsonl"
+    input_path.write_text(
+        json.dumps(
+            {
+                "instance_id": "ok-1",
+                "trajectory": [
+                    {
+                        "tool": "bash",
+                        "args": {"command": "echo ok"},
+                        "output": {"stdout": "ok", "exit_code": 0},
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "prepared.jsonl"
+
+    def _should_not_load(_: str) -> CharTokenizer:
+        raise AssertionError("tokenizer should not be loaded when no episodes are selected")
+
+    monkeypatch.setattr("data.trajectory_ingestion.load_qwen_tokenizer", _should_not_load)
+
+    stats = run_ingestion(
+        input_path=input_path,
+        output_path=output_path,
+        tokenizer_model="ignored-for-test",
+        max_episodes=0,
+    )
+
+    assert stats == {"raw_records": 1, "episodes_ingested": 0, "records_written": 0}
+    assert output_path.exists()
+    assert output_path.read_text(encoding="utf-8") == ""
