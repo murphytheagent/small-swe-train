@@ -54,6 +54,33 @@ def _labels_from_envelope(envelope: ActionEnvelope) -> list[str]:
     return labels
 
 
+def _coerce_step_index(value: Any, *, fallback: int) -> int:
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        raise ValueError("step_index must be an integer >= 0")
+    if isinstance(value, int):
+        coerced = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError("step_index must be an integer >= 0")
+        coerced = int(value)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return fallback
+        try:
+            coerced = int(stripped)
+        except ValueError as exc:
+            raise ValueError("step_index must be an integer >= 0") from exc
+    else:
+        raise ValueError("step_index must be an integer >= 0")
+
+    if coerced < 0:
+        raise ValueError("step_index must be an integer >= 0")
+    return coerced
+
+
 def preprocess_trajectories(
     trajectories: Sequence[Mapping[str, Any]],
     *,
@@ -75,7 +102,6 @@ def preprocess_trajectories(
             assistant_response = assistant_response_raw
         else:
             assistant_response = str(assistant_response_raw)
-        step_index = int(sample.get("step_index", index))
         include_student_attempt_for_teacher = bool(
             sample.get("include_student_attempt_for_teacher", True)
         )
@@ -84,6 +110,7 @@ def preprocess_trajectories(
         parse_error: str | None = None
 
         try:
+            step_index = _coerce_step_index(sample.get("step_index"), fallback=index)
             if assistant_response:
                 envelope = _parse_assistant_response(
                     assistant_response,

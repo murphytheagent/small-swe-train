@@ -13,6 +13,14 @@ class EpisodeResult:
     summary: str
 
 
+@dataclass(frozen=True)
+class EvaluationSummary:
+    total_episodes: int
+    resolved_episodes: int
+    unresolved_episodes: int
+    resolve_rate: float
+
+
 def _prediction_lookup(
     predictions: Sequence[Mapping[str, Any]],
 ) -> dict[str, Mapping[str, Any]]:
@@ -70,3 +78,34 @@ def evaluate_swebench_lite(
         )
 
     return results
+
+
+def summarize_episode_results(results: Sequence[EpisodeResult]) -> EvaluationSummary:
+    total_episodes = len(results)
+    resolved_episodes = sum(1 for result in results if result.resolved)
+    unresolved_episodes = total_episodes - resolved_episodes
+    resolve_rate = (resolved_episodes / total_episodes) if total_episodes else 0.0
+    return EvaluationSummary(
+        total_episodes=total_episodes,
+        resolved_episodes=resolved_episodes,
+        unresolved_episodes=unresolved_episodes,
+        resolve_rate=resolve_rate,
+    )
+
+
+def compare_resolve_rates(
+    *,
+    baseline_results: Sequence[EpisodeResult],
+    candidate_results: Sequence[EpisodeResult],
+) -> dict[str, float | int]:
+    baseline = summarize_episode_results(baseline_results)
+    candidate = summarize_episode_results(candidate_results)
+    return {
+        "baseline_resolve_rate": baseline.resolve_rate,
+        "candidate_resolve_rate": candidate.resolve_rate,
+        "resolve_rate_delta": candidate.resolve_rate - baseline.resolve_rate,
+        "baseline_resolved": baseline.resolved_episodes,
+        "candidate_resolved": candidate.resolved_episodes,
+        "baseline_total": baseline.total_episodes,
+        "candidate_total": candidate.total_episodes,
+    }

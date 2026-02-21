@@ -21,6 +21,33 @@ def _thinking_delimiters_balanced(response_text: str) -> bool:
     return response_text.count("<think>") == response_text.count("</think>")
 
 
+def _coerce_step_index(value: Any, *, fallback: int) -> int:
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        raise ValueError("step_index must be an integer >= 0")
+    if isinstance(value, int):
+        coerced = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError("step_index must be an integer >= 0")
+        coerced = int(value)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return fallback
+        try:
+            coerced = int(stripped)
+        except ValueError as exc:
+            raise ValueError("step_index must be an integer >= 0") from exc
+    else:
+        raise ValueError("step_index must be an integer >= 0")
+
+    if coerced < 0:
+        raise ValueError("step_index must be an integer >= 0")
+    return coerced
+
+
 def reward_fn(
     data: Sequence[Mapping[str, Any]],
     *,
@@ -76,6 +103,12 @@ def reward_fn(
             allowed_tools_ok = all(call.tool in {"bash", "search", "edit", "submit"} for call in tool_calls)
             required_args_ok = all(not errors for errors in call_error_lists)
 
+        try:
+            step_index = _coerce_step_index(sample.get("step_index"), fallback=index)
+        except ValueError as exc:
+            step_index = index
+            sample_errors.append(str(exc))
+
         reward_value = 1.0 if resolved and parse_valid and not sample_errors else 0.0
         rewards.append(reward_value)
 
@@ -94,7 +127,7 @@ def reward_fn(
         elif isinstance(tool_output, Mapping) and envelope is not None:
             first_call = envelope.tool_calls[0]
             packet = build_feedback_packet(
-                step_index=int(sample.get("step_index", index)),
+                step_index=step_index,
                 tool=first_call.tool,
                 tool_input=first_call.args,
                 tool_output=tool_output,

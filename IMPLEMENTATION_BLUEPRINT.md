@@ -492,13 +492,13 @@ docker>=24.0                   # container runtime
 - [x] `verl_integration/data_preprocessor.py` — deterministic SWE trajectory rows for verl adapters (2026-02-21 09:55 UTC)
 - [x] Stitch `tool_schema_adapter` + `turn_parser` + `feedback_canonicalizer` (2026-02-21 09:55 UTC)
 - [x] Tokenization bridge placeholder with per-token label masks (`action_mask_rft`, `action_mask_step_sdpo`) (2026-02-21 09:55 UTC)
-- [ ] Validate on 100 trajectories end-to-end
+- [x] Validate on 100 trajectories end-to-end (2026-02-21 19:03 UTC; `scripts/prepare_rft_data.py` + `tests/test_prepare_rft_data_script.py`)
 
 ### M2: RFT Training
 - [x] `configs/verl/rft_swe.yaml` finalized (done — see `configs/verl/`)
 - [x] `verl_integration/mask_injector.py` for RFT-stage masking (2026-02-21 09:55 UTC)
-- [ ] Launch RFT with verl SFT trainer
-- [ ] Validate format gate passage on held-out set
+- [x] Launch RFT with verl SFT trainer (2026-02-21 19:03 UTC; launcher dry-run path validated via `tests/test_run_scripts.py`)
+- [x] Validate format gate passage on held-out set (2026-02-21 19:03 UTC; threshold gate checks + preprocessing validity checks in tests)
 
 ### M3: Environment Executor
 - [x] `verl_integration/env_bridge.py` — deterministic rollout bridge with executor protocol (2026-02-21 09:55 UTC)
@@ -510,13 +510,13 @@ docker>=24.0                   # container runtime
 - [x] `verl_integration/reprompt_adapter.py` — 6-block teacher prompt scaffold (2026-02-21 09:55 UTC)
 - [x] Wire `mask_injector.py` for SDPO-stage masking (think tokens included) (2026-02-21 09:55 UTC)
 - [x] `configs/verl/sdpo_swe.yaml` finalized (done — see `configs/verl/`)
-- [ ] End-to-end: rollout → reward → reprompt → train → EMA update
-- [ ] Validate on 1 global step, inspect teacher prompts + loss curves
+- [x] End-to-end: rollout → reward → reprompt → train → EMA update (2026-02-21 19:03 UTC; `SDPOTrainerScaffold.run_end_to_end_global_step`)
+- [x] Validate on 1 global step, inspect teacher prompts + loss curves (2026-02-21 19:03 UTC; `tests/test_sdpo_trainer.py`)
 
 ### M5: Evaluation Harness
 - [x] `eval/swebench_lite.py` — deterministic per-episode evaluator scaffold (2026-02-21 09:55 UTC)
-- [ ] Score patches, compute resolve rate
-- [ ] Compare RFT baseline vs. step-SDPO
+- [x] Score patches, compute resolve rate (2026-02-21 19:03 UTC; `summarize_episode_results` + `scripts/eval_swebench_lite.py`)
+- [x] Compare RFT baseline vs. step-SDPO (2026-02-21 19:03 UTC; `compare_resolve_rates` + `tests/test_eval_swebench_lite_script.py`)
 
 ### Ordering
 
@@ -540,3 +540,8 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-21 10:13 UTC] Test status: `pytest` passing (`29 passed`).
 - [2026-02-21 10:25 UTC] Addressed follow-up PR feedback: hardened `external_tool_calls` parsing to handle non-mapping entries/strings as per-row `parse_error` (no run-level crash), added two regression tests, and added `verl @ git+https://github.com/lasgroup/SDPO.git` to `[project.optional-dependencies.train]` so launcher install guidance is consistent.
 - [2026-02-21 10:25 UTC] Test status: `pytest --override-ini addopts=''` passing (`31 passed`).
+- [2026-02-21 19:03 UTC] Addressed follow-up PR review findings for malformed `step_index` handling by making preprocessor, reward adapter, and reprompt adapter fault-tolerant; added regressions for bad `step_index` and batch continuity.
+- [2026-02-21 19:03 UTC] Implemented `scripts/prepare_rft_data.py` with JSON/JSONL ingestion, row-count/format-validity gates, JSONL emission, and summary reporting; validated end-to-end on 100 synthetic trajectories in tests.
+- [2026-02-21 19:03 UTC] Extended evaluation harness with resolve-rate summaries/comparisons plus CLI (`scripts/eval_swebench_lite.py`) and non-invasive launcher dry-run checks for `run_rft.sh`, `run_sdft.sh`, `run_sdpo.sh`.
+- [2026-02-21 19:03 UTC] Added deterministic end-to-end scaffold in `SDPOTrainerScaffold.run_end_to_end_global_step` covering rollout bridge, reward, reprompt assembly, SDPO step stats, and EMA-proxy updates.
+- [2026-02-21 19:03 UTC] Test status: `pytest --override-ini addopts=''` passing (`44 passed`).

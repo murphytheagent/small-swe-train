@@ -43,3 +43,26 @@ def test_reward_fn_returns_zero_for_invalid_payload() -> None:
     assert info["parse_valid"] == [True]
     assert info["required_arg_presence"] == [False]
     assert info["validation_errors"][0]
+
+
+def test_reward_fn_handles_invalid_step_index_without_aborting_batch() -> None:
+    data = [
+        {
+            "response_text": "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"a\"}}</tool_call>",
+            "resolved": True,
+            "step_index": "nan",
+            "tool_output": {"stdout": "ok", "stderr": "", "exit_code": 0},
+        },
+        {
+            "response_text": "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"b\"}}</tool_call>",
+            "resolved": True,
+            "step_index": 4,
+            "tool_output": {"stdout": "ok", "stderr": "", "exit_code": 0},
+        },
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [0.0, 1.0]
+    assert "step_index must be an integer >= 0" in info["validation_errors"][0]
+    assert "STDOUT:" in info["feedback"][1]

@@ -18,6 +18,33 @@ def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str,
     return " ".join(tokens[:max_reprompt_len]), True
 
 
+def _coerce_step_index(value: Any, *, fallback: int) -> int:
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        raise ValueError("step_index must be an integer >= 0")
+    if isinstance(value, int):
+        coerced = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError("step_index must be an integer >= 0")
+        coerced = int(value)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return fallback
+        try:
+            coerced = int(stripped)
+        except ValueError as exc:
+            raise ValueError("step_index must be an integer >= 0") from exc
+    else:
+        raise ValueError("step_index must be an integer >= 0")
+
+    if coerced < 0:
+        raise ValueError("step_index must be an integer >= 0")
+    return coerced
+
+
 def _build_prompt_for_sample(
     sample: Mapping[str, Any],
     *,
@@ -96,11 +123,19 @@ def build_self_distillation_batch(
     self_distillation_mask: list[bool] = []
     feedback_packets: list[dict[str, Any]] = []
     prompt_truncated: list[bool] = []
+    step_index_warnings: list[str] = []
 
     for idx, sample in enumerate(samples):
+        warning = ""
+        try:
+            step_index = _coerce_step_index(sample.get("step_index"), fallback=idx)
+        except ValueError as exc:
+            step_index = idx
+            warning = str(exc)
+
         teacher_prompt, has_teacher_signal, metadata = _build_prompt_for_sample(
             sample,
-            step_index=int(sample.get("step_index", idx)),
+            step_index=step_index,
             include_student_attempt_for_teacher=include_student_attempt_for_teacher,
             max_reprompt_len=max_reprompt_len,
         )
@@ -113,10 +148,12 @@ def build_self_distillation_batch(
 
         feedback_packets.append(metadata["feedback_packet"])
         prompt_truncated.append(bool(metadata["prompt_truncated"]))
+        step_index_warnings.append(warning)
 
     return {
         "teacher_prompts": teacher_prompts,
         "self_distillation_mask": self_distillation_mask,
         "feedback_packets": feedback_packets,
         "prompt_truncated": prompt_truncated,
+        "step_index_warnings": step_index_warnings,
     }

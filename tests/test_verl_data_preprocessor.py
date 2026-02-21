@@ -107,3 +107,27 @@ def test_preprocess_trajectories_rejects_string_external_tool_calls_field() -> N
 
     assert rows[0]["format_valid"] is False
     assert rows[0]["parse_error"] == "external_tool_calls must be a sequence of call objects"
+
+
+def test_preprocess_trajectories_records_parse_error_for_non_numeric_step_index() -> None:
+    trajectories = [
+        {
+            "prompt": "bad index sample",
+            "step_index": "not-a-number",
+            "assistant_response": "",
+            "external_tool_calls": [{"tool": "answer", "args": {"answer": "fixed"}}],
+        },
+        {
+            "prompt": "valid fallback sample",
+            "assistant_response": "",
+            "external_tool_calls": [{"tool": "answer", "args": {"answer": "fixed"}}],
+        },
+    ]
+
+    rows = preprocess_trajectories(trajectories)
+
+    assert len(rows) == 2
+    assert rows[0]["format_valid"] is False
+    assert rows[0]["parse_error"] == "step_index must be an integer >= 0"
+    assert rows[1]["format_valid"] is True
+    assert rows[1]["parse_error"] is None

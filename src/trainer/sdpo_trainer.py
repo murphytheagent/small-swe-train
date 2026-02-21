@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from verl_integration.mask_injector import inject_response_mask
+from verl_integration.reprompt_adapter import build_self_distillation_batch
 from verl_integration.reward_function import reward_fn
+from verl_integration.env_bridge import ToolExecutor, run_env_bridge_step
 
 
 @dataclass(frozen=True)
@@ -25,11 +27,27 @@ class TrainingStepStats:
     format_valid_rate: float
 
 
+@dataclass(frozen=True)
+class EndToEndStepArtifacts:
+    training_stats: TrainingStepStats
+    rewards: tuple[float, ...]
+    feedback: tuple[str, ...]
+    teacher_prompts: tuple[str, ...]
+    self_distillation_mask: tuple[bool, ...]
+    format_metrics: Mapping[str, float]
+    prompt_truncated: tuple[bool, ...]
+    rollout_tool_response_blocks: tuple[tuple[str, ...], ...]
+    teacher_ema_proxy: float
+    loss_history: tuple[float, ...]
+
+
 class SDPOTrainerScaffold:
     """Deterministic trainer facade until full verl runtime wiring lands."""
 
     def __init__(self, config: SDPOTrainerConfig) -> None:
         self._config = config
+        self._teacher_ema_proxy = 0.0
+        self._loss_history: list[float] = []
 
     @property
     def config(self) -> SDPOTrainerConfig:
@@ -80,6 +98,96 @@ class SDPOTrainerScaffold:
             loss=1.0 - mean_reward,
             teacher_student_kl=teacher_student_kl,
             format_valid_rate=format_valid_rate,
+        )
+
+    def run_end_to_end_global_step(
+        self,
+        batch: Sequence[Mapping[str, Any]],
+        *,
+        executor: ToolExecutor | None = None,
+    ) -> EndToEndStepArtifacts:
+        """Run deterministic rollout -> reward -> reprompt -> train -> EMA update."""
+        if not batch:
+            empty_stats = TrainingStepStats(loss=0.0, teacher_student_kl=0.0, format_valid_rate=0.0)
+            return EndToEndStepArtifacts(
+                training_stats=empty_stats,
+                rewards=(),
+                feedback=(),
+                teacher_prompts=(),
+                self_distillation_mask=(),
+                format_metrics={},
+                prompt_truncated=(),
+                rollout_tool_response_blocks=(),
+                teacher_ema_proxy=self._teacher_ema_proxy,
+                loss_history=tuple(self._loss_history),
+            )
+
+        rollout_rows: list[dict[str, Any]] = []
+        rollout_tool_response_blocks: list[tuple[str, ...]] = []
+
+        for row_index, sample in enumerate(batch):
+            row = dict(sample)
+            response_text = str(row.get("response_text") or row.get("assistant_response") or "")
+            row.setdefault("response_text", response_text)
+            row.setdefault("assistant_response", response_text)
+
+            tool_blocks: tuple[str, ...] = ()
+            if executor is not None and response_text:
+                try:
+                    bridge_result = run_env_bridge_step(
+                        response_text,
+                        executor=executor,
+                        max_tool_calls=self._config.max_tool_calls_per_turn,
+                        step_index_start=row_index * self._config.max_tool_calls_per_turn,
+                    )
+                    tool_blocks = bridge_result.tool_response_blocks
+                    if "tool_output" not in row and bridge_result.steps:
+                        first_response = bridge_result.steps[0].response
+                        row["tool_output"] = {
+                            "stdout": first_response.stdout,
+                            "stderr": first_response.stderr,
+                            "exit_code": first_response.exit_code,
+                            "metadata": dict(first_response.metadata),
+                        }
+                except ValueError as exc:
+                    row["bridge_error"] = str(exc)
+
+            rollout_tool_response_blocks.append(tool_blocks)
+            rollout_rows.append(row)
+
+        rewards, info = reward_fn(
+            rollout_rows,
+            max_tool_calls=self._config.max_tool_calls_per_turn,
+        )
+        reprompt_batch = build_self_distillation_batch(
+            rollout_rows,
+            include_student_attempt_for_teacher=self._config.include_student_attempt_for_teacher,
+        )
+        training_stats = self.run_sdpo_step(rollout_rows)
+
+        mean_reward = sum(rewards) / len(rewards)
+        self._teacher_ema_proxy = (
+            (1.0 - self._config.ema_beta) * self._teacher_ema_proxy
+            + self._config.ema_beta * mean_reward
+        )
+        self._loss_history.append(training_stats.loss)
+
+        metrics = info.get("format_metrics", [{}])[0]
+        format_metrics: Mapping[str, float] = {
+            key: float(value) for key, value in metrics.items() if isinstance(value, (int, float))
+        }
+
+        return EndToEndStepArtifacts(
+            training_stats=training_stats,
+            rewards=tuple(rewards),
+            feedback=tuple(str(item) for item in info.get("feedback", [])),
+            teacher_prompts=tuple(str(item) for item in reprompt_batch["teacher_prompts"]),
+            self_distillation_mask=tuple(bool(item) for item in reprompt_batch["self_distillation_mask"]),
+            format_metrics=format_metrics,
+            prompt_truncated=tuple(bool(item) for item in reprompt_batch["prompt_truncated"]),
+            rollout_tool_response_blocks=tuple(rollout_tool_response_blocks),
+            teacher_ema_proxy=self._teacher_ema_proxy,
+            loss_history=tuple(self._loss_history),
         )
 
     def evaluate_format_gates(self, rollout_stats: Mapping[str, float]) -> bool:
