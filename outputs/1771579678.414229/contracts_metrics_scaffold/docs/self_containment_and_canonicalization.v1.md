@@ -1,6 +1,6 @@
-# Self-Containment and Canonicalization (v1)
+# Self-Containment and Canonicalization (v2)
 
-Generated: 2026-02-21 21:37 UTC
+Generated: 2026-02-21 06:24 UTC
 Thread: 1771579678.414229
 
 ## 1) Canonicalization objective
@@ -8,7 +8,7 @@ Thread: 1771579678.414229
 Convert raw environment/tool responses into a deterministic packet that:
 - preserves actionable failure signal,
 - is stable under noisy formatting changes,
-- supports programmatic teacher-context gating.
+- supports programmatic diagnostics for teacher-context quality.
 
 ## 2) Canonicalization pipeline
 
@@ -25,7 +25,7 @@ Pipeline:
 - apply head+tail policy after normalization (v1 default `H=768`, `T=768`).
 3. Structured extraction
 - `artifact_identities`: failing tests, file paths, command ids, stack signatures,
-- `actionable_error_text`: main error message span,
+- `actionable_error_text`: main error message span (`string | null`, always present as a key),
 - `localization_hints`: file:line, symbol names, failing test selectors.
 4. Canonical packet build
 - include normalization version and `raw_sha256` hash,
@@ -43,11 +43,12 @@ Rules:
 - `B = actionable_error_text is non-empty after boilerplate stripping`
 - `C = (len(localization_hints) > 0)`
 
-Derived flags:
+Derived flag:
 - `is_self_contained = A and B and C`
-- `include_student_attempt_for_teacher = not is_self_contained`
 
-These are enforced by schema constraints in `schemas/feedback_packet.schema.json`.
+Policy note (v1.6):
+- `include_student_attempt_for_teacher` remains in schema but is not derived from self-containment.
+- default runtime value is `true` (always include student attempt), with field retained for future extension.
 
 ## 4) Pseudocode
 
@@ -56,7 +57,7 @@ raw = collect_env_payload(tool_output)
 normalized = normalize(raw)
 truncated = head_tail(normalized, H=768, T=768)
 artifact_ids = extract_artifact_ids(truncated)
-error_text = extract_actionable_error(truncated)
+error_text = extract_actionable_error(truncated)  # string or None
 loc_hints = extract_localization_hints(truncated)
 
 A = len(artifact_ids) > 0
@@ -79,6 +80,6 @@ packet = {
     "has_localization_hint": C,
   },
   "is_self_contained": A and B and C,
-  "include_student_attempt_for_teacher": not (A and B and C),
+  "include_student_attempt_for_teacher": True,
 }
 ```

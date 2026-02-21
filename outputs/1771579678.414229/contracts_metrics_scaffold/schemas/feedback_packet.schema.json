@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "feedback_packet.schema.json",
-  "title": "Small SWE Train Feedback Packet v2",
+  "title": "Small SWE Train Feedback Packet v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -21,7 +21,7 @@
     },
     "tool": {
       "type": "string",
-      "enum": ["bash", "search", "edit", "answer"]
+      "enum": ["bash", "search", "edit", "submit"]
     },
     "tool_input": {
       "type": "object"
@@ -50,6 +50,7 @@
         "truncated",
         "raw_sha256",
         "artifact_identities",
+        "actionable_error_text",
         "localization_hints"
       ],
       "properties": {
@@ -107,11 +108,12 @@
     },
     "is_self_contained": {
       "type": "boolean",
-      "description": "Derived: true iff all self-containment checks are true."
+      "description": "Derived: true iff all three self-containment checks are true."
     },
     "include_student_attempt_for_teacher": {
       "type": "boolean",
-      "description": "Derived: true iff feedback is not self-contained."
+      "default": true,
+      "description": "Runtime policy flag. v1.6 default is true (always include); retained for future ablations."
     }
   },
   "allOf": [
@@ -138,9 +140,6 @@
         "properties": {
           "is_self_contained": {
             "const": true
-          },
-          "include_student_attempt_for_teacher": {
-            "const": false
           }
         }
       }
@@ -187,9 +186,6 @@
         "properties": {
           "is_self_contained": {
             "const": false
-          },
-          "include_student_attempt_for_teacher": {
-            "const": true
           }
         }
       }

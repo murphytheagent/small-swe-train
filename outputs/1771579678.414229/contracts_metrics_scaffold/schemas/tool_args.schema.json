@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "tool_args.schema.json",
-  "title": "Small SWE Train Tool Args v2",
+  "title": "Small SWE Train Tool Args v3",
   "$defs": {
     "bashArgs": {
       "type": "object",
@@ -67,7 +67,7 @@
         }
       }
     },
-    "answerArgs": {
+    "submitArgs": {
       "type": "object",
       "additionalProperties": false,
       "required": ["final_response"],

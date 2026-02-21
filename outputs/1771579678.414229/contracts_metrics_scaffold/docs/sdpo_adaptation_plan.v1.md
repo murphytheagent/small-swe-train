@@ -1,8 +1,8 @@
-# SDPO Adaptation Plan (v1)
+# SDPO Adaptation Plan (v2)
 
-Generated: 2026-02-21 21:37 UTC
+Generated: 2026-02-21 06:24 UTC
 Thread: 1771579678.414229
-Source baseline: `https://github.com/lasgroup/SDPO` (inspected at commit `c52586ba45633a817879f59e2612cc62c55c8479`)
+Source baseline: `https://github.com/lasgroup/SDPO` (main branch)
 
 ## 1) Reusable SDPO components
 
@@ -18,20 +18,27 @@ Source baseline: `https://github.com/lasgroup/SDPO` (inspected at commit `c52586
 ## 2) Required custom layers for our codebase
 
 1. Turn formatter/parser
-- parse optional `<think>` and one `<tool_call>` JSON block.
-- emit action-token mask for tool JSON only.
+- parse ChatML assistant boundaries.
+- parse optional `<think>` and ordered `1..M` `<tool_call>` JSON blocks.
+- enforce `submit` singleton rule per turn.
 
 2. Teacher prompt builder
 - block-structured prompt with hybrid trajectory context and canonicalized feedback packet.
+- include student attempt by default in v1.6.
 
 3. Feedback canonicalization
-- deterministic normalization/extraction plus derived self-containment flags.
+- deterministic normalization/extraction plus self-containment diagnostics.
+- require `actionable_error_text` key presence (`string | null`).
 
 4. SWE environment bridge
 - Docker execution wrapper, tool-level traces, benchmark split isolation.
 
 5. Dataset adapters
-- SWE-smith trajectory conversion to canonical tool schema (`submit` -> `answer`).
+- SWE-smith trajectory conversion to canonical tool schema (`answer|submit` -> `submit`).
+
+6. Stage-aware masking
+- RFT mask excludes think tokens.
+- step-SDPO mask includes think and tool-call tokens.
 
 ## 3) File-level adaptation targets in our planned tree
 
@@ -40,9 +47,9 @@ Source baseline: `https://github.com/lasgroup/SDPO` (inspected at commit `c52586
 - `src/data/feedback_canonicalizer.py`
   - produces schema-valid feedback packets.
 - `src/rollout/turn_parser.py`
-  - delimiter parsing and tool-call extraction.
+  - ChatML boundary parsing + delimiter parsing + multi-call extraction.
 - `src/losses/action_masking.py`
-  - tool-token mask generation.
+  - stage-specific token mask generation.
 - `src/trainer/sdpo_trainer.py`
   - integration wrapper around reused SDPO/verl components.
 
@@ -51,7 +58,7 @@ Source baseline: `https://github.com/lasgroup/SDPO` (inspected at commit `c52586
 1. Lock parser/schema unit tests.
 2. Implement canonicalization + self-containment derivation tests.
 3. Wire teacher prompt builder with deterministic truncation.
-4. Integrate masking and distillation loss path.
+4. Integrate stage-aware masking and distillation loss path.
 5. Run minimal offline smoke with fixed trajectories.
 6. Run small on-policy SWE-smith train split smoke.
 
@@ -59,7 +66,7 @@ Source baseline: `https://github.com/lasgroup/SDPO` (inspected at commit `c52586
 
 - Risk: parser/schema drift between rollout and trainer.
   - Control: strict schema validation at ingestion boundary.
-- Risk: over-masking (lost learning signal) or under-masking (reasoning leakage).
-  - Control: explicit mask diagnostics per batch.
+- Risk: masking mismatch across stages.
+  - Control: explicit per-stage mask diagnostics and golden-token tests.
 - Risk: feedback canonicalization instability.
   - Control: versioned canonicalizer + deterministic hashes.

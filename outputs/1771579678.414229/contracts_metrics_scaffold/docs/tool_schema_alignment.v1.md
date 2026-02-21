@@ -1,6 +1,6 @@
-# Tool Schema Alignment (v1)
+# Tool Schema Alignment (v2)
 
-Generated: 2026-02-21 21:37 UTC
+Generated: 2026-02-21 06:24 UTC
 Thread: 1771579678.414229
 
 ## 1) Alignment strategy
@@ -11,7 +11,7 @@ Canonical target for this project is:
 - `bash`
 - `search`
 - `edit`
-- `answer`
+- `submit`
 
 External trajectory schemas are adapted into this canonical set through deterministic mapping.
 
@@ -25,7 +25,8 @@ Observed tool-call names in SWE-smith `tool` split:
 Mapping:
 - `bash` -> `bash`
 - `str_replace_editor` -> `search` or `edit` based on subcommand
-- `submit` -> `answer`
+- `submit` -> `submit`
+- legacy `answer` -> `submit` (for backward compatibility)
 
 `str_replace_editor` subcommand map:
 - `view` -> `search` (read/inspect intent)
@@ -35,7 +36,7 @@ Mapping:
 
 For each assistant turn:
 - assistant thought/freeform text -> optional `<think>...</think>` segment
-- tool call object -> `<tool_call>{...}</tool_call>` JSON segment
+- one or more tool call objects -> ordered `<tool_call>{...}</tool_call>` segments
 
 This enables training on chat-style trajectories while preserving explicit tool actions.
 
@@ -48,4 +49,5 @@ SWE-bench issue/instance artifacts provide task/problem/eval context; they do no
 Adapters must be deterministic and versioned:
 - stable mapping table,
 - stable argument canonicalization,
-- explicit legacy alias handling (`submit` -> `answer`).
+- explicit legacy alias handling (`answer` -> `submit`),
+- stable ordering for multi-tool-call blocks in a turn.
