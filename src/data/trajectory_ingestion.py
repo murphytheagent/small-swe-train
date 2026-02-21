@@ -49,6 +49,7 @@ class _ToolCallEntry:
     tool_name: str
     args: dict[str, Any]
     thinking: str | None
+    call_id: str | None
     source: Mapping[str, Any] | None
 
 
@@ -322,13 +323,12 @@ def _entries_from_history(history: Sequence[Any]) -> Iterable[_StepEntry]:
 
         role = str(item.get("role", "")).strip().lower()
         if role == "assistant":
-            pending_calls = _extract_tool_calls_from_payload(item)
-            if not pending_calls:
+            new_calls = _extract_tool_calls_from_payload(item)
+            if not new_calls:
                 continue
-            emitted_inline = False
-            remaining_calls: list[_ToolCallEntry] = []
-            allow_scalar_step_output = len(pending_calls) == 1
-            for call_index, call_entry in enumerate(pending_calls):
+            unresolved_calls: list[_ToolCallEntry] = []
+            allow_scalar_step_output = len(new_calls) == 1
+            for call_index, call_entry in enumerate(new_calls):
                 inline_output = _extract_tool_output(
                     item,
                     call=call_entry.source,
@@ -337,7 +337,6 @@ def _entries_from_history(history: Sequence[Any]) -> Iterable[_StepEntry]:
                     include_step_output_fallback=allow_scalar_step_output,
                 )
                 if inline_output:
-                    emitted_inline = True
                     yield _StepEntry(
                         tool_name=call_entry.tool_name,
                         args=call_entry.args,
@@ -345,14 +344,16 @@ def _entries_from_history(history: Sequence[Any]) -> Iterable[_StepEntry]:
                         thinking=call_entry.thinking,
                     )
                     continue
-                remaining_calls.append(call_entry)
-            if emitted_inline:
-                pending_calls = remaining_calls
+                unresolved_calls.append(call_entry)
+            pending_calls.extend(unresolved_calls)
             continue
 
         if role in {"tool", "environment", "observation"} and pending_calls:
             output = _extract_tool_output(item, call=None, call_index=0)
-            call_entry = pending_calls.pop(0)
+            call_entry = _pop_pending_call_for_output(
+                pending_calls,
+                tool_call_id=_extract_tool_call_id(item),
+            )
             yield _StepEntry(
                 tool_name=call_entry.tool_name,
                 args=call_entry.args,
@@ -407,6 +408,7 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
                     tool_name=tool_name,
                     args=args,
                     thinking=thinking,
+                    call_id=_extract_tool_call_id(call),
                     source=call,
                 )
             )
@@ -424,6 +426,7 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
                         tool_name=tool_name,
                         args=args,
                         thinking=_extract_thinking(call) or top_level_thinking,
+                        call_id=_extract_tool_call_id(call),
                         source=call,
                     )
                 )
@@ -437,11 +440,34 @@ def _extract_tool_calls_from_payload(payload: Mapping[str, Any]) -> list[_ToolCa
                 tool_name=direct_tool_name,
                 args=args,
                 thinking=top_level_thinking,
+                call_id=_extract_tool_call_id(payload),
                 source=payload,
             )
         )
 
     return extracted
+
+
+def _extract_tool_call_id(payload: Mapping[str, Any]) -> str | None:
+    for key in ("tool_call_id", "call_id", "id"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _pop_pending_call_for_output(
+    pending_calls: list[_ToolCallEntry],
+    *,
+    tool_call_id: str | None,
+) -> _ToolCallEntry:
+    if tool_call_id:
+        for index, call in enumerate(pending_calls):
+            if call.call_id == tool_call_id:
+                return pending_calls.pop(index)
+    return pending_calls.pop(0)
 
 
 def _extract_tool_name(payload: Mapping[str, Any]) -> str | None:

@@ -152,6 +152,80 @@ def test_history_uses_per_call_inline_outputs() -> None:
     assert episode.environment_steps[1].response.stdout == "second output"
 
 
+def test_history_keeps_pending_calls_across_assistant_non_call_turns() -> None:
+    record = {
+        "instance_id": "swe-bench-pending-retained",
+        "history": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "bash",
+                        "arguments": {"command": "echo one"},
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "Waiting for tool output.",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "one output",
+            },
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert len(episode.environment_steps) == 1
+    assert episode.environment_steps[0].request.args["command"] == "echo one"
+    assert episode.environment_steps[0].response.stdout == "one output"
+
+
+def test_history_matches_tool_outputs_by_tool_call_id() -> None:
+    record = {
+        "instance_id": "swe-bench-call-id-match",
+        "history": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "bash",
+                        "arguments": {"command": "echo first"},
+                    },
+                    {
+                        "id": "call-2",
+                        "name": "bash",
+                        "arguments": {"command": "echo second"},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-2",
+                "content": "second output",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "first output",
+            },
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert len(episode.environment_steps) == 2
+    assert episode.environment_steps[0].request.args["command"] == "echo second"
+    assert episode.environment_steps[0].response.stdout == "second output"
+    assert episode.environment_steps[1].request.args["command"] == "echo first"
+    assert episode.environment_steps[1].response.stdout == "first output"
+
+
 def test_step_prefers_non_empty_trajectory_variant() -> None:
     record = {
         "instance_id": "trajectory-fallback",
