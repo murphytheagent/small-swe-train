@@ -11,5 +11,5 @@ CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../configs/verl" && pwd)"
 python -m verl.trainer.main_ppo \
   --config-name sdpo_swe \
   --config-dir "${CONFIG_DIR}" \
-  actor_rollout_ref.actor.self_distillation.loss_mode=sdft \
+  actor_rollout_ref.actor.policy_loss.loss_mode=sdft \
   "$@"

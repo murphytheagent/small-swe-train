@@ -45,6 +45,26 @@ def test_preprocess_trajectories_adapts_external_calls() -> None:
     assert rows[0]["format_valid"] is True
 
 
+def test_preprocess_trajectories_treats_null_assistant_response_as_absent() -> None:
+    trajectories = [
+        {
+            "prompt": "Submit answer",
+            "assistant_response": None,
+            "external_tool_calls": [
+                {"tool": "answer", "args": {"answer": "fixed"}},
+            ],
+            "tool_output": {"stdout": "", "stderr": "", "exit_code": 0},
+        }
+    ]
+
+    rows = preprocess_trajectories(trajectories)
+
+    assert rows[0]["assistant_response"] == ""
+    assert rows[0]["tool_calls"][0]["tool"] == "submit"
+    assert rows[0]["format_valid"] is True
+    assert rows[0]["parse_error"] is None
+
+
 def test_preprocess_trajectories_records_parse_error() -> None:
     trajectories = [
         {

@@ -535,3 +535,5 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-21 09:55 UTC] Replaced `NotImplementedError` scaffolds in `src/trainer/sdpo_trainer.py` and `src/eval/swebench_lite.py` with deterministic adapter-based logic for local verification.
 - [2026-02-21 09:55 UTC] Added unit tests for integration modules and updated trainer/eval behavior (`tests/test_verl_*.py`, `tests/test_sdpo_trainer.py`, `tests/test_swebench_lite.py`).
 - [2026-02-21 09:55 UTC] Test status: `pytest` passing (`28 passed`).
+- [2026-02-21 10:13 UTC] Addressed PR feedback: corrected SDFT launcher override to `actor_rollout_ref.actor.policy_loss.loss_mode=sdft`; updated preprocessor null handling so `assistant_response: null` falls back to `external_tool_calls`; added regression test coverage.
+- [2026-02-21 10:13 UTC] Test status: `pytest` passing (`29 passed`).

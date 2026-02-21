@@ -64,7 +64,13 @@ def preprocess_trajectories(
 
     for index, sample in enumerate(trajectories):
         prompt = str(sample.get("prompt", ""))
-        assistant_response = str(sample.get("assistant_response", ""))
+        assistant_response_raw = sample.get("assistant_response", "")
+        if assistant_response_raw is None:
+            assistant_response = ""
+        elif isinstance(assistant_response_raw, str):
+            assistant_response = assistant_response_raw
+        else:
+            assistant_response = str(assistant_response_raw)
         step_index = int(sample.get("step_index", index))
         include_student_attempt_for_teacher = bool(
             sample.get("include_student_attempt_for_teacher", True)
