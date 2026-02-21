@@ -1,8 +1,8 @@
 """Model-family delimiter configuration, loadable from YAML.
 
-The YAML files under ``configs/model/`` are the single source of truth for
-delimiter strings.  Call ``default_delimiters()`` (cached) or
-``load_delimiters(path)`` to obtain a ``ModelDelimiters`` instance.
+Bundled configs live in ``prompts/model_configs/`` and are shipped with the
+package.  Call ``default_delimiters()`` (cached) or ``load_delimiters(path)``
+to obtain a ``ModelDelimiters`` instance.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs" / "model"
+_BUNDLED_CONFIGS_DIR = Path(__file__).resolve().parent / "model_configs"
 
 
 @dataclass(frozen=True)
@@ -59,4 +59,4 @@ def default_delimiters(model_family: str = "qwen3") -> ModelDelimiters:
 
     Results are cached; subsequent calls with the same family are free.
     """
-    return load_delimiters(_CONFIGS_DIR / f"{model_family}.yaml")
+    return load_delimiters(_BUNDLED_CONFIGS_DIR / f"{model_family}.yaml")
