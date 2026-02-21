@@ -226,6 +226,52 @@ def test_history_matches_tool_outputs_by_tool_call_id() -> None:
     assert episode.environment_steps[1].response.stdout == "first output"
 
 
+def test_history_ignores_unmatched_tool_call_id_until_matching_output_arrives() -> None:
+    record = {
+        "instance_id": "swe-bench-ignore-unmatched-tool-call-id",
+        "history": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "bash",
+                        "arguments": {"command": "echo first"},
+                    },
+                    {
+                        "id": "call-2",
+                        "name": "bash",
+                        "arguments": {"command": "echo second"},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "unknown-call-id",
+                "content": "stray output",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-2",
+                "content": "second output",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "first output",
+            },
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert len(episode.environment_steps) == 2
+    assert episode.environment_steps[0].request.args["command"] == "echo second"
+    assert episode.environment_steps[0].response.stdout == "second output"
+    assert episode.environment_steps[1].request.args["command"] == "echo first"
+    assert episode.environment_steps[1].response.stdout == "first output"
+
+
 def test_step_prefers_non_empty_trajectory_variant() -> None:
     record = {
         "instance_id": "trajectory-fallback",

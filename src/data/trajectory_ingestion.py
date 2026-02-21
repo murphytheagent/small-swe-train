@@ -357,6 +357,8 @@ def _entries_from_history(history: Sequence[Any]) -> Iterable[_StepEntry]:
                 pending_calls,
                 tool_call_id=_extract_tool_call_id(item),
             )
+            if call_entry is None:
+                continue
             yield _StepEntry(
                 tool_name=call_entry.tool_name,
                 args=call_entry.args,
@@ -465,11 +467,12 @@ def _pop_pending_call_for_output(
     pending_calls: list[_ToolCallEntry],
     *,
     tool_call_id: str | None,
-) -> _ToolCallEntry:
+) -> _ToolCallEntry | None:
     if tool_call_id:
         for index, call in enumerate(pending_calls):
             if call.call_id == tool_call_id:
                 return pending_calls.pop(index)
+        return None
     return pending_calls.pop(0)
 
 
