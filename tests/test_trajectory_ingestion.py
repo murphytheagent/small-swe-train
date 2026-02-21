@@ -590,3 +590,71 @@ def test_run_ingestion_rejects_negative_max_episodes(tmp_path: Path) -> None:
             tokenizer_model="ignored-for-test",
             max_episodes=-1,
         )
+
+
+def test_malformed_json_args_degrades_to_raw_command() -> None:
+    """_coerce_args should not abort on invalid JSON brace strings."""
+    record = {
+        "instance_id": "malformed-args",
+        "trajectory": [
+            {
+                "tool": "bash",
+                "args": '{not valid json{{{',
+                "output": {"stdout": "ok", "exit_code": 0},
+            }
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert len(episode.environment_steps) == 1
+    assert episode.environment_steps[0].request.args["command"] == "{not valid json{{{"
+
+
+def test_submit_with_empty_answer_backfills_from_context() -> None:
+    """Empty answer string should not block backfill from context content."""
+    record = {
+        "instance_id": "empty-answer-backfill",
+        "history": [
+            {
+                "role": "assistant",
+                "content": "The real final response text.",
+                "tool_calls": [
+                    {
+                        "name": "submit",
+                        "arguments": {"answer": ""},
+                    }
+                ],
+                "output": {"stdout": "submitted", "exit_code": 0},
+            }
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert episode.environment_steps[0].request.tool == "submit"
+    assert episode.environment_steps[0].request.args["final_response"] == "The real final response text."
+
+
+def test_submit_with_nonempty_answer_is_not_overwritten() -> None:
+    """A non-empty answer value should be kept, not overwritten by context."""
+    record = {
+        "instance_id": "nonempty-answer-kept",
+        "history": [
+            {
+                "role": "assistant",
+                "content": "This should not override.",
+                "tool_calls": [
+                    {
+                        "name": "submit",
+                        "arguments": {"answer": "Kept answer."},
+                    }
+                ],
+                "output": {"stdout": "submitted", "exit_code": 0},
+            }
+        ],
+    }
+
+    episode = build_episode_from_record(record, fallback_index=0)
+
+    assert episode.environment_steps[0].request.args["final_response"] == "Kept answer."

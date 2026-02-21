@@ -528,9 +528,12 @@ def _coerce_args(value: Any) -> dict[str, Any] | None:
         if not stripped:
             return {}
         if stripped.startswith("{") and stripped.endswith("}"):
-            decoded = json.loads(stripped)
+            try:
+                decoded = json.loads(stripped)
+            except json.JSONDecodeError:
+                return {"command": value}
             if not isinstance(decoded, Mapping):
-                raise ValueError("Decoded arguments JSON must be an object.")
+                return {"command": value}
             return dict(decoded)
         return {"command": value}
     return {"value": value}
@@ -545,8 +548,10 @@ def _normalize_submit_args(
     normalized_tool = tool_name.strip().lower()
     if normalized_tool not in {"submit", "answer"}:
         return dict(args)
-    if any(key in args for key in ("final_response", "answer")):
-        return dict(args)
+    for key in ("final_response", "answer"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return dict(args)
     for key in ("content", "text", "final_response", "answer"):
         value = context.get(key)
         if isinstance(value, str) and value.strip():
