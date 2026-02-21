@@ -1,16 +1,15 @@
-# Contracts and Metrics Scaffold (v3, review-only)
+# Contracts and Metrics Scaffold (v3, frozen design snapshot)
 
 Generated: 2026-02-21 06:24 UTC
 Thread: 1771579678.414229
 
 Purpose:
-- Encode current v1 research-mode contracts as machine-readable artifacts before training-loop coding.
+- Encode the approved v1.6 research-mode contracts as machine-readable artifacts.
 - Lock parser/schema/feedback derivation rules to prevent rollout-vs-trainer drift.
 
-Out of scope:
-- No model training loop implementation.
-- No optimizer/runtime wiring.
-- No benchmark execution logic.
+Implementation status:
+- Runtime scaffolding now lives under `src/` and is tested.
+- This folder remains the frozen design reference for the thread run.
 
 Contents:
 - `schemas/action_envelope.schema.json`: assistant turn envelope with optional thinking and ordered multi-tool call support (`bash|search|edit|submit`).
