@@ -1,138 +1,120 @@
-# small-swe-train: Research Mode v1.4 Design Branch Packet
+# small-swe-train: Research Mode v1.5 Design Revision Packet (on `design` branch)
 
-Generated: 2026-02-21 04:12 UTC
+Generated: 2026-02-21 21:37 UTC
 Thread: 1771579678.414229
-Request reference: 2026-02-21 04:06 UTC (1771646811.801329)
+Supersedes: prior v1.4 contents at this same path
 
-This document answers the requested design points before coding restart.
+This revision addresses all requested updates from 2026-02-21 05:32 UTC, including the PR review note at https://github.com/murphytheagent/small-swe-train/pull/2#discussion_r2835802816.
 
-## 1) Default Step-SDPO for SWE training (with per-turn teacher prompt construction)
+## 1) Trajectory block policy (full history vs summarized history)
 
-### 1.1 Per-turn objects
-- `h_t`: step history up to turn `t` (issue text, repo metadata, prior actions, prior observations).
-- `a_t`: student action at turn `t` (strict JSON tool call).
-- `o_{t+1}`: environment observation after executing `a_t`.
-- `f_{t+1}`: canonicalized feedback payload derived from `o_{t+1}`.
-- `M_t`: token mask over action tokens only (no observation/user tokens).
+### 1.1 Decision
+- We do **not** use summary-only history by default.
+- We use a **hybrid bounded-context policy** inspired by the Reasoning Cache idea (arXiv:2602.03773): keep raw recent turns and compress older turns into a structured memory object.
 
-### 1.2 Default update
-Main stage remains action-token masked Step-SDPO:
+### 1.2 Construction at turn `t`
+1. `RECENT_RAW_BLOCK`: full raw turns for `t-K_raw ... t-1` (default `K_raw=6`).
+2. `COMPRESSED_MEMORY_BLOCK`: deterministic summary over turns `1 ... t-K_raw-1`.
+3. `CRITICAL_FACTS_BLOCK`: append-only facts that are never dropped:
+- failing tests/signatures,
+- file+line localization hints,
+- previously attempted edit intents,
+- latest known build/test status.
 
+### 1.3 Why this over pure full trajectory
+- Full `1..t-1` raw history is better semantically but unstable for token budget and training throughput.
+- Summary-only is too lossy for search-heavy SWE traces.
+- Hybrid keeps recent exact tool traces while bounding context growth.
+
+## 2) Turn output contract: allow thinking + tool call, with explicit final-answer tool
+
+### 2.1 New output grammar (chat-agent style)
+Each assistant turn may emit:
+1. Optional thinking block:
+- `<think> ... </think>`
+2. Exactly one tool call block:
+- `<tool_call>{"tool":"...","args":{...}}</tool_call>`
+
+### 2.2 Tool set (v1)
+- `bash`
+- `search`
+- `edit`
+- `answer` (terminal action)
+
+Notes:
+- `submit` from legacy trajectories is ingested as `answer` via canonicalization.
+- SDPO action-token masking remains on **tool-call JSON tokens only**.
+- Thinking tokens are logged and validated for delimiter balance, but excluded from SDPO action KL.
+
+## 3) Default step-SDPO teacher prompt construction per turn
+
+At turn `t`, teacher prompt is:
+1. `SYSTEM_BLOCK`
+- agent role, tool schema, delimiter contract.
+2. `TASK_BLOCK`
+- issue text, repo context, success condition.
+3. `TRAJECTORY_BLOCK`
+- `RECENT_RAW_BLOCK` + `COMPRESSED_MEMORY_BLOCK` + `CRITICAL_FACTS_BLOCK`.
+4. `CURRENT_ATTEMPT_BLOCK` (conditional)
+- include student attempt iff `include_student_attempt_for_teacher=true`.
+5. `FEEDBACK_BLOCK`
+- canonicalized env feedback packet.
+6. `OUTPUT_CONTRACT_BLOCK`
+- optional `<think>` plus exactly one `<tool_call>...</tool_call>` JSON object.
+
+Main loss remains:
 `L_step_sdpo = E[ sum_t sum_{n in M_t} KL( pi_theta(.|h_t,a_{t,<n}) || stopgrad(q_phi(.|h_t,f_{t+1},a_{t,<n})) ) ]`
 
-Teacher is EMA-regularized:
+## 4) Self-containment checks and env-response canonicalization
 
-`phi <- (1 - beta) * phi + beta * theta`, with v1 default `beta = 0.005`.
+### 4.1 Are checks programmatic?
+Yes. All three checks are computed programmatically from canonicalized feedback fields.
 
-### 1.3 Teacher prompt template at each turn (default)
-For each step `t`, build a teacher prompt packet in this exact order:
+### 4.2 Three checks (programmatic definitions)
+- `has_failing_artifact_identity`:
+  - true if at least one concrete artifact id is extracted (`test_id`, `file_path`, `command_id`, `trace signature`).
+- `has_actionable_error_text`:
+  - true if normalized error text contains non-empty actionable failure content after boilerplate stripping.
+- `has_localization_hint`:
+  - true if at least one localization anchor is extracted (`file[:line]`, symbol, failing test target, stack frame anchor).
 
-1. `SYSTEM_BLOCK`
-- role constraints: "repair the issue; output exactly one JSON action object"
-- allowed tools: `bash|search|edit|submit`
-- schema reminder: strict envelope + per-tool args
+### 4.3 Canonicalization pipeline per turn
+1. Ingest raw tool/env payload (`stdout`, `stderr`, exit code, metadata).
+2. Normalize text:
+- strip ANSI/control chars,
+- normalize newlines/whitespace,
+- deterministic head+tail truncation after normalization.
+3. Extract structured fields:
+- artifact identities,
+- actionable error text,
+- localization hints.
+4. Build canonical packet with stable key ordering and `raw_sha256` hash.
+5. Derive:
+- `is_self_contained = A and B and C`
+- `include_student_attempt_for_teacher = not is_self_contained`
 
-2. `TASK_BLOCK`
-- repo id / commit / issue text
-- current objective and stop condition
+Schema now enforces these derivations (addresses PR review comment).
 
-3. `TRAJECTORY_BLOCK`
-- compact prior turn summaries (`t-H_ctx ... t-1`)
-- each prior turn includes action + short normalized observation digest
+## 5) Tool schema alignment with SWE-bench / SWE-smith trajectories
 
-4. `CURRENT_ATTEMPT_BLOCK` (conditional)
-- include student `a_t` iff feedback is not self-contained
-- self-contained test uses locked predicate:
-  - `A = has_failing_artifact_identity`
-  - `B = has_actionable_error_text`
-  - `C = has_localization_hint`
-  - include attempt iff `not (A and B and C)`
+### 5.1 Do we derive our schema from SWE-smith?
+Not directly. We keep our runtime schema as the canonical target and add deterministic adapters from SWE-smith trajectory format.
 
-5. `FEEDBACK_BLOCK` (always)
-- canonicalized `f_{t+1}` from env response
-- apply deterministic truncation after canonicalization, before wrapper text:
-  - head `H=768`, tail `T=768`
+### 5.2 Mapping policy
+From SWE-smith `tool` split samples:
+- `bash` -> `bash`
+- `str_replace_editor`:
+  - `view`/path inspection operations -> `search`
+  - edit operations (`create|str_replace|insert|undo_edit`) -> `edit`
+- `submit` -> `answer`
 
-6. `OUTPUT_CONTRACT_BLOCK`
-- restate exact JSON schema for one action object
-- no free-form text
+Message content mapping:
+- assistant freeform/thought -> optional `<think>...</think>` payload
+- tool call object -> `<tool_call>{...}</tool_call>` JSON payload
 
-### 1.4 Turn execution loop (default)
-1. Student samples `a_t` from `pi_theta(.|h_t)`.
-2. Execute `a_t` in dockerized repo env, capture `o_{t+1}`.
-3. Normalize `o_{t+1}` -> `f_{t+1}`.
-4. Construct teacher prompt using blocks above.
-5. Run teacher distribution `q_phi` on same action prefix.
-6. Compute masked KL on `M_t` only.
-7. Optimizer step on `theta`; update EMA teacher `phi`.
+## 6) Directory layout update (requested `src`)
 
-This keeps SDPO single-step mathematically, but applies it at every turn in a multi-turn trajectory.
-
-## 2) Dataset for RFT, and env/dataset map
-
-### 2.1 Default RFT dataset (format stabilization)
-RFT dataset default is a mixture focused on strict tool-call validity:
-
-1. `SWE-bench/SWE-smith-trajectories` converted to single-step `(h_t -> a_t)` examples, restricted to our v1 tool set.
-2. Synthetic schema-repair pairs generated from our JSON schemas:
-- malformed JSON -> corrected JSON
-- invalid tool/args -> corrected tool/args
-3. Small held-out validation slice of the same schema domains for gate tracking.
-
-Rationale: this directly trains the exact output contract we need before SDPO.
-
-### 2.2 Environment and dataset usage by stage
-- `Stage 0 (RFT)`: offline action-format data only (no env rollout).
-- `Stage 1 (optional short SDFT)`: same tasks with demonstration-conditioned teacher, still tool-format focused.
-- `Stage 2 (main SDPO)`: on-policy rollouts in dockerized SWE environments with textual feedback.
-
-Default v1 environment/data plan:
-- Training environments: `SWE-smith` dockerized repo tasks (train split only).
-  - https://github.com/SWE-bench/SWE-smith
-- Optional scale-up environment: `R2E-Gym` train split.
-  - https://github.com/R2E-Gym/R2E-Gym
-- Optional compatibility baseline env: `SWE-Gym`.
-  - https://github.com/SWE-Gym/SWE-Gym
-- Held-out benchmark (no training data leakage): SWE-bench Lite style episodes only.
-  - https://github.com/SWE-bench/SWE-bench
-
-## 3) Tech stack (vLLM and trainer source)
-
-Default stack:
-- Base model family: 4B coder/instruct checkpoint (LoRA-only adaptation, bf16 compute).
-- Core trainer: SDPO codepath built on `verl` (from official SDPO repo).
-  - https://github.com/lasgroup/SDPO
-  - https://github.com/volcengine/verl
-- Rollout/inference backend: `vLLM` workers for high-throughput sampling.
-- Environment runner: Docker-backed executor with strict allowlist + denylist policy.
-- Data layer: Hugging Face datasets + parquet/arrow preprocessing.
-- Tracking: structured JSONL metrics + W&B run logs.
-
-Why this stack:
-- We inherit the closest existing SDPO implementation instead of re-deriving optimizer internals.
-- vLLM is already part of the SDPO implementation path and is practical for on-policy rollouts.
-- `verl` gives scalable distributed trainer plumbing without forcing us into unsupported SDPO abstractions.
-
-## 4) Is there ready-to-use SDPO implementation on GitHub?
-
-Short answer: yes for SDPO core, no for our exact SWE Step-SDPO pipeline.
-
-Current landscape checked on 2026-02-21:
-- Official SDPO implementation: https://github.com/lasgroup/SDPO
-  - Includes SDPO training code, data prep scripts, and verl-based training/inference integration.
-- Official SDFT implementation (for optional pre-stage): https://github.com/sail-sg/sdft
-
-Readiness assessment:
-- `lasgroup/SDPO` is usable as the algorithmic base trainer.
-- It is not a drop-in end-to-end multi-turn SWE agent trainer with our exact `bash/search/edit/submit` action schema, so we still need project-specific adapters:
-  - trajectory-to-step segmentation,
-  - teacher prompt builder for per-turn tool feedback,
-  - action-token masking and schema-validity gating,
-  - SWE-specific env wrappers/eval harness integration.
-
-## 5) Tentative project directories and design rationale
-
-Proposed v1 repository layout (inside `projects/small-swe-train/`):
+Using `src/` (not `src/small_swe_train`):
 
 ```text
 small-swe-train/
@@ -147,7 +129,7 @@ small-swe-train/
     manifests/
     prepared/
     cache/
-  src/small_swe_train/
+  src/
     schemas/
     prompts/
     data/
@@ -173,16 +155,40 @@ small-swe-train/
     <run_label>/
 ```
 
-Why this structure:
-- `schemas/` is isolated so action/feedback contracts are versionable and testable.
-- `teacher/` and `prompts/` are separate from `trainer/` so prompt construction can evolve without optimizer churn.
-- `env/` is isolated because docker/runtime policy is high-risk and should be independently testable.
-- `rollout/` separates vLLM interaction from training logic.
-- `losses/` keeps SDPO/SDFT/RFT math implementations explicit and composable.
-- `benchmarks/` is separated from `data/` to avoid accidental train/eval contamination.
-- `outputs/` remains run-labeled for reproducibility and auditability.
+## 7) Deeper adaptation plan for `lasgroup/SDPO`
 
-## Design status
+### 7.1 Reuse points from SDPO codebase
+- `verl/trainer/ppo/ray_trainer.py`:
+  - self-distillation teacher-batch construction path (`_maybe_build_self_distillation_batch`), feedback collection path.
+- `verl/workers/actor/dp_actor.py`:
+  - teacher update (`ema`), logit extraction path, masked distillation integration.
+- `verl/trainer/ppo/core_algos.py`:
+  - `compute_self_distillation_loss` with top-k distillation support.
+- `verl/trainer/config/actor/actor.yaml` + `sdpo.yaml`:
+  - distillation knobs (`teacher_regularization`, `distillation_topk`, etc.).
+
+### 7.2 Required adaptations for our SWE agent
+1. Replace SDPO reprompt builder with our turn-aware prompt builder (blocks in Section 3).
+2. Insert trajectory canonicalizer and self-containment derivation before teacher conditioning.
+3. Swap legacy output assumption to chat contract (`<think>` + `<tool_call>`).
+4. Add action-token masks that target tool-call JSON only.
+5. Add tool-schema adapter for SWE-smith trajectories to our canonical action schema.
+6. Replace terminal `submit` semantics with canonical `answer` tool.
+7. Plug in Docker SWE env wrapper and benchmark split protocol.
+
+### 7.3 Integration risk notes
+- SDPO core can be reused; environment/prompt/schema glue is the primary custom layer.
+- Biggest failure mode is schema drift between rollout parser and distillation mask; lock schema tests first.
+
+## 8) Doc hygiene
+
+Per request, stale round-by-round docs are removed from this run folder; current canonical artifacts are:
+- this packet (`research_mode_v1_4_design_branch_packet.md`)
+- `contracts_metrics_scaffold/` (updated contracts/config/metrics)
+- benchmark placeholders under `benchmarks/swebench_lite/`
+
+## 9) Status
+
 - Research mode remains active.
-- No training loop regeneration in this packet.
-- Next action after human approval: convert this layout and stack into implementation scaffolding on `design` branch.
+- No training-loop regeneration in this update.
+- Ready for your review before coding restart.

@@ -1,14 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "action_envelope.schema.json",
-  "title": "Small SWE Train Action Envelope v1",
+  "title": "Small SWE Train Assistant Tool Call Envelope v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["tool", "args"],
   "properties": {
+    "thinking": {
+      "type": "string",
+      "description": "Optional reasoning text extracted from <think>...</think> delimiters."
+    },
     "tool": {
       "type": "string",
-      "enum": ["bash", "search", "edit", "submit"]
+      "enum": ["bash", "search", "edit", "answer"]
     },
     "args": {
       "type": "object"
@@ -67,14 +71,14 @@
       "if": {
         "properties": {
           "tool": {
-            "const": "submit"
+            "const": "answer"
           }
         }
       },
       "then": {
         "properties": {
           "args": {
-            "$ref": "tool_args.schema.json#/$defs/submitArgs"
+            "$ref": "tool_args.schema.json#/$defs/answerArgs"
           }
         }
       }

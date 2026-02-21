@@ -1,5 +1,5 @@
 {
-  "generated_utc": "2026-02-21 03:43 UTC",
+  "generated_utc": "2026-02-21 21:37 UTC",
   "thread_ts": "1771579678.414229",
   "pipeline": {
     "pre_main_sequence": [
@@ -12,6 +12,20 @@
       0.05,
       0.1
     ]
+  },
+  "output_contract": {
+    "format_mode": "chat_with_delimited_thinking_and_tool_call",
+    "thinking_delimiters": [
+      "<think>",
+      "</think>"
+    ],
+    "tool_call_delimiters": [
+      "<tool_call>",
+      "</tool_call>"
+    ],
+    "allow_optional_thinking": true,
+    "terminal_tool": "answer",
+    "legacy_submit_alias_for_ingestion": true
   },
   "teacher": {
     "regularization": "ema",
@@ -27,12 +41,14 @@
     "include_student_attempt_when_feedback_not_self_contained": true
   },
   "feedback_processing": {
+    "canonicalization_version": "v1",
     "deterministic_truncation": {
       "head_tokens": 768,
       "tail_tokens": 768,
       "apply_after_payload_canonicalization": true,
       "apply_before_teacher_prompt_wrapping": true
-    }
+    },
+    "self_containment_rule": "A_and_B_and_C"
   },
   "adaptation": {
     "mode": "lora",

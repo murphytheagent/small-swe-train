@@ -1,12 +1,13 @@
 {
-  "generated_utc": "2026-02-21 03:43 UTC",
+  "generated_utc": "2026-02-21 21:37 UTC",
   "thread_ts": "1771579678.414229",
   "window_episodes": 200,
   "entry_gate_for_main_sdpo": {
     "parse_valid_rate_min": 0.985,
     "allowed_tool_rate_min": 0.995,
     "required_arg_presence_min": 0.985,
-    "single_object_rate_min": 0.98
+    "single_tool_call_block_rate_min": 0.98,
+    "thinking_delimiter_balance_rate_min": 0.995
   },
   "hard_block_rules": {
     "block_on_format_regression": true,

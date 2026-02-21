@@ -1,12 +1,14 @@
-# Minimal Experiment Matrix (v1)
+# Minimal Experiment Matrix (v2)
 
-Generated: 2026-02-21 03:43 UTC
+Generated: 2026-02-21 21:37 UTC
 Thread: 1771579678.414229
 
 Research-mode exit checklist requires at least one minimal run plus one ablation run.
 
 ## Run A: minimal reference
 - Pipeline: `RFT -> short SDFT -> SDPO`
+- Output contract: optional `<think>` + one `<tool_call>` JSON block
+- Terminal action: `answer`
 - Teacher: EMA (`beta=0.005`)
 - Top-K: `K=100`
 - Truncation: `H=768`, `T=768`

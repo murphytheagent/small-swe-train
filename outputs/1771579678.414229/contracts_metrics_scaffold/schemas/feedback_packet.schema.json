@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "feedback_packet.schema.json",
-  "title": "Small SWE Train Feedback Packet v1",
+  "title": "Small SWE Train Feedback Packet v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,7 +9,10 @@
     "tool",
     "tool_input",
     "tool_output",
-    "self_containment_checks"
+    "canonical_feedback",
+    "self_containment_checks",
+    "is_self_contained",
+    "include_student_attempt_for_teacher"
   ],
   "properties": {
     "step_index": {
@@ -18,7 +21,7 @@
     },
     "tool": {
       "type": "string",
-      "enum": ["bash", "search", "edit", "submit"]
+      "enum": ["bash", "search", "edit", "answer"]
     },
     "tool_input": {
       "type": "object"
@@ -37,6 +40,50 @@
         }
       },
       "additionalProperties": true
+    },
+    "canonical_feedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normalization_version",
+        "normalized_text",
+        "truncated",
+        "raw_sha256",
+        "artifact_identities",
+        "localization_hints"
+      ],
+      "properties": {
+        "normalization_version": {
+          "type": "string"
+        },
+        "normalized_text": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "raw_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifact_identities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "actionable_error_text": {
+          "type": ["string", "null"]
+        },
+        "localization_hints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
     },
     "self_containment_checks": {
       "type": "object",
@@ -60,11 +107,92 @@
     },
     "is_self_contained": {
       "type": "boolean",
-      "description": "True iff all three self-containment checks are true."
+      "description": "Derived: true iff all self-containment checks are true."
     },
     "include_student_attempt_for_teacher": {
       "type": "boolean",
-      "description": "True when feedback is not self-contained."
+      "description": "Derived: true iff feedback is not self-contained."
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "self_containment_checks": {
+            "type": "object",
+            "properties": {
+              "has_failing_artifact_identity": {
+                "const": true
+              },
+              "has_actionable_error_text": {
+                "const": true
+              },
+              "has_localization_hint": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "is_self_contained": {
+            "const": true
+          },
+          "include_student_attempt_for_teacher": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "anyOf": [
+          {
+            "properties": {
+              "self_containment_checks": {
+                "properties": {
+                  "has_failing_artifact_identity": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "self_containment_checks": {
+                "properties": {
+                  "has_actionable_error_text": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "self_containment_checks": {
+                "properties": {
+                  "has_localization_hint": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "is_self_contained": {
+            "const": false
+          },
+          "include_student_attempt_for_teacher": {
+            "const": true
+          }
+        }
+      }
+    }
+  ]
 }

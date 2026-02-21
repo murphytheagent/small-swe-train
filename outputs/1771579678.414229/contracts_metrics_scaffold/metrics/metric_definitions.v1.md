@@ -1,18 +1,21 @@
-# Metric Definitions (v1)
+# Metric Definitions (v2)
 
-Generated: 2026-02-21 03:43 UTC
+Generated: 2026-02-21 21:37 UTC
 Thread: 1771579678.414229
 
 ## Format and action-contract metrics
 
 - `parse_valid_rate`:
-  - Fraction of steps in rolling window `N=200` whose model output parses as exactly one JSON object.
+  - Fraction of steps where parser extracts a valid optional `<think>` segment and exactly one valid `<tool_call>` JSON object.
 
-- `single_object_rate`:
-  - Fraction of steps with exactly one action object (no concatenated or multi-action outputs).
+- `single_tool_call_block_rate`:
+  - Fraction of steps containing exactly one `<tool_call>...</tool_call>` block.
+
+- `thinking_delimiter_balance_rate`:
+  - Fraction of steps where thinking delimiters are either absent or correctly balanced (`<think>...</think>`).
 
 - `allowed_tool_rate`:
-  - Fraction of parsed actions where `tool` is one of `bash|search|edit|submit`.
+  - Fraction of parsed actions where `tool` is one of `bash|search|edit|answer`.
 
 - `required_arg_presence`:
   - Fraction of parsed actions whose required `args` keys pass tool-specific schema checks.
