@@ -60,6 +60,27 @@ class _PerAcquirePool:
         self.release_calls += 1
 
 
+class _BatchTrackingPool:
+    def __init__(self) -> None:
+        self.acquire_inputs: list[list[str]] = []
+        self.release_calls = 0
+
+    def acquire(self, tasks: list[TaskSample]) -> tuple[ContainerHandle, ...]:
+        self.acquire_inputs.append([task.task_id for task in tasks])
+        return tuple(
+            ContainerHandle(
+                task_id=task.task_id,
+                image_name=task.image_name,
+                container_id=f"cid-{task.task_id}",
+                container_name=f"cname-{task.task_id}",
+            )
+            for task in tasks
+        )
+
+    def release_all(self) -> None:
+        self.release_calls += 1
+
+
 class _FakeExecutor:
     def __init__(self) -> None:
         self.requests: list[ToolRequest] = []
@@ -238,6 +259,95 @@ def test_onpolicy_collector_uses_fresh_container_per_attempt() -> None:
     assert [row["container_id"] for row in rows] == ["cid-0", "cid-1"]
     assert pool.acquire_calls == 2
     assert pool.release_calls == 2
+
+
+def test_onpolicy_collector_acquires_full_task_batch_once_per_attempt() -> None:
+    settings = _settings()
+    settings = OnPolicySettings(
+        data=settings.data,
+        runtime=replace(
+            settings.runtime,
+            task_batch_size=2,
+            attempts_per_task=2,
+            env_pool_size=2,
+        ),
+    )
+    pool = _BatchTrackingPool()
+    executor = _FakeExecutor()
+
+    collector = OnPolicyRolloutCollector(
+        settings=settings,
+        turn_generator=lambda **_kwargs: (
+            '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+        ),
+        dataset_loader=lambda _dataset_id, _split: [
+            {
+                "task_id": "task-a",
+                "image_name": "img:1",
+                "problem_statement": "Fix A",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": [],
+            },
+            {
+                "task_id": "task-b",
+                "image_name": "img:2",
+                "problem_statement": "Fix B",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": [],
+            },
+        ],
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+        attempt_resolver=lambda _task, _attempt, is_terminal, _steps: is_terminal,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 4
+    assert pool.acquire_inputs == [["task-a", "task-b"], ["task-a", "task-b"]]
+    assert pool.release_calls == 2
+    assert all(row["batch_container_count"] == 2 for row in rows)
+
+
+def test_onpolicy_collector_applies_task_patch_before_rollout_turns() -> None:
+    settings = _settings()
+    pool = _FakePool()
+    executor = _FakeExecutor()
+
+    def turn_generator(**kwargs: object) -> str:
+        turn_index = int(kwargs["turn_index"])
+        if turn_index == 0:
+            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+        return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+
+    collector = OnPolicyRolloutCollector(
+        settings=settings,
+        turn_generator=turn_generator,
+        dataset_loader=lambda _dataset_id, _split: [
+            {
+                "task_id": "task-1",
+                "image_name": "img:1",
+                "problem_statement": "Fix patch flow",
+                "patch": "diff --git a/a.txt b/a.txt\nindex 1111111..2222222 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+b\n",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": [],
+            }
+        ],
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+        attempt_resolver=lambda _task, _attempt, is_terminal, _steps: is_terminal,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    assert len(executor.requests) >= 2
+    assert executor.requests[0].tool == "bash"
+    assert "git apply" in str(executor.requests[0].args.get("command", ""))
+    assert executor.requests[1].tool == "search"
+    assert rows[0]["resolved"] is True
+    assert rows[0]["task_patch_applied"] is True
+    assert rows[0]["batch_container_count"] == 1
 
 
 def test_onpolicy_collector_keeps_tool_output_aligned_with_first_tool_call() -> None:

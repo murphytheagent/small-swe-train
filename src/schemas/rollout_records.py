@@ -26,3 +26,5 @@ class RolloutRow(RolloutRowRequired, total=False):
     exit_code: int
     is_terminal: bool
     latency_ms: float
+    task_patch_applied: bool
+    batch_container_count: int
