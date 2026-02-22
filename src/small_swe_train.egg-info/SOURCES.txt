@@ -4,7 +4,6 @@ src/data/__init__.py
 src/data/feedback_canonicalizer.py
 src/data/tokenization.py
 src/data/tool_schema_adapter.py
-src/data/trajectory_ingestion.py
 src/env/__init__.py
 src/env/runtime_protocol.py
 src/eval/__init__.py
@@ -40,13 +39,11 @@ src/verl_integration/reward_function.py
 tests/test_action_masking.py
 tests/test_eval_swebench_lite_script.py
 tests/test_feedback_canonicalizer.py
-tests/test_prepare_rft_data_script.py
 tests/test_run_scripts.py
 tests/test_sdpo_trainer.py
 tests/test_swebench_lite.py
 tests/test_tokenization.py
 tests/test_tool_schema_adapter.py
-tests/test_trajectory_ingestion.py
 tests/test_turn_parser.py
 tests/test_verl_data_preprocessor.py
 tests/test_verl_env_bridge.py

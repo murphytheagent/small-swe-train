@@ -7,7 +7,7 @@ from typing import Any, Mapping, Sequence
 from data.feedback_canonicalizer import build_feedback_packet
 from metrics.contracts import FormatMetrics, rate
 from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
-from runtime_config import DEFAULT_MAX_TOOL_CALLS_PER_TURN
+from config import MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, validate_tool_call
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
@@ -73,7 +73,7 @@ def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
 def reward_fn(
     data: Sequence[Mapping[str, Any]],
     *,
-    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+    max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
 ) -> tuple[list[float], dict[str, list[Any]]]:
     """Compute per-sample binary rewards and rollout diagnostics.
 

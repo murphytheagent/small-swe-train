@@ -15,7 +15,7 @@ from data.tokenization import (
 from data.tool_schema_adapter import adapt_external_tool_call
 from losses.action_masking import build_action_token_mask
 from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
-from runtime_config import DEFAULT_MAX_TOOL_CALLS_PER_TURN
+from config import MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, ToolCall, validate_tool_call
 
 
@@ -108,7 +108,7 @@ def _coerce_step_index(value: Any, *, fallback: int) -> int:
 def preprocess_trajectories(
     trajectories: Sequence[Mapping[str, Any]],
     *,
-    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+    max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
     tokenizer: SupportsOffsetsTokenizer | None = None,
 ) -> list[dict[str, Any]]:
     """Convert raw trajectory examples into deterministic, verl-style row dicts.
@@ -172,7 +172,6 @@ def preprocess_trajectories(
                 )
 
         label_blocks = _label_blocks_from_envelope(envelope) if envelope is not None else []
-        input_ids: list[int] | None = None
         canonical_text: str | None = None
 
         if envelope is not None and tokenizer is not None:
@@ -221,8 +220,6 @@ def preprocess_trajectories(
             "validation_errors": validation_errors,
             "feedback_packet": feedback_payload,
         }
-        if input_ids is not None:
-            row["input_ids"] = input_ids
         if canonical_text is not None:
             row["canonical_text"] = canonical_text
         rows.append(row)

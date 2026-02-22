@@ -7,6 +7,11 @@ and validation constraints.  Use ``validate_tool_call()`` to check a parsed
 
 from .contracts import (
     ALLOWED_TOOLS,
+    BASH_TOOL_NAME,
+    EDIT_TOOL_NAME,
+    LEGACY_TERMINAL_TOOL_ALIAS,
+    SEARCH_TOOL_NAME,
+    TERMINAL_TOOL_NAME,
     TOOL_SCHEMAS,
     ActionEnvelope,
     AllowedTool,
@@ -21,6 +26,11 @@ from .contracts import (
 
 __all__ = [
     "ALLOWED_TOOLS",
+    "BASH_TOOL_NAME",
+    "EDIT_TOOL_NAME",
+    "LEGACY_TERMINAL_TOOL_ALIAS",
+    "SEARCH_TOOL_NAME",
+    "TERMINAL_TOOL_NAME",
     "TOOL_SCHEMAS",
     "ActionEnvelope",
     "AllowedTool",

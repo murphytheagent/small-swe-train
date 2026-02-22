@@ -18,6 +18,7 @@
 8. [File-Level Implementation Plan](#8-file-level-implementation-plan)
 9. [Dependency Stack](#9-dependency-stack)
 10. [Milestone Schedule](#10-milestone-schedule)
+11. [Configuration & Type Authority](#11-configuration--type-authority)
 
 ---
 
@@ -113,7 +114,7 @@ This section maps every module in `src/` to its integration point in the
 | **`losses/action_masking.py`** | `dp_actor.update_policy()` `response_mask` | Pre-compute per-token mask via `build_action_token_mask(labels, stage="step_sdpo")` → inject as verl's `response_mask` tensor |
 | **`teacher/prompt_builder.py`** | `ray_trainer._maybe_build_self_distillation_batch()` | Replace verl's simple `reprompt_template` with our 6-block `build_teacher_prompt()` to construct teacher input text |
 | **`schemas/contracts.py`** | Rollout tool execution, reward validation | `validate_tool_call()` gates tool calls before Docker execution; `canonical_tool_name()` normalizes `answer` → `submit` |
-| **`data/tool_schema_adapter.py`** | RFT data ingestion | `adapt_external_tool_call()` converts SWE-smith trajectories to canonical format for supervised pre-training |
+| **`data/tool_schema_adapter.py`** | Rollout post-processing | `adapt_external_tool_call()` normalizes tool names from external formats to canonical names during trajectory preprocessing |
 | **`metrics/contracts.py`** | Phase transition gates | `FormatMetrics.rate()` computes quality metrics; checked against `phase_transition_gates.v1.json` thresholds before entering SDPO stage |
 | **`prompts/model_delimiters.py`** | Tokenizer chat template | `ModelDelimiters` drives delimiter strings used in both rollout generation and training token labeling |
 | **`env/runtime_protocol.py`** | Environment executor bridge | `ToolRequest` / `ToolResponse` are the interface between rollout and Docker sandbox |
@@ -136,18 +137,18 @@ This section maps every module in `src/` to its integration point in the
   ┌─────────────┐     format gates      ┌──────────────┐     continuous
   │  Stage 1:   │    pass (§10 gates)?   │  Stage 2:    │     training
   │  RFT        │ ──────────────────────►│  step-SDPO   │ ──────────────►
-  │  (offline)  │     YES                │  (on-policy) │     convergence
+  │ (on-policy) │     YES                │  (on-policy) │     convergence
   └─────────────┘                        └──────────────┘
         │                                      │
-  Supervised CE on                       Self-distillation:
-  SWE-smith trajectories                 student ← teacher(EMA)
-  Think tokens EXCLUDED                  Think tokens INCLUDED
-  from loss mask                         in loss mask
+  Generate N rollouts per task           Self-distillation:
+  in Docker, keep successes,             student ← teacher(EMA)
+  supervised CE on tool-call tokens      Think tokens INCLUDED
+  Think tokens EXCLUDED                  in loss mask
 ```
 
 ### Stage 1: RFT (Rejection Fine-Tuning)
 
-- **Data**: SWE-smith / SWE-bench successful trajectories, adapted via `tool_schema_adapter.py`
+- **Data**: On-policy — roll out N attempts per SWE-bench task in Docker sandboxes via `env_bridge.py`, keep only successful resolutions
 - **Loss**: Supervised cross-entropy on masked tokens (tool-call tokens only, think tokens excluded per `action_masking.py` with `stage="rft"`)
 - **Config**: `configs/verl/rft_swe.yaml`
 - **Exit gate**: All 7 format quality metrics in `phase_transition_gates.v1.json` must pass (e.g., `parse_valid_rate ≥ 0.985`)
@@ -163,8 +164,8 @@ This section maps every module in `src/` to its integration point in the
 
 ### Stage 1.5 (optional): SDFT
 
-- Demo-conditioned self-distillation using gold trajectories as teacher conditioning
-- Same infrastructure as step-SDPO but with offline demos instead of on-policy rollouts
+- Demo-conditioned self-distillation using teacher-generated trajectories as conditioning
+- Same infrastructure as step-SDPO but with curated rollouts instead of fully on-policy rollouts
 - Controlled by `pipeline.sdft_enabled_default` in `training_policy_defaults.v1.json`
 
 ---
@@ -235,7 +236,7 @@ src/
     reprompt_adapter.py       # override _maybe_build_self_distillation_batch
     mask_injector.py          # build response_mask from action_masking.py
     env_bridge.py             # multi-turn rollout ↔ Docker sandbox
-    data_preprocessor.py      # SWE trajectories → verl parquet format
+    data_preprocessor.py      # rollout trajectories → verl-ready rows
 ```
 
 ### 5.2 `reward_function.py` — Reward Function
@@ -420,7 +421,7 @@ Step 6: EMA UPDATE
 | `src/verl_integration/reprompt_adapter.py` | Override teacher batch assembly with 6-block prompt | M | `prompt_builder`, `feedback_canonicalizer` |
 | `src/verl_integration/mask_injector.py` | Build response_mask from token labels + stage | S | `action_masking` |
 | `src/verl_integration/env_bridge.py` | Multi-turn rollout ↔ Docker sandbox | L | `runtime_protocol`, `contracts`, `turn_parser` |
-| `src/verl_integration/data_preprocessor.py` | SWE trajectories → verl parquet | M | `tool_schema_adapter`, `turn_parser`, `feedback_canonicalizer` |
+| `src/verl_integration/data_preprocessor.py` | Rollout trajectories → verl-ready rows | M | `tool_schema_adapter`, `turn_parser`, `feedback_canonicalizer` |
 | `configs/verl/sdpo_swe.yaml` | step-SDPO training config | S | — |
 | `configs/verl/rft_swe.yaml` | RFT pre-training config | S | — |
 | `configs/verl/user.yaml` | User-local path overrides | S | — |
@@ -440,9 +441,11 @@ Step 6: EMA UPDATE
 
 ### 8.3 Files unchanged (protocol layer — already complete)
 
-All files in `src/schemas/`, `src/prompts/`, `src/data/`, `src/rollout/`,
+All files in `src/schemas/`, `src/prompts/`, `src/rollout/`,
 `src/losses/`, `src/teacher/`, `src/metrics/`, `src/env/` remain as-is. They are
-consumed by the integration layer.
+consumed by the integration layer. `src/data/` contains `feedback_canonicalizer.py`,
+`tool_schema_adapter.py`, and `tokenization.py` (the offline ingestion module
+`trajectory_ingestion.py` was removed in v1.9).
 
 ---
 
@@ -488,17 +491,18 @@ docker>=24.0                   # container runtime
 
 ## 10. Milestone Schedule
 
-### M1: Data Ingestion Pipeline (prerequisite for all training)
-- [x] `verl_integration/data_preprocessor.py` — deterministic SWE trajectory rows for verl adapters (2026-02-21 09:55 UTC)
+### M1: Trajectory Preprocessing & Tokenization (prerequisite for all training)
+- [x] `verl_integration/data_preprocessor.py` — deterministic trajectory rows for verl adapters (2026-02-21 09:55 UTC)
 - [x] Stitch `tool_schema_adapter` + `turn_parser` + `feedback_canonicalizer` (2026-02-21 09:55 UTC)
-- [x] Tokenization bridge placeholder with per-token label masks (`action_mask_rft`, `action_mask_step_sdpo`) (2026-02-21 09:55 UTC)
-- [x] Validate on 100 trajectories end-to-end (2026-02-21 19:03 UTC; `scripts/prepare_rft_data.py` + `tests/test_prepare_rft_data_script.py`)
+- [x] Tokenization bridge with offset-aligned per-token label masks (`data/tokenization.py`) (2026-02-22)
+- [x] Batch tokenization support (`tokenize_batch_with_labels`) with graceful fallback (2026-02-22)
 
-### M2: RFT Training
+### M2: RFT Training (on-policy)
 - [x] `configs/verl/rft_swe.yaml` finalized (done — see `configs/verl/`)
 - [x] `verl_integration/mask_injector.py` for RFT-stage masking (2026-02-21 09:55 UTC)
-- [x] Launch RFT with verl SFT trainer (2026-02-21 19:03 UTC; launcher dry-run path validated via `tests/test_run_scripts.py`)
-- [x] Validate format gate passage on held-out set (2026-02-21 19:03 UTC; threshold gate checks + preprocessing validity checks in tests)
+- [x] Launcher dry-run path validated via `tests/test_run_scripts.py` (2026-02-21 19:03 UTC)
+- [ ] Environment executor (Docker sandbox) — prerequisite for on-policy rollouts
+- [ ] RFT rollout loop: generate N attempts per task, filter successful, train CE on masked tokens
 
 ### M3: Environment Executor
 - [x] `verl_integration/env_bridge.py` — deterministic rollout bridge with executor protocol (2026-02-21 09:55 UTC)
@@ -521,13 +525,13 @@ docker>=24.0                   # container runtime
 ### Ordering
 
 ```
-M1 ──► M2 ──────────────────────► M5
-          \                       ▲
-           ► M3 ──► M4 ──────────┘
+M1 ──► M3 ──► M2 ──────────────► M5
+                \                 ▲
+                 ► M4 ────────────┘
 ```
 
-M1 (data) and M3 (env) can proceed in parallel after M1 is partially done.
-M4 (SDPO) requires both M2 (RFT checkpoint) and M3 (env executor).
+M3 (env executor) is now prerequisite for M2 (RFT) since RFT is on-policy.
+M4 (SDPO) requires M2 (RFT checkpoint) + M3 (env executor).
 M5 (eval) can run against either M2 or M4 checkpoints.
 
 ### Progress Log
@@ -541,9 +545,48 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-21 10:25 UTC] Addressed follow-up PR feedback: hardened `external_tool_calls` parsing to handle non-mapping entries/strings as per-row `parse_error` (no run-level crash), added two regression tests, and added `verl @ git+https://github.com/lasgroup/SDPO.git` to `[project.optional-dependencies.train]` so launcher install guidance is consistent.
 - [2026-02-21 10:25 UTC] Test status: `pytest --override-ini addopts=''` passing (`31 passed`).
 - [2026-02-21 19:03 UTC] Addressed follow-up PR review findings for malformed `step_index` handling by making preprocessor, reward adapter, and reprompt adapter fault-tolerant; added regressions for bad `step_index` and batch continuity.
-- [2026-02-21 19:03 UTC] Implemented `scripts/prepare_rft_data.py` with JSON/JSONL ingestion, row-count/format-validity gates, JSONL emission, and summary reporting; validated end-to-end on 100 synthetic trajectories in tests.
+- [2026-02-21 19:03 UTC] (removed) `scripts/prepare_rft_data.py` and `data/trajectory_ingestion.py` deleted in v1.9 — RFT is on-policy, offline ingestion pipeline was unnecessary.
 - [2026-02-21 19:03 UTC] Extended evaluation harness with resolve-rate summaries/comparisons plus CLI (`scripts/eval_swebench_lite.py`) and non-invasive launcher dry-run checks for `run_rft.sh`, `run_sdft.sh`, `run_sdpo.sh`.
 - [2026-02-21 19:03 UTC] Added deterministic end-to-end scaffold in `SDPOTrainerScaffold.run_end_to_end_global_step` covering rollout bridge, reward, reprompt assembly, SDPO step stats, and EMA-proxy updates.
 - [2026-02-21 19:03 UTC] Test status: `pytest --override-ini addopts=''` passing (`44 passed`).
 - [2026-02-21 23:32 UTC] Addressed new PR review findings on string-typed `resolved` values by adding explicit bool coercion in `src/verl_integration/reward_function.py`, `src/verl_integration/reprompt_adapter.py`, and `src/eval/swebench_lite.py`, with regressions in `tests/test_verl_reward_function.py`, `tests/test_verl_reprompt_adapter.py`, and `tests/test_swebench_lite.py`.
 - [2026-02-21 23:32 UTC] Test status: `pytest --override-ini addopts=''` passing (`67 passed, 1 skipped`).
+
+---
+
+## 11. Configuration & Type Authority
+
+### 11.1 Type ownership boundaries
+
+- `src/schemas/` owns runtime/domain contracts (tool-call schema, rollout/task sample dataclasses, reward payload contracts).
+- `src/env/` owns environment protocol and env-runtime-specific types (request/response structs, container handle/pool structs).
+- `src/verl_integration/` owns wiring/adapters only and must import domain types from `schemas`/`env` rather than redefining them.
+
+### 11.2 Tool semantics authority
+
+- Canonical tool names, argument schemas, and validation logic are defined in `src/schemas/contracts.py`.
+- Runtime JSON config is allowed to provide policy knobs (counts, thresholds), but not redefine tool schemas.
+- The terminal tool policy in config must be validated against schema authority at startup.
+
+### 11.3 Runtime config authority
+
+- `src/config.py` is the import surface for runtime defaults loaded from:
+  - `configs/runtime/training_policy_defaults.v1.json`
+  - `configs/runtime/phase_transition_gates.v1.json` (for gate thresholds used by trainer/eval logic)
+- Shared output-contract exports (for example max/min tool calls, terminal tool) must come from `src/config.py`.
+- Prompt/collector/reward adapters must import those shared exports; no hardcoded contract literals.
+
+### 11.4 Model config resolution authority
+
+- Delimiter config resolution order:
+  1. `configs/model/<family>.yaml` (repo/user override)
+  2. `src/prompts/model_configs/<family>.yaml` (packaged default)
+- Bundled defaults remain in `src/prompts/model_configs/` for packaging stability.
+- Local experimentation/customization should be done via `configs/model/` overrides.
+
+### 11.5 Single-source policy checks
+
+- Startup validation should fail fast if:
+  - configured terminal tool is not in schema `ALLOWED_TOOLS`,
+  - configured tool-call bounds are invalid (`min < 1` or `max < min`).
+- This keeps runtime config flexible while preserving schema correctness.

@@ -1,8 +1,8 @@
-# small-swe-train: Research Mode v1.8 Design Revision Packet
+# small-swe-train: Research Mode v1.9 Design Revision Packet
 
 Generated: 2026-02-21 06:24 UTC (original), updated 2026-02-22
 Thread: 1771579678.414229
-Supersedes: v1.7 at this same path
+Supersedes: v1.8 at this same path
 
 ## 1) Chat contract for Qwen3-4B
 
@@ -121,7 +121,7 @@ small-swe-train/
     data/
       feedback_canonicalizer.py
       tool_schema_adapter.py
-      trajectory_ingestion.py  # SWE-smith/SWE-bench → training records
+      tokenization.py          # shared offset-based tokenization + batch support
     env/
       runtime_protocol.py      # ToolRequest, ToolResponse, EnvironmentStep
     rollout/
@@ -141,9 +141,8 @@ small-swe-train/
       reprompt_adapter.py        # 6-block teacher prompt assembly
       mask_injector.py           # stage-aware response_mask builder
       env_bridge.py              # multi-turn rollout ↔ executor bridge
-      data_preprocessor.py       # SWE trajectories → verl-ready rows
+      data_preprocessor.py       # rollout trajectories → verl-ready rows
   scripts/
-    prepare_rft_data.py
     run_rft.sh
     run_sdft.sh
     run_sdpo.sh
@@ -179,7 +178,7 @@ small-swe-train/
 | `prompts/chat_contract.py` | `build_assistant_contract_prompt` | — |
 | `data/feedback_canonicalizer.py` | `canonicalize_tool_feedback`, `build_feedback_packet` | `test_feedback_canonicalizer.py` |
 | `data/tool_schema_adapter.py` | `adapt_external_tool_call` | `test_tool_schema_adapter.py` |
-| `data/trajectory_ingestion.py` | `run_ingestion`, `build_episode`, `build_training_record` | `test_trajectory_ingestion.py` |
+| `data/tokenization.py` | `tokenize_with_labels`, `tokenize_batch_with_labels`, `build_labeled_spans` | `test_tokenization.py` |
 | `rollout/turn_parser.py` | `TurnParser`, `parse_chatml_assistant_turn` | `test_turn_parser.py` |
 | `losses/action_masking.py` | `build_action_token_mask` | `test_action_masking.py` |
 | `teacher/prompt_builder.py` | `build_teacher_prompt` | — |
@@ -200,9 +199,8 @@ small-swe-train/
 ### Not started (require real model / GPU / Docker)
 | Component | Description | Prerequisite for |
 |-----------|-------------|-----------------|
-| **Tokenization bridge** | Map `label_blocks` → token-aligned per-token masks using real Qwen3 tokenizer | RFT training |
-| **RFT training loop** | Model loading (LoRA), supervised CE on masked tokens via verl SFT trainer | SDPO entry gate |
-| **Environment executor** | Docker sandbox implementing `ToolExecutor` protocol for live tool dispatch | On-policy rollouts |
+| **Environment executor** | Docker sandbox implementing `ToolExecutor` protocol for live tool dispatch | RFT + SDPO rollouts |
+| **RFT training loop** | On-policy: rollout N attempts per task in Docker, filter successful, train CE on masked tokens (LoRA) via verl | SDPO entry gate |
 | **SDFT stage** | Demo-conditioned self-distillation (optional pre-SDPO) | — |
 | **Step-SDPO loop** | On-policy rollout → teacher prompt → KL distillation via verl PPO trainer | Main objective |
 | **Live evaluation harness** | Run agent on SWE-bench Lite with Docker sandboxes, score patches | Measuring progress |
@@ -224,15 +222,13 @@ have regression tests (72 passed, 1 skipped).
 
 ## 12) Recommended next steps (priority order)
 
-1. **Tokenization bridge** — The preprocessor now emits `label_blocks` (structured `{type, text}` per block) but the actual per-token masks still use whitespace approximation. Build a tokenizer wrapper that takes Qwen3-4B's tokenizer, tokenizes the assistant response, aligns `label_blocks` to real token IDs, and produces exact `response_mask` tensors. This closes the last gap before RFT data is genuinely training-ready.
+1. **Environment executor** — Implement a concrete `ToolExecutor` class backed by Docker containers. The `env_bridge.py` interface is stable; it needs a real executor behind `executor.run(request)` that dispatches `bash`/`search`/`edit`/`submit` to per-instance containers. This is the prerequisite for both RFT and SDPO since both stages are on-policy.
 
-2. **RFT training loop** — Wire the tokenization bridge output into verl's SFT trainer. The config (`rft_swe.yaml`) and LoRA settings are ready; the missing piece is the data-loading adapter that maps preprocessed JSONL rows into verl's `DataProto` format with real token IDs and aligned masks.
+2. **RFT training loop (on-policy)** — Roll out N attempts per SWE-bench task in Docker via `env_bridge.py`, filter to successful resolutions, then train CE on masked tokens (LoRA) via verl's SFT trainer. The tokenization bridge (`data/tokenization.py`) and preprocessor (`data_preprocessor.py`) are ready to convert rollout outputs into verl `DataProto` format with real token IDs and aligned masks. Config (`rft_swe.yaml`) and LoRA settings are in place.
 
-3. **Environment executor** — Implement a concrete `ToolExecutor` class backed by Docker containers. The `env_bridge.py` interface is stable; it needs a real executor behind `executor.run(request)` that dispatches `bash`/`search`/`edit`/`submit` to per-instance containers.
+3. **verl `reward_fn` signature adapter** — The current `reward_fn` takes `Sequence[Mapping]` and returns `list[float]`. verl expects `DataProto → (torch.Tensor, dict)`. Write a thin wrapper that unpacks/repacks between the two interfaces.
 
-4. **verl `reward_fn` signature adapter** — The current `reward_fn` takes `Sequence[Mapping]` and returns `list[float]`. verl expects `DataProto → (torch.Tensor, dict)`. Write a thin wrapper that unpacks/repacks between the two interfaces.
-
-5. **Step-SDPO loop** — With (2) for RFT checkpoint + format gates, (3) for live rollouts, and (4) for verl-compatible reward, the on-policy SDPO loop can be wired. The reprompt adapter and mask injector are ready; the remaining work is plumbing them into verl's `RayPPOTrainer` hooks.
+4. **Step-SDPO loop** — With (2) for RFT checkpoint + format gates, (1) for live rollouts, and (3) for verl-compatible reward, the on-policy SDPO loop can be wired. The reprompt adapter and mask injector are ready; the remaining work is plumbing them into verl's `RayPPOTrainer` hooks.
 
 ## 13) Training infrastructure decision
 

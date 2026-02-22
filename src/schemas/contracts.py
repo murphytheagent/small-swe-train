@@ -11,9 +11,72 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, TypedDict, cast, get_type_hints
 
 AllowedTool = Literal["bash", "search", "edit", "submit"]
-ALLOWED_TOOLS: tuple[str, ...] = ("bash", "search", "edit", "submit")
+# NOTE: AllowedTool above must remain a Literal for static type narrowing.
+BASH_TOOL_NAME: str = "bash"
+SEARCH_TOOL_NAME: str = "search"
+EDIT_TOOL_NAME: str = "edit"
+TERMINAL_TOOL_NAME: str = "submit"
+LEGACY_TERMINAL_TOOL_ALIAS: str = "answer"
+
+ALLOWED_TOOLS: tuple[str, ...] = (
+    BASH_TOOL_NAME,
+    SEARCH_TOOL_NAME,
+    EDIT_TOOL_NAME,
+    TERMINAL_TOOL_NAME,
+)
 _ALLOWED_TOOLS = set(ALLOWED_TOOLS)
 
+# ---------------------------------------------------------------------------
+# Tool schema registry + validator
+# ---------------------------------------------------------------------------
+# Each entry maps a canonical tool name to:
+#   source      – TypedDict defining the allowed fields and their types
+#   required    – which fields must be present
+#   constraints – per-field validation rules (min_length, minimum, maximum)
+# ---------------------------------------------------------------------------
+
+TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    BASH_TOOL_NAME: {
+        "source": BashArgs,
+        "required": ["command"],
+        "constraints": {
+            "command": {"min_length": 1},
+            "cwd": {"min_length": 1},
+            "timeout_sec": {"minimum": 1, "maximum": 600},
+        },
+    },
+    SEARCH_TOOL_NAME: {
+        "source": SearchArgs,
+        "required": ["query"],
+        "constraints": {
+            "query": {"min_length": 1},
+            "top_k": {"minimum": 1, "maximum": 50},
+        },
+    },
+    EDIT_TOOL_NAME: {
+        "source": EditArgs,
+        "required": ["path", "patch"],
+        "constraints": {
+            "path": {"min_length": 1},
+            "patch": {"min_length": 1},
+        },
+    },
+    TERMINAL_TOOL_NAME: {
+        "source": SubmitArgs,
+        "required": ["final_response"],
+        "constraints": {
+            "final_response": {"min_length": 1},
+            "confidence": {"minimum": 0.0, "maximum": 1.0},
+        },
+    },
+}
+
+_TYPE_MAP: dict[type, tuple[type, ...]] = {
+    str: (str,),
+    int: (int,),
+    float: (int, float),
+    bool: (bool,),
+}
 
 class BashArgs(TypedDict, total=False):
     command: str
@@ -48,8 +111,8 @@ class ToolOutput(TypedDict, total=False):
 def canonical_tool_name(tool: str) -> AllowedTool:
     """Normalize legacy aliases and enforce canonical tool names."""
     normalized = tool.strip().lower()
-    if normalized == "answer":
-        normalized = "submit"
+    if normalized == LEGACY_TERMINAL_TOOL_ALIAS:
+        normalized = TERMINAL_TOOL_NAME
     if normalized not in _ALLOWED_TOOLS:
         raise ValueError(f"Unsupported tool: {tool!r}")
     return cast(AllowedTool, normalized)
@@ -77,9 +140,9 @@ class ActionEnvelope:
     def __post_init__(self) -> None:
         if not self.tool_calls:
             raise ValueError("At least one tool call is required.")
-        has_submit = any(call.tool == "submit" for call in self.tool_calls)
+        has_submit = any(call.tool == TERMINAL_TOOL_NAME for call in self.tool_calls)
         if has_submit and len(self.tool_calls) != 1:
-            raise ValueError("If submit appears, it must be the only tool call in the turn.")
+            raise ValueError("Final turn, must be only one tool call in the turn.")
         if self.thinking is not None and not self.thinking.strip():
             object.__setattr__(self, "thinking", None)
 
@@ -180,59 +243,6 @@ def make_tool_call(payload: Mapping[str, Any]) -> ToolCall:
     if not isinstance(tool_raw, str):
         raise ValueError("'tool' must be a string.")
     return ToolCall(tool=canonical_tool_name(tool_raw), args=dict(args))
-
-
-# ---------------------------------------------------------------------------
-# Tool schema registry + validator
-# ---------------------------------------------------------------------------
-# Each entry maps a canonical tool name to:
-#   source      – TypedDict defining the allowed fields and their types
-#   required    – which fields must be present
-#   constraints – per-field validation rules (min_length, minimum, maximum)
-# ---------------------------------------------------------------------------
-
-TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
-    "bash": {
-        "source": BashArgs,
-        "required": ["command"],
-        "constraints": {
-            "command": {"min_length": 1},
-            "cwd": {"min_length": 1},
-            "timeout_sec": {"minimum": 1, "maximum": 600},
-        },
-    },
-    "search": {
-        "source": SearchArgs,
-        "required": ["query"],
-        "constraints": {
-            "query": {"min_length": 1},
-            "top_k": {"minimum": 1, "maximum": 50},
-        },
-    },
-    "edit": {
-        "source": EditArgs,
-        "required": ["path", "patch"],
-        "constraints": {
-            "path": {"min_length": 1},
-            "patch": {"min_length": 1},
-        },
-    },
-    "submit": {
-        "source": SubmitArgs,
-        "required": ["final_response"],
-        "constraints": {
-            "final_response": {"min_length": 1},
-            "confidence": {"minimum": 0.0, "maximum": 1.0},
-        },
-    },
-}
-
-_TYPE_MAP: dict[type, tuple[type, ...]] = {
-    str: (str,),
-    int: (int,),
-    float: (int, float),
-    bool: (bool,),
-}
 
 
 def validate_tool_call(tool_call: ToolCall) -> list[str]:

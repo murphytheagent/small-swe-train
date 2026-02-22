@@ -14,7 +14,7 @@ import re
 from typing import Iterable
 
 from prompts.model_delimiters import ModelDelimiters, default_delimiters
-from runtime_config import DEFAULT_MAX_TOOL_CALLS_PER_TURN
+from config import MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, ToolCall, make_tool_call
 
 
@@ -85,7 +85,7 @@ class TurnParser:
         return payload.lstrip("\n").strip()
 
     def parse_assistant_turn_payload(
-        self, payload: str, max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN
+        self, payload: str, max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN
     ) -> ActionEnvelope:
         """Parse assistant payload into canonical action envelope."""
         d = self._delimiters
@@ -147,7 +147,7 @@ class TurnParser:
             raise TurnParseError(str(exc)) from exc
 
     def parse_chatml_assistant_turn(
-        self, turn_text: str, max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN
+        self, turn_text: str, max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN
     ) -> ActionEnvelope:
         """Parse a full ChatML assistant turn string into an ActionEnvelope."""
         payload = self.extract_chatml_assistant_payload(turn_text)
@@ -169,14 +169,14 @@ def extract_chatml_assistant_payload(turn_text: str) -> str:
 
 
 def parse_assistant_turn_payload(
-    payload: str, max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN
+    payload: str, max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN
 ) -> ActionEnvelope:
     """Parse assistant payload using default model-family delimiters."""
     return _get_default_parser().parse_assistant_turn_payload(payload, max_tool_calls)
 
 
 def parse_chatml_assistant_turn(
-    turn_text: str, max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN
+    turn_text: str, max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN
 ) -> ActionEnvelope:
     """Parse a full ChatML assistant turn using default model-family delimiters."""
     return _get_default_parser().parse_chatml_assistant_turn(turn_text, max_tool_calls)

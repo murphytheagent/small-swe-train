@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from env.runtime_protocol import EnvironmentStep, ToolRequest, ToolResponse
 from prompts.model_delimiters import default_delimiters
 from rollout.turn_parser import parse_assistant_turn_payload, parse_chatml_assistant_turn
-from runtime_config import DEFAULT_MAX_TOOL_CALLS_PER_TURN
+from config import MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, ToolCall, validate_tool_call
 
 
@@ -64,7 +64,7 @@ def run_env_bridge_step(
     assistant_text: str,
     *,
     executor: ToolExecutor,
-    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+    max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
     step_index_start: int = 0,
 ) -> BridgeResult:
     """Parse one assistant turn and execute its non-terminal tool calls in order."""

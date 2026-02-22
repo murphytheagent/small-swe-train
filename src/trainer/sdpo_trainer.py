@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from runtime_config import DEFAULT_MAX_TOOL_CALLS_PER_TURN
+from config import MAX_TOOL_CALLS_PER_TURN
 from verl_integration.mask_injector import inject_response_mask
 from verl_integration.reprompt_adapter import build_self_distillation_batch
 from verl_integration.reward_function import reward_fn
@@ -15,7 +15,7 @@ from verl_integration.env_bridge import ToolExecutor, run_env_bridge_step
 @dataclass(frozen=True)
 class SDPOTrainerConfig:
     model_name: str
-    max_tool_calls_per_turn: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN
+    max_tool_calls_per_turn: int = MAX_TOOL_CALLS_PER_TURN
     include_student_attempt_for_teacher: bool = True
     top_k_distillation: int = 100
     ema_beta: float = 0.005
