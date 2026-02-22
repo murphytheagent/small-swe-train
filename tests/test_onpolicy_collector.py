@@ -240,6 +240,37 @@ def test_onpolicy_collector_uses_fresh_container_per_attempt() -> None:
     assert pool.release_calls == 2
 
 
+def test_onpolicy_collector_keeps_tool_output_aligned_with_first_tool_call() -> None:
+    pool = _FakePool()
+    executor = _FakeExecutor()
+
+    def turn_generator(**kwargs: object) -> str:
+        turn_index = int(kwargs["turn_index"])
+        if turn_index == 0:
+            return (
+                '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+                '\n<tool_call>{"tool":"bash","args":{"command":"echo second"}}</tool_call>'
+            )
+        return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+
+    collector = OnPolicyRolloutCollector(
+        settings=_settings(),
+        turn_generator=turn_generator,
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["is_terminal"] is True
+    assert row["tool_name"] == "search"
+    assert row["tool_output"]["stdout"] == "ran:search"
+    assert '"tool":"search"' in row["assistant_response"]
+
+
 def test_onpolicy_collector_default_turn_generator_produces_resolved_attempt() -> None:
     pool = _FakePool()
     executor = _FakeExecutor()

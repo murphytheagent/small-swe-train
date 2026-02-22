@@ -160,6 +160,7 @@ class OnPolicyRolloutCollector:
         attempt_start = self._monotonic_clock()
         history: list[str] = []
         assistant_response = ""
+        assistant_response_for_feedback = ""
         tool_output: dict[str, object] = {}
         turn_index = -1
         resolved = False
@@ -207,20 +208,25 @@ class OnPolicyRolloutCollector:
             history.extend(bridge_result.tool_response_blocks)
             if bridge_result.steps:
                 attempt_steps.extend(bridge_result.steps)
+                assistant_response_for_feedback = assistant_response
 
             if bridge_result.steps:
-                last_step = bridge_result.steps[-1]
-                tool_name = last_step.request.tool
-                exit_code = last_step.response.exit_code
+                first_step = bridge_result.steps[0]
+                tool_name = first_step.request.tool
+                exit_code = first_step.response.exit_code
                 tool_output = {
-                    "stdout": last_step.response.stdout,
-                    "stderr": last_step.response.stderr,
-                    "exit_code": last_step.response.exit_code,
-                    "metadata": dict(last_step.response.metadata),
+                    "stdout": first_step.response.stdout,
+                    "stderr": first_step.response.stderr,
+                    "exit_code": first_step.response.exit_code,
+                    "metadata": dict(first_step.response.metadata),
                 }
-                if last_step.response.exit_code != 0:
-                    executor_error = last_step.response.stderr or (
-                        f"Tool {last_step.request.tool!r} failed with exit code {last_step.response.exit_code}."
+                failing_step = next(
+                    (step for step in bridge_result.steps if step.response.exit_code != 0),
+                    None,
+                )
+                if failing_step is not None:
+                    executor_error = failing_step.response.stderr or (
+                        f"Tool {failing_step.request.tool!r} failed with exit code {failing_step.response.exit_code}."
                     )
 
             if bridge_result.is_terminal:
@@ -243,10 +249,11 @@ class OnPolicyRolloutCollector:
             + task_position * runtime.attempts_per_task
             + attempt_index
         )
+        row_assistant_response = assistant_response_for_feedback or assistant_response
 
         row: RolloutRow = {
             "prompt": task.problem_statement,
-            "assistant_response": assistant_response,
+            "assistant_response": row_assistant_response,
             "tool_output": tool_output,
             "resolved": bool(resolved),
             "step_index": row_step_index,

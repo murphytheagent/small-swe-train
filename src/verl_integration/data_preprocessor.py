@@ -18,6 +18,9 @@ from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, pa
 from config import MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, ToolCall, validate_tool_call
 
+_TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
+_FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
+
 
 def _parse_assistant_response(assistant_response: str, *, max_tool_calls: int) -> ActionEnvelope:
     stripped = assistant_response.strip()
@@ -105,6 +108,24 @@ def _coerce_step_index(value: Any, *, fallback: int) -> int:
     return coerced
 
 
+def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, float):
+        return value != 0.0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+    return fallback
+
+
 def preprocess_trajectories(
     trajectories: Sequence[Mapping[str, Any]],
     *,
@@ -134,8 +155,9 @@ def preprocess_trajectories(
             assistant_response = assistant_response_raw
         else:
             assistant_response = str(assistant_response_raw)
-        include_student_attempt_for_teacher = bool(
-            sample.get("include_student_attempt_for_teacher", True)
+        include_student_attempt_for_teacher = _coerce_bool_flag(
+            sample.get("include_student_attempt_for_teacher"),
+            fallback=True,
         )
 
         tool_calls: tuple[ToolCall, ...] = ()

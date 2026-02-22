@@ -67,6 +67,32 @@ def test_preprocess_trajectories_treats_null_assistant_response_as_absent() -> N
     assert rows[0]["parse_error"] is None
 
 
+def test_preprocess_trajectories_coerces_include_student_flag_false_strings() -> None:
+    trajectories = [
+        {
+            "prompt": "Submit answer",
+            "assistant_response": "",
+            "include_student_attempt_for_teacher": "false",
+            "external_tool_calls": [
+                {"tool": "answer", "args": {"answer": "fixed"}},
+            ],
+        },
+        {
+            "prompt": "Submit answer 2",
+            "assistant_response": "",
+            "include_student_attempt_for_teacher": "0",
+            "external_tool_calls": [
+                {"tool": "answer", "args": {"answer": "fixed"}},
+            ],
+        },
+    ]
+
+    rows = preprocess_trajectories(trajectories)
+
+    assert rows[0]["feedback_packet"]["include_student_attempt_for_teacher"] is False
+    assert rows[1]["feedback_packet"]["include_student_attempt_for_teacher"] is False
+
+
 def test_preprocess_trajectories_records_parse_error() -> None:
     trajectories = [
         {

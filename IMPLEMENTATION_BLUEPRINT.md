@@ -559,6 +559,8 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-22 06:10 UTC] Test status: local `pytest --override-ini addopts=''` passing (`89 passed, 2 skipped`); remote targeted suite in `swe311` passing (`13 passed`) for updated adapter/trainer/script tests.
 - [2026-02-22 06:10 UTC] GPU Slurm proof reached on-policy collection + dataset + trainer initialization, but final one-step run is blocked by remote environment dependencies (`flash_attn`) and transient SSH reachability during repeated retries.
 - [2026-02-22 07:22 UTC] Added no-FlashAttention fallback entrypoint (`src/verl_integration/fsdp_sft_trainer_entry.py`) plus W&B logging wiring in proof launchers (`scripts/run_rft.sh`, `scripts/run_rft_onpolicy_rollout_proof.sh`); local + remote script regressions pass, but final Slurm one-step proof remains blocked because the only GPU partition node (`wth-gpu-01`) is currently `down` per `sinfo`.
+- [2026-02-22 11:14 UTC] Addressed the remaining active PR #4 review threads: `src/rollout/onpolicy_collector.py` now keeps `assistant_response`/`tool_output` aligned to the same first executed tool call for the sampled turn and records executor failures from the first non-zero step; `src/verl_integration/data_preprocessor.py` now coerces bool-like `include_student_attempt_for_teacher` values instead of Python truthy casting.
+- [2026-02-22 11:14 UTC] Added regressions in `tests/test_onpolicy_collector.py` and `tests/test_verl_data_preprocessor.py`; validation status: local `pytest --override-ini addopts=''` passing (`104 passed, 2 skipped`), plus Slurm GPU validation on `tianhaowang-gpu0` (`job 422`, `--gres=gpu:1 --mem=24G`) with CUDA visible and targeted suites passing (`19 passed`).
 
 ---
 
