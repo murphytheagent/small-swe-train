@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+import config
+from prompts.chat_contract import build_assistant_contract_prompt
+from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME
+
+
+def test_terminal_tool_is_supported_by_schema() -> None:
+    assert config.TERMINAL_TOOL_NAME in ALLOWED_TOOLS
+    assert config.TERMINAL_TOOL_NAME == SCHEMA_TERMINAL_TOOL_NAME
+
+
+def test_output_contract_exports_match_runtime_defaults() -> None:
+    output_contract = config.output_contract_defaults()
+
+    assert config.MIN_TOOL_CALLS_PER_TURN == int(output_contract["min_tool_calls_per_turn"])
+    assert config.MAX_TOOL_CALLS_PER_TURN == int(output_contract["max_tool_calls_per_turn"])
+    assert config.TERMINAL_TOOL_NAME == str(output_contract["terminal_tool"]).strip().lower()
+    assert config.SUBMIT_MUST_BE_ONLY_TOOL_CALL is bool(output_contract["submit_must_be_only_tool_call"])
+
+
+def test_phase_transition_gates_defaults_load() -> None:
+    gates = config.phase_transition_gates_defaults()
+    assert "entry_gate_for_main_sdpo" in gates
+
+
+def test_tool_call_bounds_are_valid() -> None:
+    assert config.MIN_TOOL_CALLS_PER_TURN >= 1
+    assert config.MAX_TOOL_CALLS_PER_TURN >= config.MIN_TOOL_CALLS_PER_TURN
+
+
+def test_prompt_contract_uses_centralized_terminal_tool_default() -> None:
+    prompt = build_assistant_contract_prompt()
+    assert f"Terminal tool is '{config.TERMINAL_TOOL_NAME}'" in prompt
+
+
+def test_terminal_tool_validator_rejects_unknown_name() -> None:
+    with pytest.raises(ValueError, match="Invalid terminal tool"):
+        config._validate_terminal_tool_name("not-a-tool", allowed_tools=ALLOWED_TOOLS)
+
+
+def test_on_policy_runtime_defaults_load_from_central_json() -> None:
+    on_policy = config.on_policy_runtime_defaults()
+    assert on_policy["task_batch_size"] >= 1
+    assert on_policy["attempts_per_task"] >= 1
+    assert on_policy["env_pool_size"] >= on_policy["task_batch_size"]
+
+
+def test_on_policy_data_defaults_load_from_configs_data() -> None:
+    data_defaults = config.on_policy_data_defaults()
+    assert data_defaults["dataset_id"] == "SWE-bench/SWE-smith-py"
+    assert data_defaults["columns"]["image_name"] == "image_name"
+    assert data_defaults["columns"]["problem_statement"] == "problem_statement"
+    assert data_defaults["columns"]["fail_to_pass"] == "FAIL_TO_PASS"
+    assert data_defaults["columns"]["pass_to_pass"] == "PASS_TO_PASS"
+
+
+def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
+    settings = config.resolve_on_policy_settings()
+    assert settings.data.dataset_id == "SWE-bench/SWE-smith-py"
+    assert settings.runtime.env_pool_size >= settings.runtime.task_batch_size
+    assert settings.runtime.max_tool_calls_per_turn <= config.MAX_TOOL_CALLS_PER_TURN
+
+
+def test_resolve_rft_handoff_settings_loads_selection_policy() -> None:
+    settings = config.resolve_rft_handoff_settings()
+    assert settings.max_sequence_length >= 2
+    assert settings.pad_token_id >= 0
+    assert settings.selection.require_terminal is True
+    assert settings.selection.require_resolved is True
+    assert settings.selection.reject_on_validation_errors is True
+
+
+def test_verl_integration_has_no_config_dataclass_definitions() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    integration_dir = repo_root / "src" / "verl_integration"
+    config_named_classes: list[str] = []
+    for path in sorted(integration_dir.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name.endswith("Config"):
+                config_named_classes.append(f"{path.name}:{node.name}")
+    assert config_named_classes == []

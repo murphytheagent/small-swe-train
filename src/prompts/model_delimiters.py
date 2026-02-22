@@ -1,8 +1,11 @@
 """Model-family delimiter configuration, loadable from YAML.
 
-Bundled configs live in ``prompts/model_configs/`` and are shipped with the
-package.  Call ``default_delimiters()`` (cached) or ``load_delimiters(path)``
-to obtain a ``ModelDelimiters`` instance.
+Resolution order for ``default_delimiters(model_family)``:
+1) ``configs/model/<family>.yaml`` repo/user overrides
+2) bundled ``prompts/model_configs/<family>.yaml`` package defaults
+
+Call ``default_delimiters()`` (cached) or ``load_delimiters(path)`` to obtain
+a ``ModelDelimiters`` instance.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_BUNDLED_CONFIGS_DIR = Path(__file__).resolve().parent / "model_configs"
+from config import resolve_model_config_path
 
 
 @dataclass(frozen=True)
@@ -55,8 +58,8 @@ def load_delimiters(config_path: str | Path) -> ModelDelimiters:
 
 @functools.lru_cache(maxsize=4)
 def default_delimiters(model_family: str = "qwen3") -> ModelDelimiters:
-    """Load delimiters for *model_family* from ``configs/model/<family>.yaml``.
+    """Load delimiters for *model_family* via config override/fallback resolution.
 
     Results are cached; subsequent calls with the same family are free.
     """
-    return load_delimiters(_BUNDLED_CONFIGS_DIR / f"{model_family}.yaml")
+    return load_delimiters(resolve_model_config_path(model_family))

@@ -1,8 +1,8 @@
-# small-swe-train: Research Mode v1.7 Design Revision Packet (on `main` branch)
+# small-swe-train: Research Mode v1.9 Design Revision Packet
 
-Generated: 2026-02-21 06:24 UTC (original), updated 2026-02-21
+Generated: 2026-02-21 06:24 UTC (original), updated 2026-02-22
 Thread: 1771579678.414229
-Supersedes: v1.6 at this same path
+Supersedes: v1.8 at this same path
 
 ## 1) Chat contract for Qwen3-4B
 
@@ -98,11 +98,16 @@ Computed from canonical feedback fields: `has_failing_artifact_identity`, `has_a
 
 ```text
 small-swe-train/
+  IMPLEMENTATION_BLUEPRINT.md    # architecture, data flow, milestones
   pyproject.toml
   configs/
     runtime/
       training_policy_defaults.v1.json
       phase_transition_gates.v1.json
+    verl/                        # verl/SDPO training configs
+      sdpo_swe.yaml              # step-SDPO (main objective)
+      rft_swe.yaml               # RFT supervised pre-training
+      user.yaml                  # user-local path overrides
     data/
     experiments/
   src/
@@ -116,12 +121,13 @@ small-swe-train/
     data/
       feedback_canonicalizer.py
       tool_schema_adapter.py
+      tokenization.py          # shared offset-based tokenization + batch support
     env/
       runtime_protocol.py      # ToolRequest, ToolResponse, EnvironmentStep
     rollout/
       turn_parser.py           # TurnParser class
     trainer/
-      sdpo_trainer.py          # STUB — SDPOTrainerScaffold
+      sdpo_trainer.py          # SDPOTrainerScaffold (deterministic)
     losses/
       action_masking.py
     teacher/
@@ -129,9 +135,14 @@ small-swe-train/
     metrics/
       contracts.py             # FormatMetrics, rate()
     eval/
-      swebench_lite.py         # STUB — EpisodeResult
+      swebench_lite.py         # EpisodeResult, summarize, compare
+    verl_integration/            # adapter layer: our modules ↔ verl
+      reward_function.py         # verl reward_fn (deterministic scaffold)
+      reprompt_adapter.py        # 6-block teacher prompt assembly
+      mask_injector.py           # stage-aware response_mask builder
+      env_bridge.py              # multi-turn rollout ↔ executor bridge
+      data_preprocessor.py       # rollout trajectories → verl-ready rows
   scripts/
-    prepare_rft_data.py
     run_rft.sh
     run_sdft.sh
     run_sdpo.sh
@@ -167,42 +178,82 @@ small-swe-train/
 | `prompts/chat_contract.py` | `build_assistant_contract_prompt` | — |
 | `data/feedback_canonicalizer.py` | `canonicalize_tool_feedback`, `build_feedback_packet` | `test_feedback_canonicalizer.py` |
 | `data/tool_schema_adapter.py` | `adapt_external_tool_call` | `test_tool_schema_adapter.py` |
+| `data/tokenization.py` | `tokenize_with_labels`, `tokenize_batch_with_labels`, `build_labeled_spans` | `test_tokenization.py` |
 | `rollout/turn_parser.py` | `TurnParser`, `parse_chatml_assistant_turn` | `test_turn_parser.py` |
 | `losses/action_masking.py` | `build_action_token_mask` | `test_action_masking.py` |
 | `teacher/prompt_builder.py` | `build_teacher_prompt` | — |
 | `env/runtime_protocol.py` | `ToolRequest`, `ToolResponse`, `EnvironmentStep` | — |
 | `metrics/contracts.py` | `FormatMetrics`, `rate` | — |
 
-### Stubs (interfaces defined, implementation pending)
-| Module | What's missing |
-|--------|---------------|
-| `trainer/sdpo_trainer.py` | `run_rft_epoch`, `run_sdpo_step` raise `NotImplementedError` |
-| `eval/swebench_lite.py` | `evaluate_swebench_lite` raises `NotImplementedError` |
+### Implemented (verl integration scaffold — deterministic, no GPU)
+| Module | Key exports | Tests |
+|--------|------------|-------|
+| `verl_integration/reward_function.py` | `reward_fn` — parse, validate, score, format metrics | `test_verl_reward_function.py` |
+| `verl_integration/reprompt_adapter.py` | `build_self_distillation_batch` — 6-block teacher prompts + mask | `test_verl_reprompt_adapter.py` |
+| `verl_integration/mask_injector.py` | `inject_response_mask` — stage-aware boolean masks | `test_verl_mask_injector.py` |
+| `verl_integration/env_bridge.py` | `run_env_bridge_step` — parse + validate + dispatch | `test_verl_env_bridge.py` |
+| `verl_integration/data_preprocessor.py` | `preprocess_trajectories` — rows + label blocks + approx masks | `test_verl_data_preprocessor.py` |
+| `trainer/sdpo_trainer.py` | `SDPOTrainerScaffold` — deterministic end-to-end step | `test_sdpo_trainer.py` |
+| `eval/swebench_lite.py` | `evaluate_swebench_lite`, `summarize_episode_results`, `compare_resolve_rates` | `test_swebench_lite.py` |
 
-### Not started
+### Not started (require real model / GPU / Docker)
 | Component | Description | Prerequisite for |
 |-----------|-------------|-----------------|
-| **Data ingestion pipeline** | Read SWE trajectories → tokenized training examples using adapter + parser + canonicalizer | RFT training |
-| **Tokenization bridge** | Map `ActionEnvelope` / `EnvironmentStep` to token IDs + label masks | RFT training |
-| **RFT training loop** | Model loading, supervised training on formatted tool calls | SDPO entry gate |
-| **Environment executor** | Docker sandbox that runs tool calls, returns `ToolResponse` | On-policy rollouts |
+| **Environment executor** | Docker sandbox implementing `ToolExecutor` protocol for live tool dispatch | RFT + SDPO rollouts |
+| **RFT training loop** | On-policy: rollout N attempts per task in Docker, filter successful, train CE on masked tokens (LoRA) via verl | SDPO entry gate |
 | **SDFT stage** | Demo-conditioned self-distillation (optional pre-SDPO) | — |
-| **Step-SDPO loop** | On-policy rollout → teacher prompt → KL distillation | Main objective |
-| **Evaluation harness** | Run agent on SWE-bench Lite, score patches | Measuring progress |
+| **Step-SDPO loop** | On-policy rollout → teacher prompt → KL distillation via verl PPO trainer | Main objective |
+| **Live evaluation harness** | Run agent on SWE-bench Lite with Docker sandboxes, score patches | Measuring progress |
 
-## 11) Recommended next steps (priority order)
+## 11) Bug-fix log (v1.8, 2026-02-22)
 
-1. **Data ingestion pipeline** — stitch `tool_schema_adapter` + `turn_parser` + `feedback_canonicalizer` into a script that reads raw SWE trajectories (SWE-smith / SWE-bench format) and outputs tokenized training records. This is the prerequisite for all training.
+Seven bugs were identified and fixed in the verl integration layer. All fixes
+have regression tests (72 passed, 1 skipped).
 
-2. **Tokenization bridge** — map `ActionEnvelope` + `EnvironmentStep` sequences to token ID tensors + per-token label masks (using `build_action_token_mask`). Requires choosing tokenizer (Qwen3-4B) and sequence format.
+| # | File | Bug | Fix |
+|---|------|-----|-----|
+| 1 | `env_bridge.py` | Submit early-return bypassed `validate_tool_call`, so malformed submit payloads (missing `final_response`) silently ended episodes | Validate submit call before terminal return; surface errors in `steps` and `tool_response_blocks` |
+| 2 | `reprompt_adapter.py` | `has_teacher_signal` derived from `bool(feedback_block.strip())`; empty `tool_output` canonicalizes to `'{}'` which is truthy, flipping the distillation mask on for rows with no signal | Use `feedback_packet.self_containment_checks.has_actionable_error_text` instead |
+| 3 | `reward_function.py` | `step_index` coercion failures were appended to `sample_errors` and gated the reward, zeroing out valid resolved samples with bad metadata | Separate `step_index_warnings` from format `validation_errors`; only format errors gate reward |
+| 4 | `reprompt_adapter.py` | `_truncate_prompt_tokens` used `" ".join(tokens[:N])`, collapsing newlines into spaces and destroying the 6-block teacher prompt structure | Line-aware truncation: split by `\n`, count whitespace words per line, preserve newlines |
+| 5 | `data_preprocessor.py` | `_labels_from_envelope` sized per-token masks via `len(text.split())` (whitespace words), producing masks that won't align with subword tokenizer output | Renamed to `_approx_labels_from_envelope` with warning; added `label_blocks` output with structured `{type, text}` block metadata for tokenizer-aligned mask generation |
+| 6 | `data_preprocessor.py` | Non-string `thinking` field (e.g. int) passed to `ActionEnvelope` caused `AttributeError` on `.strip()` | Coerce `thinking` to `str(value)` when non-None and non-string |
+| 7 | `rft_swe.yaml` / `sdpo_swe.yaml` | No LoRA configuration despite blueprint memory budget assuming LoRA (optimizer states ~0.05 GB vs ~8+ GB for full fine-tuning) | Added `lora:` block with `rank=64`, `alpha=128`, targets `q_proj/k_proj/v_proj/o_proj` |
 
-3. **RFT training loop** — implement `run_rft_epoch` using the tokenized data. Simple supervised cross-entropy on masked tokens. This teaches the model correct tool-call format.
+## 12) Recommended next steps (priority order)
 
-4. **Environment executor** — Docker-based sandbox for `bash`/`search`/`edit` execution. Needed before on-policy SDPO can run.
+1. **Environment executor** — Implement a concrete `ToolExecutor` class backed by Docker containers. The `env_bridge.py` interface is stable; it needs a real executor behind `executor.run(request)` that dispatches `bash`/`search`/`edit`/`submit` to per-instance containers. This is the prerequisite for both RFT and SDPO since both stages are on-policy.
 
-5. **Step-SDPO loop** — the main training objective. Depends on (3) for format quality gates and (4) for on-policy rollouts.
+2. **RFT training loop (on-policy)** — Roll out N attempts per SWE-bench task in Docker via `env_bridge.py`, filter to successful resolutions, then train CE on masked tokens (LoRA) via verl's SFT trainer. The tokenization bridge (`data/tokenization.py`) and preprocessor (`data_preprocessor.py`) are ready to convert rollout outputs into verl `DataProto` format with real token IDs and aligned masks. Config (`rft_swe.yaml`) and LoRA settings are in place.
 
-## 12) Sources
+3. **verl `reward_fn` signature adapter** — The current `reward_fn` takes `Sequence[Mapping]` and returns `list[float]`. verl expects `DataProto → (torch.Tensor, dict)`. Write a thin wrapper that unpacks/repacks between the two interfaces.
+
+4. **Step-SDPO loop** — With (2) for RFT checkpoint + format gates, (1) for live rollouts, and (3) for verl-compatible reward, the on-policy SDPO loop can be wired. The reprompt adapter and mask injector are ready; the remaining work is plumbing them into verl's `RayPPOTrainer` hooks.
+
+## 13) Training infrastructure decision
+
+### 13.1 Framework
+- **Trainer & rollout**: `lasgroup/SDPO` (a fork of [verl](https://github.com/verl-project/verl)) used as-is.
+- **Rollout engine**: vLLM (via verl's colocated rollout worker).
+- **Training engine**: FSDP `FULL_SHARD` across 8 GPUs (via verl's `DataParallelPPOActor`).
+- FSDP is needed not for model size (Qwen3-4B ≈ 8 GB bf16) but for **activation memory headroom** with long SWE-bench trajectories (8K–16K tokens).
+
+### 13.2 Hardware target
+- Single node, 8× A100 or H100 GPUs (80 GB each).
+- GPUs alternate between vLLM inference and FSDP training each global step.
+
+### 13.3 Config files
+- `configs/verl/sdpo_swe.yaml` — step-SDPO training (main objective).
+- `configs/verl/rft_swe.yaml` — RFT supervised pre-training.
+- `configs/verl/user.yaml` — user-local path overrides.
+
+### 13.4 Integration layer
+- New package `src/verl_integration/` bridges our protocol modules with verl hooks.
+- Full architecture, data flow, and milestone plan in `IMPLEMENTATION_BLUEPRINT.md`.
+
+## 14) Sources
 - Qwen3 tokenizer chat template: https://huggingface.co/Qwen/Qwen3-4B/blob/main/tokenizer_config.json
 - SDPO baseline: https://github.com/lasgroup/SDPO
+- verl framework: https://github.com/verl-project/verl
 - Thread review: https://github.com/murphytheagent/small-swe-train/pull/2#discussion_r2835868321
+- Implementation blueprint: `IMPLEMENTATION_BLUEPRINT.md` (this repo)

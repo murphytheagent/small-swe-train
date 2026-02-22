@@ -37,7 +37,7 @@
     "max_tool_calls_per_turn": 3,
     "terminal_tool": "submit",
     "submit_must_be_only_tool_call": true,
-    "legacy_answer_alias_for_ingestion": true
+    "legacy_answer_alias_for_canonicalization": true
   },
   "teacher": {
     "regularization": "ema",

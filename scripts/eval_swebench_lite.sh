@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "SWE-bench Lite eval scaffold only."
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+python "${ROOT_DIR}/scripts/eval_swebench_lite.py" "$@"

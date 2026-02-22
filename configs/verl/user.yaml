@@ -1,0 +1,7 @@
+# User-local path overrides for verl.
+# Copy this file and adjust paths to match your environment.
+
+vars:
+  dir: /home/${oc.env:USER}/small-swe-train       # project root
+  log_dir: /home/${oc.env:USER}/logs/small-swe     # W&B / tensorboard logs
+  ckpt_dir: /home/${oc.env:USER}/checkpoints/small-swe

@@ -1,0 +1,51 @@
+Metadata-Version: 2.4
+Name: small-swe-train
+Version: 0.1.0
+Summary: Scaffold for chat-style SWE training contracts and SDPO plumbing
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3; extra == "dev"
+Provides-Extra: train
+Requires-Dist: torch>=2.5.1; extra == "train"
+Requires-Dist: transformers>=4.46; extra == "train"
+Requires-Dist: flash-attn>=2.7; extra == "train"
+Requires-Dist: peft>=0.13; extra == "train"
+Requires-Dist: vllm>=0.8.4; extra == "train"
+Requires-Dist: datasets>=3.0; extra == "train"
+Requires-Dist: ray>=2.40; extra == "train"
+Requires-Dist: verl @ git+https://github.com/lasgroup/SDPO.git ; extra == "train"
+Requires-Dist: omegaconf>=2.3; extra == "train"
+Requires-Dist: hydra-core>=1.3; extra == "train"
+Requires-Dist: wandb>=0.19; extra == "train"
+
+# small-swe-train
+
+Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO stages.
+
+## What is implemented
+- Stable protocol types for assistant tool-call envelopes and feedback packets.
+- ChatML assistant-turn parser with `<think>` and ordered `<tool_call>` support.
+- Canonical feedback normalization and deterministic self-containment diagnostics.
+- Deterministic adapter layer from SWE-style tool traces into canonical tools.
+- Stage-aware masking policy helpers for `rft` and `step_sdpo`.
+- Initial trainer/prompt/eval interface signatures.
+
+## Layout
+- `src/schemas/`: frozen JSON schema contracts + typed protocol models.
+- `src/rollout/`: ChatML turn parser.
+- `src/data/`: feedback canonicalizer + external tool-schema adapters.
+- `src/losses/`: stage-aware action masking helpers.
+- `src/teacher/`: block-structured teacher prompt builder.
+- `src/trainer/`: trainer scaffold signatures.
+- `tests/`: protocol stability tests.
+
+## Quick start
+```bash
+python -m pytest
+```
+
+## Notes
+- This commit intentionally implements interfaces and tests first, not training-loop execution.
+- Design artifacts remain under `outputs/1771579678.414229/` as frozen planning context.

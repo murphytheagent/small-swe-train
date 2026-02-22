@@ -1,5 +1,15 @@
 """Trainer package."""
 
-from .sdpo_trainer import SDPOTrainerConfig, SDPOTrainerScaffold, TrainingStepStats
+from .sdpo_trainer import (
+    EndToEndStepArtifacts,
+    SDPOTrainerConfig,
+    SDPOTrainerScaffold,
+    TrainingStepStats,
+)
 
-__all__ = ["SDPOTrainerConfig", "SDPOTrainerScaffold", "TrainingStepStats"]
+__all__ = [
+    "EndToEndStepArtifacts",
+    "SDPOTrainerConfig",
+    "SDPOTrainerScaffold",
+    "TrainingStepStats",
+]

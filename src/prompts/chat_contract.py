@@ -8,6 +8,7 @@ etc.) are derived from the default (Qwen3) config for backward compatibility.
 from __future__ import annotations
 
 from prompts.model_delimiters import ModelDelimiters, default_delimiters
+from config import MAX_TOOL_CALLS_PER_TURN, TERMINAL_TOOL_NAME
 
 _d = default_delimiters()
 CHATML_START: str = _d.role_start
@@ -24,8 +25,8 @@ del _d
 def build_assistant_contract_prompt(
     *,
     delimiters: ModelDelimiters | None = None,
-    max_tool_calls: int = 3,
-    terminal_tool: str = "submit",
+    max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
+    terminal_tool: str = TERMINAL_TOOL_NAME,
 ) -> str:
     """Return an instruction block that matches the v1.6 action contract."""
     d = delimiters or default_delimiters()

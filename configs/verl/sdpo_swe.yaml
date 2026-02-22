@@ -1,0 +1,194 @@
+# verl/SDPO config for step-SDPO SWE-agent training
+# Extends lasgroup/SDPO's sdpo.yaml with SWE-bench-specific settings
+#
+# Hardware target: single node, 8× A100/H100 GPUs
+# Model: Qwen3-4B with LoRA
+# Sequence budget: up to ~19K tokens (prompt + trajectory + response)
+#
+# Usage:
+#   python -m verl.trainer.main_ppo --config-name sdpo_swe "$@"
+
+defaults:
+  - ppo_trainer
+  - user
+  - _self_
+
+# ---------------------------------------------------------------------------
+# Sequence budget
+# ---------------------------------------------------------------------------
+# MAX_PROMPT_LENGTH   = 2048   (system + task)
+# MAX_RESPONSE_LENGTH = 8192   (multi-turn tool-call trajectory)
+# MAX_FEEDBACK_LENGTH = 8192   (teacher reprompt includes feedback + attempt)
+# TEMPLATE_OVERHEAD   = 512
+# TOTAL               = 18944
+max_model_len: 18944
+
+# ---------------------------------------------------------------------------
+# Actor / Rollout / Ref (colocated on same 8 GPUs)
+# ---------------------------------------------------------------------------
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen3-4B
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+    trust_remote_code: false
+    external_lib: null
+    override_config: {}
+    lora:
+      enable: true
+      rank: 64
+      alpha: 128
+      target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+      dropout: 0.05
+
+  actor:
+    strategy: fsdp2
+
+    # -- Policy loss ----------------------------------------------------------
+    policy_loss:
+      loss_mode: sdpo
+    loss_agg_mode: token-mean
+
+    # -- Self-distillation (step-SDPO) ----------------------------------------
+    self_distillation:
+      full_logit_distillation: true
+      alpha: 0.5                              # JSD = 0.5 * fwd_KL + 0.5 * rev_KL
+      success_reward_threshold: 1.0           # binary: resolved = 1.0
+      teacher_regularization: ema
+      teacher_update_rate: 0.005              # EMA β from design doc §teacher
+      distillation_topk: 100                  # top-k logit distillation
+      distillation_add_tail: true             # tail-bucket for residual mass
+      is_clip: 2.0                            # importance-sampling ratio clip
+      max_reprompt_len: 10240                 # teacher prompt token budget
+      reprompt_truncation: right
+      dont_reprompt_on_self_success: true      # always include student attempt (§9.2.4)
+      remove_thinking_from_demonstration: true
+      include_environment_feedback: true
+      environment_feedback_only_without_solution: true
+
+      # Templates — our 6-block teacher prompt structure overrides these at the
+      # Python adapter layer; the templates below are verl-native fallbacks.
+      reprompt_template: "{prompt}\n{solution}\n{feedback}"
+      solution_template: |
+        [SUCCESSFUL PREVIOUS ATTEMPT]
+        {successful_previous_attempt}
+      feedback_template: |
+        [ENVIRONMENT FEEDBACK]
+        {feedback_raw}
+
+    # -- Optimizer -------------------------------------------------------------
+    optim:
+      lr: 1.0e-5
+      lr_warmup_steps: 10
+      weight_decay: 0.0
+      lr_scheduler_type: cosine
+
+    # -- Mini-batch / micro-batch ----------------------------------------------
+    ppo_mini_batch_size: 128
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: 24576
+    ppo_epochs: 1                             # on-policy: single pass
+
+    # -- Entropy ---------------------------------------------------------------
+    entropy_coeff: 0.0
+    calculate_entropy: false
+
+    # -- Gradient --------------------------------------------------------------
+    grad_clip: 1.0
+
+    # -- FSDP ------------------------------------------------------------------
+    use_remove_padding: true                  # pack variable-length seqs
+    use_dynamic_bsz: true                     # handle mixed trajectory lengths
+    use_torch_compile: true
+    ulysses_sequence_parallel_size: 1
+    fsdp_config:
+      dtype: bfloat16
+      fsdp_size: 8
+      model_dtype: bf16
+      forward_prefetch: true
+      offload_policy: false
+      reshard_after_forward: true
+      wrap_policy:
+        min_num_params: 0
+
+    # -- Misc ------------------------------------------------------------------
+    clip_ratio: 0.2
+
+  # -- Rollout (vLLM) --------------------------------------------------------
+  rollout:
+    name: vllm
+    prompt_length: ${data.max_prompt_length}
+    response_length: ${data.max_response_length}
+    dtype: bfloat16
+    enforce_eager: true
+    free_cache_engine: true
+    tensor_model_parallel_size: 2
+    data_parallel_size: 4
+    n: 8                                      # rollouts per prompt
+    temperature: 0.7
+    top_p: 0.95
+    gpu_memory_utilization: 0.9
+    max_num_batched_tokens: 262144
+    max_num_seqs: 64
+    load_format: dummy
+    log_prob_micro_batch_size_per_gpu: 4
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    calculate_log_probs: true
+    engine_kwargs:
+      vllm:
+        data_parallel_size: 4
+      sglang: {}
+    val_kwargs:
+      top_k: -1
+      top_p: 1.0
+      temperature: 0
+      n: 1
+      do_sample: false
+
+  # -- Reference model (doubles as EMA teacher target) -----------------------
+  ref:
+    strategy: fsdp2
+    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size}
+    fsdp_config:
+      dtype: bfloat16
+      fsdp_size: 8
+      model_dtype: bf16
+      forward_prefetch: true
+      offload_policy: false
+      reshard_after_forward: true
+      wrap_policy:
+        min_num_params: 0
+
+# ---------------------------------------------------------------------------
+# Algorithm
+# ---------------------------------------------------------------------------
+algorithm:
+  adv_estimator: grpo                         # outcome-level advantage, no critic
+  gamma: 1.0
+  norm_adv_by_std_in_grpo: false              # Dr.GRPO style (unscaled)
+  use_kl_in_reward: false                     # KL handled by self-distillation
+  rollout_correction:
+    rollout_is: token                         # token-level IS correction
+    rollout_is_threshold: 2.0
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+data:
+  train_batch_size: 32                        # prompts per global batch
+  # train_files / val_files set at launch time
+
+# ---------------------------------------------------------------------------
+# Trainer
+# ---------------------------------------------------------------------------
+trainer:
+  total_epochs: 1
+  total_training_steps: null                  # set at launch
+  val_before_train: false
+  save_freq: 50
+  val_freq: 25
+  group_name: small-swe-sdpo
