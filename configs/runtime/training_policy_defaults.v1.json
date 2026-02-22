@@ -96,6 +96,23 @@
     "attempt_timeout_sec": 300,
     "max_tool_calls_per_turn": 3
   },
+  "rft_handoff": {
+    "max_sequence_length": 12288,
+    "pad_token_id": 0,
+    "selection": {
+      "require_terminal": true,
+      "require_format_valid": true,
+      "require_resolved": true,
+      "require_zero_exit_code": true,
+      "reject_on_collector_error": true,
+      "reject_on_bridge_error": true,
+      "reject_on_timeout_error": true,
+      "reject_on_executor_error": true,
+      "reject_on_parse_error": true,
+      "reject_on_validation_errors": true,
+      "relabel_rejected_attempts": true
+    }
+  },
   "runtime": {
     "sandbox": "docker",
     "internet_access": true,

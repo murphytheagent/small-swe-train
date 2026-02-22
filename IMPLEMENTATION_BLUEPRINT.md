@@ -551,6 +551,13 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-21 19:03 UTC] Test status: `pytest --override-ini addopts=''` passing (`44 passed`).
 - [2026-02-21 23:32 UTC] Addressed new PR review findings on string-typed `resolved` values by adding explicit bool coercion in `src/verl_integration/reward_function.py`, `src/verl_integration/reprompt_adapter.py`, and `src/eval/swebench_lite.py`, with regressions in `tests/test_verl_reward_function.py`, `tests/test_verl_reprompt_adapter.py`, and `tests/test_swebench_lite.py`.
 - [2026-02-21 23:32 UTC] Test status: `pytest --override-ini addopts=''` passing (`67 passed, 1 skipped`).
+- [2026-02-22 06:10 UTC] Implemented centralized RFT handoff policy in `configs/runtime/training_policy_defaults.v1.json` + `src/config.py` (`resolve_rft_handoff_settings`) and added a single deterministic selection function (`evaluate_rft_rejection_reason` / `select_rft_attempt_rows`) reused by adapter tests and trainer entrypoint.
+- [2026-02-22 06:10 UTC] Implemented direct on-policy RFT handoff path in `src/verl_integration/onpolicy_rollout_adapter.py`: rollout collection -> preprocessing -> centralized rejection -> SFT tensor assembly (`input_ids`, `attention_mask`, `position_ids`, `loss_mask`) + DataProto-compatible payload buckets with grouping metadata.
+- [2026-02-22 06:10 UTC] Added custom verl SFT dataset `src/verl_integration/onpolicy_rft_dataset.py` and wired `configs/verl/rft_swe.yaml` (`data.custom_cls.path/name`) so RFT can source rollout rows in-memory instead of JSONL intermediates.
+- [2026-02-22 06:10 UTC] Updated launchers (`scripts/run_rft.sh`, `scripts/run_rft_onpolicy_rollout_proof.sh`) to use `verl.trainer.fsdp_sft_trainer` via `torchrun` and proof-mode multi-turn tool-chain rollouts.
+- [2026-02-22 06:10 UTC] Added/updated test coverage for centralized config authority, rollout adapter handoff behavior, trainer entrypoint reuse, and launcher command correctness.
+- [2026-02-22 06:10 UTC] Test status: local `pytest --override-ini addopts=''` passing (`89 passed, 2 skipped`); remote targeted suite in `swe311` passing (`13 passed`) for updated adapter/trainer/script tests.
+- [2026-02-22 06:10 UTC] GPU Slurm proof reached on-policy collection + dataset + trainer initialization, but final one-step run is blocked by remote environment dependencies (`flash_attn`) and transient SSH reachability during repeated retries.
 
 ---
 

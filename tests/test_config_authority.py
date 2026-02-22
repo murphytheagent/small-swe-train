@@ -67,6 +67,15 @@ def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     assert settings.runtime.max_tool_calls_per_turn <= config.MAX_TOOL_CALLS_PER_TURN
 
 
+def test_resolve_rft_handoff_settings_loads_selection_policy() -> None:
+    settings = config.resolve_rft_handoff_settings()
+    assert settings.max_sequence_length >= 2
+    assert settings.pad_token_id >= 0
+    assert settings.selection.require_terminal is True
+    assert settings.selection.require_resolved is True
+    assert settings.selection.reject_on_validation_errors is True
+
+
 def test_verl_integration_has_no_config_dataclass_definitions() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     integration_dir = repo_root / "src" / "verl_integration"

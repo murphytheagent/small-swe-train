@@ -21,7 +21,8 @@ def _run_script(script_name: str, *args: str) -> subprocess.CompletedProcess[str
 
 def test_run_rft_script_dry_run_prints_verl_command() -> None:
     result = _run_script("run_rft.sh", "trainer.total_training_steps=1")
-    assert "python -m verl.trainer.main_ppo" in result.stdout
+    assert "torchrun" in result.stdout
+    assert "-m verl.trainer.fsdp_sft_trainer" in result.stdout
     assert "--config-name rft_swe" in result.stdout
     assert "trainer.total_training_steps=1" in result.stdout
 
@@ -41,5 +42,7 @@ def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
 def test_run_rft_onpolicy_rollout_proof_script_sets_onpolicy_overrides() -> None:
     result = _run_script("run_rft_onpolicy_rollout_proof.sh")
     assert "--config-name rft_swe" in result.stdout
-    assert "on_policy.enabled=true" in result.stdout
-    assert "on_policy.rollout_only=true" in result.stdout
+    assert "data.on_policy.enabled=true" in result.stdout
+    assert "data.on_policy.turn_generator_mode=proof_tool_chain" in result.stdout
+    assert "data.on_policy.total_steps=1" in result.stdout
+    assert "+data.on_policy.runtime_overrides.task_batch_size=" in result.stdout

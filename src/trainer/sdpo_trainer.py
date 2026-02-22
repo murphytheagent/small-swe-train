@@ -6,10 +6,13 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from config import MAX_TOOL_CALLS_PER_TURN
+from data.tokenization import SupportsOffsetsTokenizer
+from rollout.onpolicy_collector import OnPolicyRolloutCollector
 from verl_integration.mask_injector import inject_response_mask
 from verl_integration.reprompt_adapter import build_self_distillation_batch
 from verl_integration.reward_function import reward_fn
 from verl_integration.env_bridge import ToolExecutor, run_env_bridge_step
+from verl_integration.onpolicy_rollout_adapter import collect_rft_sft_batch_for_steps
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,15 @@ class EndToEndStepArtifacts:
     rollout_tool_response_blocks: tuple[tuple[str, ...], ...]
     teacher_ema_proxy: float
     loss_history: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class OnPolicyRFTStepArtifacts:
+    training_stats: TrainingStepStats
+    selected_count: int
+    rejected_count: int
+    dataproto_payload: Mapping[str, Any]
+    selection_reasons: tuple[str, ...]
 
 
 class SDPOTrainerScaffold:
@@ -206,3 +218,38 @@ class SDPOTrainerScaffold:
             if rollout_stats.get(metric_name, 0.0) < threshold:
                 return False
         return True
+
+    def run_onpolicy_rft_step(
+        self,
+        *,
+        total_steps: int,
+        collector: OnPolicyRolloutCollector,
+        tokenizer: SupportsOffsetsTokenizer,
+        handoff_overrides: Mapping[str, Any] | None = None,
+        output_dir: str | None = None,
+    ) -> OnPolicyRFTStepArtifacts:
+        """Run rollout -> preprocess -> centralized RFT selection -> RFT train stats."""
+        handoff_result = collect_rft_sft_batch_for_steps(
+            total_steps=total_steps,
+            collector=collector,
+            tokenizer=tokenizer,
+            handoff_overrides=handoff_overrides,
+            output_dir=output_dir,
+        )
+
+        selected_rows = handoff_result["selected_rows"]
+        rejected_rows = handoff_result["rejected_rows"]
+        training_stats = self.run_rft_epoch(selected_rows)
+        reasons = tuple(
+            str(row.get("rft_rejection_reason", ""))
+            for row in rejected_rows
+            if row.get("rft_rejection_reason")
+        )
+
+        return OnPolicyRFTStepArtifacts(
+            training_stats=training_stats,
+            selected_count=len(selected_rows),
+            rejected_count=len(rejected_rows),
+            dataproto_payload=handoff_result["dataproto_payload"],
+            selection_reasons=reasons,
+        )

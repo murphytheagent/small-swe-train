@@ -65,15 +65,25 @@ max_model_len: 12288
 
 data:
   train_batch_size: 64
-  max_epochs: 3
+  micro_batch_size_per_gpu: 1
+  max_length: 12288
+  train_files: /tmp/onpolicy-rft-train.parquet
+  val_files: /tmp/onpolicy-rft-val.parquet
+  custom_cls:
+    path: pkg://verl_integration.onpolicy_rft_dataset
+    name: OnPolicyRFTDataset
+  on_policy:
+    enabled: true
+    data_config_name: on_policy_swe_smith
+    turn_generator_mode: default
+    total_steps: 1
+    output_dir: null
+    runtime_overrides: {}
+    data_overrides: {}
+    rft_handoff_overrides: {}
 
 trainer:
   save_freq: 200
-  val_freq: 100
+  test_freq: -1
+  total_epochs: 3
   group_name: small-swe-rft
-
-# On-policy rollout collection controls (defaults validated in src/config.py).
-on_policy:
-  enabled: true
-  rollout_only: true
-  data_config_name: on_policy_swe_smith

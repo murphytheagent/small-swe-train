@@ -64,6 +64,28 @@ class OnPolicySettings:
     runtime: OnPolicyRuntimeConfig
 
 
+@dataclass(frozen=True)
+class RFTSelectionPolicy:
+    require_terminal: bool
+    require_format_valid: bool
+    require_resolved: bool
+    require_zero_exit_code: bool
+    reject_on_collector_error: bool
+    reject_on_bridge_error: bool
+    reject_on_timeout_error: bool
+    reject_on_executor_error: bool
+    reject_on_parse_error: bool
+    reject_on_validation_errors: bool
+    relabel_rejected_attempts: bool
+
+
+@dataclass(frozen=True)
+class RFTHandoffSettings:
+    max_sequence_length: int
+    pad_token_id: int
+    selection: RFTSelectionPolicy
+
+
 @functools.lru_cache(maxsize=1)
 def training_policy_defaults() -> dict[str, Any]:
     """Load and cache the full training policy defaults dict."""
@@ -111,6 +133,15 @@ def on_policy_runtime_defaults() -> dict[str, Any]:
     if not isinstance(on_policy, Mapping):
         raise ValueError("`on_policy` block is missing from training policy defaults.")
     return dict(on_policy)
+
+
+def rft_handoff_defaults() -> dict[str, Any]:
+    """Return centralized RFT handoff defaults from runtime policy JSON."""
+    defaults = training_policy_defaults()
+    handoff = defaults.get("rft_handoff")
+    if not isinstance(handoff, Mapping):
+        raise ValueError("`rft_handoff` block is missing from training policy defaults.")
+    return dict(handoff)
 
 
 def output_contract_defaults() -> dict[str, Any]:
@@ -171,6 +202,12 @@ def _coerce_non_empty_str(value: Any, *, label: str) -> str:
 def _coerce_positive_int(value: Any, *, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{label} must be an integer >= 1.")
+    return value
+
+
+def _coerce_non_negative_int(value: Any, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be an integer >= 0.")
     return value
 
 
@@ -293,6 +330,94 @@ def resolve_on_policy_settings(
     data = _parse_on_policy_data_config(data_payload)
 
     return OnPolicySettings(data=data, runtime=runtime)
+
+
+def _parse_rft_selection_policy(payload: Mapping[str, Any]) -> RFTSelectionPolicy:
+    return RFTSelectionPolicy(
+        require_terminal=_coerce_bool(
+            payload.get("require_terminal"),
+            label="rft_handoff.selection.require_terminal",
+        ),
+        require_format_valid=_coerce_bool(
+            payload.get("require_format_valid"),
+            label="rft_handoff.selection.require_format_valid",
+        ),
+        require_resolved=_coerce_bool(
+            payload.get("require_resolved"),
+            label="rft_handoff.selection.require_resolved",
+        ),
+        require_zero_exit_code=_coerce_bool(
+            payload.get("require_zero_exit_code"),
+            label="rft_handoff.selection.require_zero_exit_code",
+        ),
+        reject_on_collector_error=_coerce_bool(
+            payload.get("reject_on_collector_error"),
+            label="rft_handoff.selection.reject_on_collector_error",
+        ),
+        reject_on_bridge_error=_coerce_bool(
+            payload.get("reject_on_bridge_error"),
+            label="rft_handoff.selection.reject_on_bridge_error",
+        ),
+        reject_on_timeout_error=_coerce_bool(
+            payload.get("reject_on_timeout_error"),
+            label="rft_handoff.selection.reject_on_timeout_error",
+        ),
+        reject_on_executor_error=_coerce_bool(
+            payload.get("reject_on_executor_error"),
+            label="rft_handoff.selection.reject_on_executor_error",
+        ),
+        reject_on_parse_error=_coerce_bool(
+            payload.get("reject_on_parse_error"),
+            label="rft_handoff.selection.reject_on_parse_error",
+        ),
+        reject_on_validation_errors=_coerce_bool(
+            payload.get("reject_on_validation_errors"),
+            label="rft_handoff.selection.reject_on_validation_errors",
+        ),
+        relabel_rejected_attempts=_coerce_bool(
+            payload.get("relabel_rejected_attempts"),
+            label="rft_handoff.selection.relabel_rejected_attempts",
+        ),
+    )
+
+
+def resolve_rft_handoff_settings(
+    *,
+    overrides: Mapping[str, Any] | None = None,
+) -> RFTHandoffSettings:
+    """Resolve and validate RFT handoff settings from centralized runtime policy."""
+    payload = rft_handoff_defaults()
+    if overrides is not None:
+        payload = dict(payload)
+        for key, value in overrides.items():
+            if (
+                key == "selection"
+                and isinstance(value, Mapping)
+                and isinstance(payload.get("selection"), Mapping)
+            ):
+                selection_payload = dict(payload["selection"])
+                selection_payload.update(value)
+                payload["selection"] = selection_payload
+            else:
+                payload[key] = value
+
+    selection_payload = _require_mapping(
+        payload.get("selection"),
+        label="rft_handoff.selection",
+    )
+    selection = _parse_rft_selection_policy(selection_payload)
+
+    return RFTHandoffSettings(
+        max_sequence_length=_coerce_positive_int(
+            payload.get("max_sequence_length"),
+            label="rft_handoff.max_sequence_length",
+        ),
+        pad_token_id=_coerce_non_negative_int(
+            payload.get("pad_token_id"),
+            label="rft_handoff.pad_token_id",
+        ),
+        selection=selection,
+    )
 
 
 def resolve_model_config_path(model_family: str) -> Path:
