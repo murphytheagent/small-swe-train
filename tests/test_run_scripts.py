@@ -54,6 +54,7 @@ def test_run_rft_onpolicy_rollout_proof_script_sets_onpolicy_overrides() -> None
     assert "--config-name rft_swe" in result.stdout
     assert "-m verl_integration.fsdp_sft_trainer_entry" in result.stdout
     assert "trainer.logger=\\[console\\,wandb\\]" in result.stdout
+    assert "trainer.default_local_dir=" in result.stdout
     assert "data.on_policy.enabled=true" in result.stdout
     assert "data.on_policy.turn_generator_mode=proof_tool_chain" in result.stdout
     assert "data.on_policy.total_steps=1" in result.stdout
@@ -67,3 +68,28 @@ def test_run_rft_onpolicy_rollout_proof_script_propagates_steps() -> None:
     )
     assert "trainer.total_training_steps=3" in result.stdout
     assert "data.on_policy.total_steps=3" in result.stdout
+
+
+def test_run_rft_onpolicy_rollout_proof_script_defaults_train_batch_to_world_size() -> None:
+    result = _run_script(
+        "run_rft_onpolicy_rollout_proof.sh",
+        env_overrides={"ON_POLICY_PROOF_NPROC_PER_NODE": "8"},
+    )
+    assert "trainer.n_gpus_per_node=8" in result.stdout
+    assert "data.train_batch_size=8" in result.stdout
+    assert "data.micro_batch_size_per_gpu=1" in result.stdout
+    assert "+data.on_policy.runtime_overrides.task_batch_size=8" in result.stdout
+    assert "+data.on_policy.runtime_overrides.env_pool_size=8" in result.stdout
+
+
+def test_run_rft_onpolicy_rollout_proof_script_honors_explicit_batch_overrides() -> None:
+    result = _run_script(
+        "run_rft_onpolicy_rollout_proof.sh",
+        env_overrides={
+            "ON_POLICY_PROOF_NPROC_PER_NODE": "8",
+            "ON_POLICY_TRAIN_BATCH_SIZE": "16",
+            "ON_POLICY_MICRO_BATCH_SIZE_PER_GPU": "2",
+        },
+    )
+    assert "data.train_batch_size=16" in result.stdout
+    assert "data.micro_batch_size_per_gpu=2" in result.stdout

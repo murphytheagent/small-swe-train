@@ -133,10 +133,30 @@ def load_task_batch(
 
     start = (step_index * batch_size) % len(dataset)
     samples: list[TaskSample] = []
-    for offset in range(batch_size):
-        row_index = (start + offset) % len(dataset)
+    last_error: ValueError | None = None
+    scanned = 0
+
+    # Real SWE datasets may contain occasional malformed rows. Keep deterministic
+    # iteration but skip invalid samples until the requested batch is filled.
+    while len(samples) < batch_size and scanned < len(dataset):
+        row_index = (start + scanned) % len(dataset)
+        scanned += 1
         row = dataset[row_index]
         if not isinstance(row, Mapping):
-            raise ValueError(f"Dataset row {row_index} is not a mapping.")
-        samples.append(_coerce_task_row(row, config=config, row_index=row_index))
+            last_error = ValueError(f"Dataset row {row_index} is not a mapping.")
+            continue
+        try:
+            samples.append(_coerce_task_row(row, config=config, row_index=row_index))
+        except ValueError as exc:
+            last_error = exc
+
+    if len(samples) < batch_size:
+        detail = str(last_error) if last_error is not None else "no valid rows found"
+        raise ValueError(
+            f"Unable to build task batch of size {batch_size} from "
+            f"{config.dataset_id!r}:{config.dataset_split!r}. "
+            f"Collected {len(samples)} valid rows after scanning {scanned}. "
+            f"Last validation error: {detail}"
+        )
+
     return samples

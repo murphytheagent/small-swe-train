@@ -13,6 +13,7 @@ CONFIG_DIR="${PROJECT_ROOT}/configs/verl"
 NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 NNODES="${NNODES:-1}"
 RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE:-verl.trainer.fsdp_sft_trainer}"
+RFT_TASK_NAME="${RFT_TASK_NAME:-small-swe-rft}"
 CMD=(
   torchrun
   --standalone
@@ -37,4 +38,5 @@ if ! python -c "import verl" >/dev/null 2>&1; then
 fi
 
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+export TASK="${TASK:-${RFT_TASK_NAME}}"
 "${CMD[@]}"
