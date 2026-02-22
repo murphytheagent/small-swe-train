@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME
 from verl_integration.onpolicy_rollout_adapter import (
@@ -28,7 +28,7 @@ class OnPolicyRFTDataset:
         processor: Any | None = None,
         max_samples: int = -1,
     ) -> None:
-        del parquet_files, processor  # This dataset is generated on-policy, not from parquet.
+        del processor  # This dataset is generated on-policy, not from parquet.
 
         try:
             import torch
@@ -52,6 +52,7 @@ class OnPolicyRFTDataset:
         handoff_overrides = _as_mapping(on_policy_cfg.get("rft_handoff_overrides", {}))
         output_dir_raw = on_policy_cfg.get("output_dir")
         output_dir = str(output_dir_raw).strip() if isinstance(output_dir_raw, str) and output_dir_raw.strip() else None
+        parquet_file_fingerprint = _normalize_parquet_files(parquet_files)
 
         cache_key = _cache_key(
             data_config_name=data_config_name,
@@ -60,25 +61,32 @@ class OnPolicyRFTDataset:
             runtime_overrides=runtime_overrides,
             data_overrides=data_overrides,
             handoff_overrides=handoff_overrides,
+            parquet_files=parquet_file_fingerprint,
             tokenizer=tokenizer,
         )
         cached_result = _ONPOLICY_RFT_CACHE.get(cache_key)
         if cached_result is None:
-            collector = build_onpolicy_collector(
-                data_config_name=data_config_name,
-                runtime_overrides=runtime_overrides,
-                data_overrides=data_overrides,
-                turn_generator=_resolve_turn_generator(turn_generator_mode),
-            )
-            resolved_output_dir = output_dir
-            if resolved_output_dir is not None:
-                Path(resolved_output_dir).mkdir(parents=True, exist_ok=True)
-            cached_result = collect_rft_sft_batch_for_steps(
-                total_steps=total_steps,
-                collector=collector,
-                tokenizer=tokenizer,
-                handoff_overrides=handoff_overrides,
-                output_dir=resolved_output_dir,
+            def _collect_once() -> dict[str, Any]:
+                collector = build_onpolicy_collector(
+                    data_config_name=data_config_name,
+                    runtime_overrides=runtime_overrides,
+                    data_overrides=data_overrides,
+                    turn_generator=_resolve_turn_generator(turn_generator_mode),
+                )
+                resolved_output_dir = output_dir
+                if resolved_output_dir is not None:
+                    Path(resolved_output_dir).mkdir(parents=True, exist_ok=True)
+                return collect_rft_sft_batch_for_steps(
+                    total_steps=total_steps,
+                    collector=collector,
+                    tokenizer=tokenizer,
+                    handoff_overrides=handoff_overrides,
+                    output_dir=resolved_output_dir,
+                )
+
+            cached_result = _collect_on_rank0_and_broadcast(
+                torch_module=torch,
+                collect_fn=_collect_once,
             )
             _ONPOLICY_RFT_CACHE[cache_key] = cached_result
 
@@ -184,6 +192,7 @@ def _cache_key(
     runtime_overrides: Mapping[str, Any],
     data_overrides: Mapping[str, Any],
     handoff_overrides: Mapping[str, Any],
+    parquet_files: Sequence[str],
     tokenizer: Any,
 ) -> str:
     payload = {
@@ -193,9 +202,77 @@ def _cache_key(
         "runtime_overrides": _normalize_mapping(runtime_overrides),
         "data_overrides": _normalize_mapping(data_overrides),
         "handoff_overrides": _normalize_mapping(handoff_overrides),
+        "parquet_files": [str(path) for path in parquet_files],
         "tokenizer_fingerprint": _tokenizer_cache_fingerprint(tokenizer),
     }
     return json.dumps(payload, ensure_ascii=True, sort_keys=True)
+
+
+def _normalize_parquet_files(parquet_files: str | Sequence[str]) -> list[str]:
+    if isinstance(parquet_files, str):
+        normalized = parquet_files.strip()
+        return [normalized] if normalized else []
+
+    if isinstance(parquet_files, Sequence):
+        paths: list[str] = []
+        for raw_path in parquet_files:
+            if isinstance(raw_path, (str, Path)):
+                normalized = str(raw_path).strip()
+                if normalized:
+                    paths.append(normalized)
+        return paths
+
+    return []
+
+
+def _collect_on_rank0_and_broadcast(
+    *,
+    torch_module: Any,
+    collect_fn: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    distributed = _resolve_distributed_module(torch_module)
+    if distributed is None:
+        return collect_fn()
+
+    rank = int(distributed.get_rank())
+    payload: dict[str, Any] | None
+    if rank == 0:
+        try:
+            payload = {"ok": True, "result": collect_fn()}
+        except Exception as exc:  # pragma: no cover - defensive branch for distributed jobs.
+            payload = {"ok": False, "error": f"On-policy collection failed on rank 0: {exc}"}
+    else:
+        payload = None
+
+    object_list: list[Any] = [payload]
+    distributed.broadcast_object_list(object_list, src=0)
+    received = object_list[0]
+    if not isinstance(received, Mapping):
+        raise RuntimeError("Distributed on-policy collection received malformed payload.")
+    if not bool(received.get("ok", False)):
+        raise RuntimeError(str(received.get("error", "On-policy collection failed on rank 0.")))
+
+    result = received.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("Distributed on-policy collection returned invalid result payload.")
+    return result
+
+
+def _resolve_distributed_module(torch_module: Any) -> Any | None:
+    distributed = getattr(torch_module, "distributed", None)
+    if distributed is None:
+        return None
+    is_available = getattr(distributed, "is_available", None)
+    is_initialized = getattr(distributed, "is_initialized", None)
+    if not callable(is_available) or not callable(is_initialized):
+        return None
+    if not is_available() or not is_initialized():
+        return None
+    broadcast_object_list = getattr(distributed, "broadcast_object_list", None)
+    get_rank = getattr(distributed, "get_rank", None)
+    if not callable(broadcast_object_list) or not callable(get_rank):
+        return None
+    return distributed
 
 
 def _normalize_mapping(payload: Mapping[str, Any]) -> dict[str, Any]:

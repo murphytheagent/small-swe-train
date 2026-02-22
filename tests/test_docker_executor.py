@@ -53,3 +53,28 @@ def test_docker_executor_maps_timeout_to_nonzero_response() -> None:
 
     assert response.exit_code == 124
     assert "timed out" in response.stderr.lower()
+
+
+def test_docker_executor_edit_uses_apply_or_replace_script() -> None:
+    commands: list[list[str]] = []
+
+    def runner(command: list[str], *, timeout_sec: int) -> CommandResult:
+        del timeout_sec
+        commands.append(list(command))
+        return CommandResult(returncode=0, stdout="patched\n", stderr="")
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=runner,
+    )
+    response = executor.run(
+        ToolRequest(tool="edit", args={"path": "/repo/file.txt", "patch": "new content"})
+    )
+
+    assert response.exit_code == 0
+    assert len(commands) == 1
+    script = commands[0][-1]
+    assert "patch --batch --forward --silent" in script
+    assert '>> "$TARGET_PATH"' not in script
+    assert 'printf "%s\\n" "$PATCH_PAYLOAD" > "$TARGET_PATH"' in script

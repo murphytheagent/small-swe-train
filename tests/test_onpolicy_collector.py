@@ -33,6 +33,33 @@ class _FakePool:
         self.release_called = True
 
 
+class _PerAcquirePool:
+    def __init__(self) -> None:
+        self.acquire_calls = 0
+        self.release_calls = 0
+        self._active = False
+
+    def acquire(self, tasks: list[TaskSample]) -> tuple[ContainerHandle, ...]:
+        if self._active:
+            raise RuntimeError("acquire called before release_all")
+        self._active = True
+        call_index = self.acquire_calls
+        self.acquire_calls += 1
+        task = tasks[0]
+        return (
+            ContainerHandle(
+                task_id=task.task_id,
+                image_name=task.image_name,
+                container_id=f"cid-{call_index}",
+                container_name=f"cname-{call_index}",
+            ),
+        )
+
+    def release_all(self) -> None:
+        self._active = False
+        self.release_calls += 1
+
+
 class _FakeExecutor:
     def __init__(self) -> None:
         self.requests: list[ToolRequest] = []
@@ -175,3 +202,59 @@ def test_onpolicy_collector_resolver_sees_full_attempt_history() -> None:
     assert len(rows) == 1
     assert observed_step_counts == [2]
     assert rows[0]["resolved"] is True
+
+
+def test_onpolicy_collector_uses_fresh_container_per_attempt() -> None:
+    settings = _settings()
+    settings = OnPolicySettings(
+        data=settings.data,
+        runtime=replace(settings.runtime, attempts_per_task=2),
+    )
+
+    pool = _PerAcquirePool()
+    observed_container_ids: list[str] = []
+
+    def turn_generator(**kwargs: object) -> str:
+        del kwargs
+        return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+
+    def executor_factory(handle: ContainerHandle, _runtime: OnPolicyRuntimeConfig):
+        observed_container_ids.append(handle.container_id)
+        return _FakeExecutor()
+
+    collector = OnPolicyRolloutCollector(
+        settings=settings,
+        turn_generator=turn_generator,
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: pool,
+        executor_factory=executor_factory,
+        attempt_resolver=lambda _task, _attempt, is_terminal, _steps: is_terminal,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 2
+    assert observed_container_ids == ["cid-0", "cid-1"]
+    assert [row["container_id"] for row in rows] == ["cid-0", "cid-1"]
+    assert pool.acquire_calls == 2
+    assert pool.release_calls == 2
+
+
+def test_onpolicy_collector_default_turn_generator_produces_resolved_attempt() -> None:
+    pool = _FakePool()
+    executor = _FakeExecutor()
+
+    collector = OnPolicyRolloutCollector(
+        settings=_settings(),
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    assert rows[0]["is_terminal"] is True
+    assert rows[0]["resolved"] is True
+    assert rows[0]["tool_name"] == "bash"
+    assert [request.tool for request in executor.requests] == ["bash"]

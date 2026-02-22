@@ -29,6 +29,7 @@ def _build_key(tokenizer: object) -> str:
         runtime_overrides={"seed": 11},
         data_overrides={"task_batch_size": 8},
         handoff_overrides={"selection_policy": "terminal_valid"},
+        parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
 
@@ -57,3 +58,29 @@ def test_cache_key_falls_back_to_instance_identity_when_metadata_missing() -> No
     key_b = _build_key(tokenizer_b)
 
     assert key_a != key_b
+
+
+def test_cache_key_includes_parquet_split_fingerprint() -> None:
+    tokenizer = _TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000)
+    train_key = _cache_key(
+        data_config_name="swebench_lite",
+        turn_generator_mode="proof_tool_chain",
+        total_steps=1,
+        runtime_overrides={"seed": 11},
+        data_overrides={"task_batch_size": 8},
+        handoff_overrides={"selection_policy": "terminal_valid"},
+        parquet_files=["/tmp/train.parquet"],
+        tokenizer=tokenizer,
+    )
+    val_key = _cache_key(
+        data_config_name="swebench_lite",
+        turn_generator_mode="proof_tool_chain",
+        total_steps=1,
+        runtime_overrides={"seed": 11},
+        data_overrides={"task_batch_size": 8},
+        handoff_overrides={"selection_policy": "terminal_valid"},
+        parquet_files=["/tmp/val.parquet"],
+        tokenizer=tokenizer,
+    )
+
+    assert train_key != val_key

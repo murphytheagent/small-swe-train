@@ -105,11 +105,18 @@ class DockerToolExecutor:
         timeout_sec = self._tool_timeout_sec
         script = (
             'mkdir -p "$(dirname "$TARGET_PATH")" && '
-            'if [ -f "$TARGET_PATH" ]; then '
-            'printf "\\n%s\\n" "$PATCH_PAYLOAD" >> "$TARGET_PATH"; '
+            'PATCH_FILE="$(mktemp)" && '
+            'printf "%s\\n" "$PATCH_PAYLOAD" > "$PATCH_FILE" && '
+            'if [ -f "$TARGET_PATH" ] && grep -Eq "^(--- |\\+\\+\\+ |@@ |\\*\\*\\* Begin Patch)" "$PATCH_FILE"; then '
+            'if patch --batch --forward --silent "$TARGET_PATH" "$PATCH_FILE" >/dev/null 2>&1; then '
+            ":; "
             "else "
             'printf "%s\\n" "$PATCH_PAYLOAD" > "$TARGET_PATH"; '
-            "fi"
+            "fi; "
+            "else "
+            'printf "%s\\n" "$PATCH_PAYLOAD" > "$TARGET_PATH"; '
+            "fi && "
+            'rm -f "$PATCH_FILE"'
         )
         docker_cmd = [
             "docker",

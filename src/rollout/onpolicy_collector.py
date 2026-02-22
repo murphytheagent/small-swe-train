@@ -53,7 +53,13 @@ def _default_turn_generator(
     step_index: int,
     history: Sequence[str],
 ) -> str:
-    del task, attempt_index, turn_index, step_index, history
+    del task, attempt_index, step_index, history
+    if turn_index == 0:
+        return (
+            "<tool_call>"
+            '{"tool":"bash","args":{"command":"true"}}'
+            "</tool_call>"
+        )
     return (
         "<tool_call>"
         '{"tool":"submit","args":{"final_response":"collector default terminal submit"}}'
@@ -112,17 +118,19 @@ class OnPolicyRolloutCollector:
             config=self._settings.data,
             dataset_loader=self._dataset_loader,
         )
-        pool = self._pool_factory(runtime)
-        handles = pool.acquire(tasks)
-        if len(handles) != len(tasks):
-            pool.release_all()
-            raise RuntimeError("Container pool must provide exactly one handle per task.")
 
         rows: list[RolloutRow] = []
-        try:
-            for task_position, (task, handle) in enumerate(zip(tasks, handles)):
-                executor = self._executor_factory(handle, runtime)
-                for attempt_index in range(runtime.attempts_per_task):
+        for task_position, task in enumerate(tasks):
+            for attempt_index in range(runtime.attempts_per_task):
+                pool = self._pool_factory(runtime)
+                try:
+                    handles = pool.acquire([task])
+                    if len(handles) != 1:
+                        raise RuntimeError(
+                            "Container pool must provide exactly one handle per task attempt."
+                        )
+                    handle = handles[0]
+                    executor = self._executor_factory(handle, runtime)
                     row = self._collect_attempt(
                         step_index=step_index,
                         task_position=task_position,
@@ -133,8 +141,8 @@ class OnPolicyRolloutCollector:
                         executor=executor,
                     )
                     rows.append(row)
-        finally:
-            pool.release_all()
+                finally:
+                    pool.release_all()
 
         return rows
 
