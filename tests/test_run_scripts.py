@@ -42,6 +42,8 @@ def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
 def test_run_rft_onpolicy_rollout_proof_script_sets_onpolicy_overrides() -> None:
     result = _run_script("run_rft_onpolicy_rollout_proof.sh")
     assert "--config-name rft_swe" in result.stdout
+    assert "-m verl_integration.fsdp_sft_trainer_entry" in result.stdout
+    assert "trainer.logger=\\[console\\,wandb\\]" in result.stdout
     assert "data.on_policy.enabled=true" in result.stdout
     assert "data.on_policy.turn_generator_mode=proof_tool_chain" in result.stdout
     assert "data.on_policy.total_steps=1" in result.stdout

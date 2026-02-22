@@ -12,12 +12,13 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONFIG_DIR="${PROJECT_ROOT}/configs/verl"
 NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 NNODES="${NNODES:-1}"
+RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE:-verl.trainer.fsdp_sft_trainer}"
 CMD=(
   torchrun
   --standalone
   --nnodes "${NNODES}"
   --nproc_per_node "${NPROC_PER_NODE}"
-  -m verl.trainer.fsdp_sft_trainer
+  -m "${RFT_TRAINER_MODULE}"
   --config-name rft_swe
   --config-dir "${CONFIG_DIR}"
   "$@"

@@ -17,14 +17,26 @@ MAX_TURNS_PER_ATTEMPT="${ON_POLICY_MAX_TURNS_PER_ATTEMPT:-5}"
 NPROC_PER_NODE="${ON_POLICY_PROOF_NPROC_PER_NODE:-1}"
 MODEL_PATH="${ON_POLICY_PROOF_MODEL_PATH:-Qwen/Qwen2.5-0.5B-Instruct}"
 PROOF_OUTPUT_DIR="${ON_POLICY_PROOF_OUTPUT_DIR:-${PROJECT_ROOT}/outputs/integration/rft_onpolicy_rollout_train_step}"
+RFT_ATTN_IMPLEMENTATION="${RFT_ATTN_IMPLEMENTATION:-eager}"
+RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE:-verl_integration.fsdp_sft_trainer_entry}"
+WANDB_MODE="${WANDB_MODE:-offline}"
+WANDB_PROJECT="${WANDB_PROJECT:-small-swe-rft}"
+WANDB_GROUP="${WANDB_GROUP:-rft-onpolicy-proof}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-rft-proof-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
+  SMALL_SWE_RFT_ATTN_IMPL="${RFT_ATTN_IMPLEMENTATION}" \
+  RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE}" \
+  WANDB_MODE="${WANDB_MODE}" \
   NPROC_PER_NODE="${NPROC_PER_NODE}" "${SCRIPT_DIR}/run_rft.sh" \
     --dry-run \
     model.partial_pretrain="${MODEL_PATH}" \
     trainer.total_epochs=1 \
     trainer.total_training_steps="${STEPS}" \
-    trainer.logger=[console] \
+    trainer.logger=[console,wandb] \
+    trainer.project_name="${WANDB_PROJECT}" \
+    trainer.group_name="${WANDB_GROUP}" \
+    trainer.experiment_name="${WANDB_RUN_NAME}" \
     data.train_batch_size=1 \
     data.micro_batch_size_per_gpu=1 \
     data.on_policy.enabled=true \
@@ -40,11 +52,17 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   exit 0
 fi
 
+SMALL_SWE_RFT_ATTN_IMPL="${RFT_ATTN_IMPLEMENTATION}" \
+RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE}" \
+WANDB_MODE="${WANDB_MODE}" \
 NPROC_PER_NODE="${NPROC_PER_NODE}" "${SCRIPT_DIR}/run_rft.sh" \
   model.partial_pretrain="${MODEL_PATH}" \
   trainer.total_epochs=1 \
   trainer.total_training_steps="${STEPS}" \
-  trainer.logger=[console] \
+  trainer.logger=[console,wandb] \
+  trainer.project_name="${WANDB_PROJECT}" \
+  trainer.group_name="${WANDB_GROUP}" \
+  trainer.experiment_name="${WANDB_RUN_NAME}" \
   data.train_batch_size=1 \
   data.micro_batch_size_per_gpu=1 \
   data.on_policy.enabled=true \

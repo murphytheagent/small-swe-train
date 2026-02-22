@@ -25,9 +25,10 @@ class OnPolicyRFTDataset:
         parquet_files: str | Sequence[str],
         tokenizer: Any,
         config: Mapping[str, Any],
+        processor: Any | None = None,
         max_samples: int = -1,
     ) -> None:
-        del parquet_files  # This dataset is generated on-policy, not from parquet.
+        del parquet_files, processor  # This dataset is generated on-policy, not from parquet.
 
         try:
             import torch
