@@ -570,6 +570,7 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-22 23:34 UTC] Added regression coverage in `tests/test_sdpo_trainer.py` for checkpoint manifest and latest-pointer writes.
 - [2026-02-22 23:42 UTC] Hardened RFT checkpoint contract to require explicit `global_step` whenever `checkpoint_dir` is set; removed fallback to `total_steps` to prevent iterative runs from overwriting `global_step_1`.
 - [2026-02-22 23:42 UTC] Added regression coverage in `tests/test_sdpo_trainer.py` asserting checkpoint writes fail fast without explicit `global_step`.
+- [2026-02-22 23:50 UTC] Moved `global_step` checkpoint validation to run before `collect_rft_sft_batch_for_steps(...)` so invalid checkpoint requests fail fast before rollout/training side effects; added regression `test_run_onpolicy_rft_step_checkpoint_validation_fails_before_rollout`.
 
 ---
 

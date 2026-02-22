@@ -272,3 +272,25 @@ def test_run_onpolicy_rft_step_checkpoint_requires_explicit_global_step(tmp_path
             tokenizer=tokenizer,
             checkpoint_dir=tmp_path / "checkpoints",
         )
+
+
+def test_run_onpolicy_rft_step_checkpoint_validation_fails_before_rollout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B"))
+
+    def _unexpected_collect(**_kwargs: object) -> dict[str, object]:
+        raise AssertionError("collect_rft_sft_batch_for_steps should not run")
+
+    monkeypatch.setattr("trainer.sdpo_trainer.collect_rft_sft_batch_for_steps", _unexpected_collect)
+
+    with pytest.raises(
+        ValueError,
+        match="global_step is required when writing RFT checkpoint artifacts",
+    ):
+        trainer.run_onpolicy_rft_step(
+            total_steps=1,
+            collector=object(),
+            tokenizer=object(),
+            checkpoint_dir=tmp_path / "checkpoints",
+        )

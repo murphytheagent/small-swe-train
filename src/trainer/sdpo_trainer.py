@@ -235,6 +235,10 @@ class SDPOTrainerScaffold:
         global_step: int | None = None,
     ) -> OnPolicyRFTStepArtifacts:
         """Run rollout -> preprocess -> centralized RFT selection -> RFT train stats."""
+        resolved_global_step: int | None = None
+        if checkpoint_dir is not None:
+            resolved_global_step = self._resolve_global_step(global_step)
+
         handoff_result = collect_rft_sft_batch_for_steps(
             total_steps=total_steps,
             collector=collector,
@@ -253,7 +257,7 @@ class SDPOTrainerScaffold:
         )
         checkpoint_path: Path | None = None
         if checkpoint_dir is not None:
-            resolved_global_step = self._resolve_global_step(global_step)
+            assert resolved_global_step is not None
             checkpoint_path = self._write_rft_checkpoint(
                 checkpoint_dir=Path(checkpoint_dir),
                 global_step=resolved_global_step,

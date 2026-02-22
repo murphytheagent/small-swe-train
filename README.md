@@ -11,6 +11,7 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 - Initial trainer/prompt/eval interface signatures.
 - Optional RFT checkpoint scaffold manifests under `checkpoints/global_step_<n>/rft_step_manifest.json`.
 - RFT checkpoint writes require explicit `global_step` to avoid accidental step-directory reuse.
+- RFT checkpoint argument validation is fail-fast: invalid checkpoint inputs raise before rollout/training side effects.
 
 ## Layout
 - `src/schemas/`: frozen JSON schema contracts + typed protocol models.
