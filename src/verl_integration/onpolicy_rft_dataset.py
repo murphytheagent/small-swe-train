@@ -193,22 +193,58 @@ def _cache_key(
         "runtime_overrides": _normalize_mapping(runtime_overrides),
         "data_overrides": _normalize_mapping(data_overrides),
         "handoff_overrides": _normalize_mapping(handoff_overrides),
-        "tokenizer_class": tokenizer.__class__.__name__,
+        "tokenizer_fingerprint": _tokenizer_cache_fingerprint(tokenizer),
     }
     return json.dumps(payload, ensure_ascii=True, sort_keys=True)
 
 
 def _normalize_mapping(payload: Mapping[str, Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    for key, value in payload.items():
-        if isinstance(value, Mapping):
-            normalized[str(key)] = _normalize_mapping(value)
-            continue
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            normalized[str(key)] = [item for item in value]
-            continue
-        normalized[str(key)] = value
-    return normalized
+    normalized = _normalize_json(payload)
+    if isinstance(normalized, dict):
+        return normalized
+    return {}
+
+
+def _normalize_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _normalize_json(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_normalize_json(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def _tokenizer_cache_fingerprint(tokenizer: Any) -> dict[str, Any]:
+    fingerprint: dict[str, Any] = {
+        "class": f"{tokenizer.__class__.__module__}.{tokenizer.__class__.__qualname__}",
+    }
+    for attr_name in ("name_or_path", "vocab_size", "model_max_length", "padding_side", "truncation_side"):
+        attr_value = getattr(tokenizer, attr_name, None)
+        if attr_value is not None and attr_value != "":
+            fingerprint[attr_name] = attr_value
+
+    get_added_vocab = getattr(tokenizer, "get_added_vocab", None)
+    if callable(get_added_vocab):
+        try:
+            added_vocab = get_added_vocab()
+        except Exception:  # pragma: no cover - defensive only
+            added_vocab = None
+        if isinstance(added_vocab, Mapping):
+            fingerprint["added_vocab"] = {
+                str(token): int(token_id) if isinstance(token_id, int) else repr(token_id)
+                for token, token_id in sorted(added_vocab.items(), key=lambda item: str(item[0]))
+            }
+
+    special_tokens_map = getattr(tokenizer, "special_tokens_map", None)
+    if isinstance(special_tokens_map, Mapping):
+        fingerprint["special_tokens_map"] = _normalize_mapping(special_tokens_map)
+
+    # If tokenizer metadata is unavailable, isolate cache entries by instance to avoid collisions.
+    if len(fingerprint) == 1:
+        fingerprint["instance_id"] = id(tokenizer)
+
+    return _normalize_mapping(fingerprint)
 
 
 def _resolve_turn_generator(mode: str):
