@@ -564,6 +564,8 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-22 11:17 UTC] Follow-up next-step implementation after PR #4 merge: aligned `onpolicy_collector` row `turn_index` with the sampled `assistant_response`/`tool_output` turn (instead of terminal submit turn), added regression assertions in `tests/test_onpolicy_collector.py`, and revalidated full local suite (`104 passed, 2 skipped`).
 - [2026-02-22 21:27 UTC] Addressed PR #6 P1 reliability findings in `src/rollout/onpolicy_collector.py` and `src/env/docker_executor.py`: task patches are now streamed via stdin to `docker exec -i` (instead of embedding full base64 patch payload in argv), and task-env init executor exceptions are downgraded into row-level `executor_error` values so one failing task does not crash batch collection.
 - [2026-02-22 21:27 UTC] Added regressions in `tests/test_onpolicy_collector.py` and `tests/test_docker_executor.py`; validation status: `python3 -m pytest tests/test_onpolicy_collector.py tests/test_onpolicy_rollout_adapter.py tests/test_sdpo_trainer.py tests/test_run_scripts.py tests/test_task_dataset.py tests/test_docker_executor.py -q` passing (`34 passed`).
+- [2026-02-22 23:26 UTC] Added explicit Step-SDPO runner I/O interface via `scripts/run_step_sdpo_scaffold.py`: JSON/JSONL input rows in, deterministic scaffold step execution, and stable output artifacts (`rollout_rows.jsonl`, `teacher_prompts.jsonl`, `sdpo_step_summary.json`) out.
+- [2026-02-22 23:26 UTC] Added CLI regression coverage in `tests/test_run_step_sdpo_scaffold_script.py` to validate artifact creation and summary/reward fields.
 
 ---
 

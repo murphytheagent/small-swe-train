@@ -24,6 +24,13 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 python -m pytest
 ```
 
+Run one deterministic Step-SDPO scaffold step from JSON/JSONL rows:
+```bash
+python scripts/run_step_sdpo_scaffold.py \
+  --input /path/to/rollout_rows.jsonl \
+  --output-dir /path/to/sdpo_step_outputs
+```
+
 ## Notes
 - This commit intentionally implements interfaces and tests first, not training-loop execution.
 - Design artifacts remain under `outputs/1771579678.414229/` as frozen planning context.
