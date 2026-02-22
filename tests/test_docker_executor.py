@@ -79,3 +79,36 @@ def test_docker_executor_edit_uses_apply_or_replace_script() -> None:
     assert '[ -f "$TARGET_PATH" ]' not in script
     assert '>> "$TARGET_PATH"' not in script
     assert 'printf "%s\\n" "$PATCH_PAYLOAD" > "$TARGET_PATH"' in script
+
+
+def test_docker_executor_runs_bash_with_stdin_stream() -> None:
+    commands: list[list[str]] = []
+    stdin_payloads: list[str | None] = []
+
+    def runner(
+        command: list[str],
+        *,
+        timeout_sec: int,
+        stdin_text: str | None = None,
+    ) -> CommandResult:
+        del timeout_sec
+        commands.append(list(command))
+        stdin_payloads.append(stdin_text)
+        return CommandResult(returncode=0, stdout="ok\n", stderr="")
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=runner,
+    )
+
+    response = executor.run(
+        ToolRequest(
+            tool="bash",
+            args={"command": "cat >/tmp/payload", "stdin": "payload-by-stdin"},
+        )
+    )
+
+    assert response.exit_code == 0
+    assert commands[0][:3] == ["docker", "exec", "-i"]
+    assert stdin_payloads == ["payload-by-stdin"]

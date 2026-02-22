@@ -20,17 +20,24 @@ class CommandRunner(Protocol):
         command: Sequence[str],
         *,
         timeout_sec: int,
+        stdin_text: str | None = None,
     ) -> CommandResult:
         ...
 
 
-def default_command_runner(command: Sequence[str], *, timeout_sec: int) -> CommandResult:
+def default_command_runner(
+    command: Sequence[str],
+    *,
+    timeout_sec: int,
+    stdin_text: str | None = None,
+) -> CommandResult:
     """Execute a command and return captured text output."""
     completed = subprocess.run(
         list(command),
         check=False,
         capture_output=True,
         text=True,
+        input=stdin_text,
         timeout=timeout_sec,
     )
     return CommandResult(

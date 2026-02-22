@@ -120,20 +120,21 @@ class OnPolicyRolloutCollector:
         )
 
         rows: list[RolloutRow] = []
-        for task_position, task in enumerate(tasks):
-            for attempt_index in range(runtime.attempts_per_task):
-                pool = self._pool_factory(runtime)
-                try:
-                    handles = pool.acquire([task])
-                    if len(handles) != 1:
-                        raise RuntimeError(
-                            "Container pool must provide exactly one handle per task attempt."
-                        )
-                    handle = handles[0]
+        for attempt_index in range(runtime.attempts_per_task):
+            pool = self._pool_factory(runtime)
+            try:
+                handles = pool.acquire(tasks)
+                if len(handles) != len(tasks):
+                    raise RuntimeError(
+                        "Container pool must provide exactly one handle per task in the batch."
+                    )
+
+                for task_position, (task, handle) in enumerate(zip(tasks, handles)):
                     executor = self._executor_factory(handle, runtime)
                     row = self._collect_attempt(
                         step_index=step_index,
                         task_position=task_position,
+                        batch_container_count=len(handles),
                         task=task,
                         handle=handle,
                         attempt_index=attempt_index,
@@ -141,8 +142,8 @@ class OnPolicyRolloutCollector:
                         executor=executor,
                     )
                     rows.append(row)
-                finally:
-                    pool.release_all()
+            finally:
+                pool.release_all()
 
         return rows
 
@@ -151,6 +152,7 @@ class OnPolicyRolloutCollector:
         *,
         step_index: int,
         task_position: int,
+        batch_container_count: int,
         task: TaskSample,
         handle: ContainerHandle,
         attempt_index: int,
@@ -172,9 +174,24 @@ class OnPolicyRolloutCollector:
         executor_error = ""
         tool_name = ""
         exit_code = 0
+        task_patch_applied = False
         attempt_steps: list[EnvironmentStep] = []
 
+        init_failure = self._initialize_task_environment(
+            task=task,
+            executor=executor,
+            runtime=runtime,
+        )
+        if init_failure is not None:
+            executor_error = init_failure
+            turn_index = 0
+        elif _task_patch(task) is not None:
+            task_patch_applied = True
+
         for turn_index in range(runtime.max_turns_per_attempt):
+            if executor_error:
+                break
+
             elapsed_sec = self._monotonic_clock() - attempt_start
             if elapsed_sec > runtime.attempt_timeout_sec:
                 timeout_error = (
@@ -269,6 +286,7 @@ class OnPolicyRolloutCollector:
             "container_id": handle.container_id,
             "is_terminal": is_terminal,
             "latency_ms": elapsed_ms,
+            "batch_container_count": batch_container_count,
         }
         if collector_error:
             row["collector_error"] = collector_error
@@ -281,8 +299,43 @@ class OnPolicyRolloutCollector:
         if tool_name:
             row["tool_name"] = tool_name
             row["exit_code"] = exit_code
+        if task_patch_applied:
+            row["task_patch_applied"] = True
 
         return row
+
+    def _initialize_task_environment(
+        self,
+        *,
+        task: TaskSample,
+        executor: ToolExecutorLike,
+        runtime: OnPolicyRuntimeConfig,
+    ) -> str | None:
+        patch = _task_patch(task)
+        if patch is None:
+            return None
+
+        init_request = ToolRequest(
+            tool="bash",
+            args={
+                "command": _build_patch_apply_command(),
+                "stdin": patch,
+                "timeout_sec": runtime.tool_timeout_sec,
+            },
+        )
+        try:
+            response = executor.run(init_request)
+        except Exception as exc:
+            return f"task_env_init_failed: {exc}"
+        if response.exit_code == 0:
+            return None
+        stderr = response.stderr.strip()
+        if stderr:
+            return f"task_env_init_failed: {stderr}"
+        return (
+            "task_env_init_failed: patch apply command exited with non-zero status "
+            f"{response.exit_code}."
+        )
 
 
 def _default_pool_factory(runtime: OnPolicyRuntimeConfig) -> CollectorPool:
@@ -299,4 +352,40 @@ def _default_executor_factory(
     return DockerToolExecutor(
         container_id=handle.container_id,
         tool_timeout_sec=runtime.tool_timeout_sec,
+    )
+
+
+def _task_patch(task: TaskSample) -> str | None:
+    raw_patch = task.raw.get("patch")
+    if not isinstance(raw_patch, str):
+        return None
+    normalized = raw_patch.strip()
+    if not normalized:
+        return None
+    return raw_patch
+
+
+def _build_patch_apply_command() -> str:
+    return (
+        "set -eu; "
+        'repo_root=""; '
+        'for candidate in /testbed /workspace /repo /app; do '
+        'if [ -d "${candidate}/.git" ]; then repo_root="${candidate}"; break; fi; '
+        "done; "
+        'if [ -z "${repo_root}" ]; then '
+        'for candidate in /testbed /workspace /repo /app; do '
+        'if [ -d "${candidate}" ]; then repo_root="${candidate}"; break; fi; '
+        "done; "
+        "fi; "
+        'if [ -z "${repo_root}" ]; then '
+        'echo "Unable to locate task repository root for patch apply." >&2; '
+        "exit 2; "
+        "fi; "
+        'patch_file="$(mktemp)"; '
+        'cleanup() { rm -f "${patch_file}"; }; '
+        "trap cleanup EXIT; "
+        'cat > "${patch_file}"; '
+        'cd "${repo_root}"; '
+        'git apply --whitespace=nowarn "${patch_file}"; '
+        'printf "task patch applied in %s\\n" "${repo_root}"'
     )
