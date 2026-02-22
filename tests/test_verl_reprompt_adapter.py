@@ -63,6 +63,40 @@ def test_build_self_distillation_batch_falls_back_on_invalid_step_index() -> Non
     assert batch["feedback_packets"][0]["step_index"] == 0
 
 
+def test_build_self_distillation_batch_empty_tool_output_does_not_set_teacher_signal() -> None:
+    """Regression: empty tool_output canonicalizes to '{}', which must not
+    count as actionable teacher signal."""
+    samples = [
+        {
+            "prompt": "Fix the thing",
+            "assistant_response": "<tool_call>{\"tool\":\"bash\",\"args\":{\"command\":\"echo hi\"}}</tool_call>",
+            "tool_output": {},
+            "resolved": False,
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples)
+
+    assert batch["self_distillation_mask"] == [False]
+
+
+def test_build_self_distillation_batch_truncation_preserves_newlines() -> None:
+    """Regression: truncation must not flatten multi-line prompt structure."""
+    samples = [
+        {
+            "prompt": "task",
+            "assistant_response": "<tool_call>{\"tool\":\"bash\",\"args\":{\"command\":\"x\"}}</tool_call>",
+            "tool_output": {"stdout": "ok", "stderr": "", "exit_code": 0},
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, max_reprompt_len=10)
+
+    prompt = batch["teacher_prompts"][0]
+    assert "\n" in prompt
+    assert batch["prompt_truncated"] == [True]
+
+
 def test_build_self_distillation_batch_treats_false_string_as_unresolved(monkeypatch) -> None:
     def _stub_prompt_builder(
         sample,

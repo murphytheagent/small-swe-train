@@ -6,9 +6,16 @@ import json
 from typing import Any, Mapping, Sequence
 
 from data.feedback_canonicalizer import build_feedback_packet
+from data.tokenization import (
+    LabeledSpan,
+    SupportsOffsetsTokenizer,
+    build_labeled_spans,
+    tokenize_batch_with_labels,
+)
 from data.tool_schema_adapter import adapt_external_tool_call
 from losses.action_masking import build_action_token_mask
 from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
+from runtime_config import DEFAULT_MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, ToolCall, validate_tool_call
 
 
@@ -38,7 +45,24 @@ def _adapt_external_calls(external_calls: Sequence[Any]) -> tuple[ToolCall, ...]
     return tuple(adapted_calls)
 
 
-def _labels_from_envelope(envelope: ActionEnvelope) -> list[str]:
+def _label_blocks_from_envelope(envelope: ActionEnvelope) -> list[dict[str, str]]:
+    """Return structured block metadata for tokenizer-aligned mask generation."""
+    blocks: list[dict[str, str]] = []
+    if envelope.thinking:
+        blocks.append({"type": "think", "text": envelope.thinking})
+    for call in envelope.tool_calls:
+        serialized = json.dumps(call.to_dict(), sort_keys=True, ensure_ascii=True)
+        blocks.append({"type": "tool_call", "text": serialized})
+    return blocks
+
+
+def _approx_labels_from_envelope(envelope: ActionEnvelope) -> list[str]:
+    """Approximate per-token labels using whitespace word counts.
+
+    WARNING: These counts will NOT match subword tokenizer output.  Use
+    ``label_blocks`` together with the real tokenizer to generate masks
+    that are aligned with actual token IDs.
+    """
     labels: list[str] = []
     if envelope.thinking:
         think_tokens = max(1, len(envelope.thinking.split()))
@@ -84,14 +108,22 @@ def _coerce_step_index(value: Any, *, fallback: int) -> int:
 def preprocess_trajectories(
     trajectories: Sequence[Mapping[str, Any]],
     *,
-    max_tool_calls: int = 3,
+    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+    tokenizer: SupportsOffsetsTokenizer | None = None,
 ) -> list[dict[str, Any]]:
     """Convert raw trajectory examples into deterministic, verl-style row dicts.
 
     Per input sample, one output row is emitted with parser/validation diagnostics,
     stage masks, and canonicalized feedback packet metadata.
+
+    When *tokenizer* is provided, ``input_ids``, ``token_labels``, and stage
+    masks are derived from real subword tokenization with offset-aligned labels.
+    Otherwise approximate whitespace-based labels are emitted.
     """
     rows: list[dict[str, Any]] = []
+    tokenization_row_indexes: list[int] = []
+    tokenization_texts: list[str] = []
+    tokenization_spans: list[list[LabeledSpan]] = []
 
     for index, sample in enumerate(trajectories):
         prompt = str(sample.get("prompt", ""))
@@ -124,7 +156,9 @@ def preprocess_trajectories(
                 ):
                     raise ValueError("external_tool_calls must be a sequence of call objects")
                 tool_calls = _adapt_external_calls(external_calls)
-                envelope = ActionEnvelope(tool_calls=tool_calls, thinking=sample.get("thinking"))
+                thinking_raw = sample.get("thinking")
+                thinking = str(thinking_raw) if thinking_raw is not None else None
+                envelope = ActionEnvelope(tool_calls=tool_calls, thinking=thinking)
         except (TurnParseError, ValueError) as exc:
             parse_error = str(exc)
             envelope = None
@@ -137,7 +171,19 @@ def preprocess_trajectories(
                     f"tool_call[{call_index}]: {error}" for error in errors
                 )
 
-        token_labels = _labels_from_envelope(envelope) if envelope is not None else []
+        label_blocks = _label_blocks_from_envelope(envelope) if envelope is not None else []
+        input_ids: list[int] | None = None
+        canonical_text: str | None = None
+
+        if envelope is not None and tokenizer is not None:
+            canonical_text, labeled_spans = build_labeled_spans(envelope)
+            token_labels = []
+            tokenization_row_indexes.append(len(rows))
+            tokenization_texts.append(canonical_text)
+            tokenization_spans.append(labeled_spans)
+        else:
+            token_labels = _approx_labels_from_envelope(envelope) if envelope is not None else []
+
         action_mask_rft = build_action_token_mask(token_labels, stage="rft") if token_labels else []
         action_mask_step_sdpo = (
             build_action_token_mask(token_labels, stage="step_sdpo") if token_labels else []
@@ -162,19 +208,42 @@ def preprocess_trajectories(
             feedback_payload = None
             tool_calls_payload = []
 
-        rows.append(
-            {
-                "prompt": prompt,
-                "assistant_response": assistant_response,
-                "tool_calls": tool_calls_payload,
-                "token_labels": token_labels,
-                "action_mask_rft": action_mask_rft,
-                "action_mask_step_sdpo": action_mask_step_sdpo,
-                "format_valid": envelope is not None and not validation_errors,
-                "parse_error": parse_error,
-                "validation_errors": validation_errors,
-                "feedback_packet": feedback_payload,
-            }
+        row: dict[str, Any] = {
+            "prompt": prompt,
+            "assistant_response": assistant_response,
+            "tool_calls": tool_calls_payload,
+            "label_blocks": label_blocks,
+            "token_labels": token_labels,
+            "action_mask_rft": action_mask_rft,
+            "action_mask_step_sdpo": action_mask_step_sdpo,
+            "format_valid": envelope is not None and not validation_errors,
+            "parse_error": parse_error,
+            "validation_errors": validation_errors,
+            "feedback_packet": feedback_payload,
+        }
+        if input_ids is not None:
+            row["input_ids"] = input_ids
+        if canonical_text is not None:
+            row["canonical_text"] = canonical_text
+        rows.append(row)
+
+    if tokenizer is not None and tokenization_row_indexes:
+        batch_input_ids, batch_labels = tokenize_batch_with_labels(
+            tokenization_texts,
+            tokenization_spans,
+            tokenizer,
         )
+        for row_index, input_ids, token_labels in zip(
+            tokenization_row_indexes,
+            batch_input_ids,
+            batch_labels,
+        ):
+            row = rows[row_index]
+            row["input_ids"] = input_ids
+            row["token_labels"] = token_labels
+            row["action_mask_rft"] = build_action_token_mask(token_labels, stage="rft") if token_labels else []
+            row["action_mask_step_sdpo"] = (
+                build_action_token_mask(token_labels, stage="step_sdpo") if token_labels else []
+            )
 
     return rows

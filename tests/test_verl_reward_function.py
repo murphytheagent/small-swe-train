@@ -63,8 +63,10 @@ def test_reward_fn_handles_invalid_step_index_without_aborting_batch() -> None:
 
     rewards, info = reward_fn(data)
 
-    assert rewards == [0.0, 1.0]
-    assert "step_index must be an integer >= 0" in info["validation_errors"][0]
+    assert rewards == [1.0, 1.0]
+    assert info["step_index_warnings"][0] == "step_index must be an integer >= 0"
+    assert info["step_index_warnings"][1] == ""
+    assert info["validation_errors"][0] == []
     assert "STDOUT:" in info["feedback"][1]
 
 

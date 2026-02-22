@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 from data.feedback_canonicalizer import build_feedback_packet
 from metrics.contracts import FormatMetrics, rate
 from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
+from runtime_config import DEFAULT_MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, validate_tool_call
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
@@ -72,7 +73,7 @@ def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
 def reward_fn(
     data: Sequence[Mapping[str, Any]],
     *,
-    max_tool_calls: int = 3,
+    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
 ) -> tuple[list[float], dict[str, list[Any]]]:
     """Compute per-sample binary rewards and rollout diagnostics.
 
@@ -92,6 +93,8 @@ def reward_fn(
     required_arg_flags: list[bool] = []
     think_balance_flags: list[bool] = []
     validation_errors: list[list[str]] = []
+
+    step_index_warnings: list[str] = []
 
     for index, sample in enumerate(data):
         response_text = str(sample.get("response_text") or sample.get("assistant_response") or "")
@@ -124,11 +127,13 @@ def reward_fn(
             allowed_tools_ok = all(call.tool in {"bash", "search", "edit", "submit"} for call in tool_calls)
             required_args_ok = all(not errors for errors in call_error_lists)
 
+        step_index_warning = ""
         try:
             step_index = _coerce_step_index(sample.get("step_index"), fallback=index)
         except ValueError as exc:
             step_index = index
-            sample_errors.append(str(exc))
+            step_index_warning = str(exc)
+        step_index_warnings.append(step_index_warning)
 
         reward_value = 1.0 if resolved and parse_valid and not sample_errors else 0.0
         rewards.append(reward_value)
@@ -185,6 +190,7 @@ def reward_fn(
         "allowed_tool": allowed_tool_flags,
         "required_arg_presence": required_arg_flags,
         "validation_errors": validation_errors,
+        "step_index_warnings": step_index_warnings,
         "format_metrics": [metrics.__dict__],
     }
     return rewards, info

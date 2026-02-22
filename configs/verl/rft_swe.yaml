@@ -17,6 +17,12 @@ actor_rollout_ref:
   model:
     path: Qwen/Qwen3-4B
     enable_gradient_checkpointing: true
+    lora:
+      enable: true
+      rank: 64
+      alpha: 128
+      target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+      dropout: 0.05
 
   actor:
     optim:

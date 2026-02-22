@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from env.runtime_protocol import EnvironmentStep, ToolRequest, ToolResponse
 from prompts.model_delimiters import default_delimiters
 from rollout.turn_parser import parse_assistant_turn_payload, parse_chatml_assistant_turn
+from runtime_config import DEFAULT_MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, ToolCall, validate_tool_call
 
 
@@ -63,13 +64,29 @@ def run_env_bridge_step(
     assistant_text: str,
     *,
     executor: ToolExecutor,
-    max_tool_calls: int = 3,
+    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
     step_index_start: int = 0,
 ) -> BridgeResult:
     """Parse one assistant turn and execute its non-terminal tool calls in order."""
     envelope = _parse_assistant_text(assistant_text, max_tool_calls=max_tool_calls)
 
     if envelope.tool_calls[0].tool == "submit":
+        submit_call = envelope.tool_calls[0]
+        error_response = _validate_or_build_error_response(submit_call)
+        if error_response is not None:
+            request = ToolRequest(tool=submit_call.tool, args=dict(submit_call.args))
+            step = EnvironmentStep(
+                step_index=step_index_start,
+                request=request,
+                response=error_response,
+                thinking=envelope.thinking,
+            )
+            return BridgeResult(
+                envelope=envelope,
+                steps=(step,),
+                tool_response_blocks=(_format_tool_response_block(error_response),),
+                is_terminal=True,
+            )
         return BridgeResult(
             envelope=envelope,
             steps=(),

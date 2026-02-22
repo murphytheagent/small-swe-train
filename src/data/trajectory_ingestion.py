@@ -5,9 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Protocol, Sequence, cast
+from typing import Any, Iterable, Mapping, Sequence
 
 from data.feedback_canonicalizer import build_feedback_packet
+from data.tokenization import (
+    SupportsOffsetsTokenizer,
+    load_qwen_tokenizer,
+    tokenize_with_labels,
+)
 from data.tool_schema_adapter import adapt_external_tool_call
 from env import EnvironmentStep, ToolRequest, ToolResponse
 from losses.action_masking import TokenLabel, build_action_token_mask
@@ -52,19 +57,6 @@ class _ToolCallEntry:
     call_id: str | None
     source: Mapping[str, Any] | None
     source_index: int
-
-
-class SupportsOffsetsTokenizer(Protocol):
-    """Minimal tokenizer protocol used by ingestion helpers."""
-
-    def __call__(
-        self,
-        text: str,
-        *,
-        add_special_tokens: bool = False,
-        return_offsets_mapping: bool = False,
-    ) -> Mapping[str, Any]:
-        ...
 
 
 def load_raw_records(input_path: Path) -> list[dict[str, Any]]:
@@ -143,7 +135,7 @@ def tokenize_episode(
 ) -> tuple[str, list[int], list[TokenLabel], list[bool], list[bool]]:
     """Tokenize episode text and derive stage-specific masks."""
     text, labeled_spans = render_episode_chatml(episode)
-    input_ids, token_labels = _tokenize_with_labels(text, labeled_spans, tokenizer)
+    input_ids, token_labels = tokenize_with_labels(text, labeled_spans, tokenizer)
     return (
         text,
         input_ids,
@@ -206,19 +198,6 @@ def write_training_records(records: Sequence[Mapping[str, Any]], output_path: Pa
         return
 
     raise ValueError(f"Unsupported output extension for {output_path}. Use .jsonl/.parquet/.arrow")
-
-
-def load_qwen_tokenizer(model_name: str = "Qwen/Qwen3-4B") -> SupportsOffsetsTokenizer:
-    """Load a fast tokenizer compatible with Qwen3-4B chat format."""
-    try:
-        from transformers import AutoTokenizer
-    except ImportError as exc:  # pragma: no cover - dependency is runtime optional for tests
-        raise RuntimeError(
-            "transformers is required for tokenizer loading. Install with `pip install transformers`."
-        ) from exc
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-    return cast(SupportsOffsetsTokenizer, tokenizer)
 
 
 def run_ingestion(
@@ -686,65 +665,6 @@ def _append_segment(
     if labeled_spans is not None and label is not None and text:
         labeled_spans.append((cursor, end, label))
     return end
-
-
-def _tokenize_with_labels(
-    text: str,
-    labeled_spans: Sequence[tuple[int, int, TokenLabel]],
-    tokenizer: SupportsOffsetsTokenizer,
-) -> tuple[list[int], list[TokenLabel]]:
-    encoded = tokenizer(
-        text,
-        add_special_tokens=False,
-        return_offsets_mapping=True,
-    )
-    raw_ids = encoded.get("input_ids")
-    raw_offsets = encoded.get("offset_mapping")
-    if raw_ids is None or raw_offsets is None:
-        raise ValueError("Tokenizer must return `input_ids` and `offset_mapping`.")
-
-    input_ids = _normalize_ints(raw_ids)
-    offsets = _normalize_offsets(raw_offsets)
-    if len(input_ids) != len(offsets):
-        raise ValueError("Tokenizer returned inconsistent input_ids and offset_mapping lengths.")
-
-    token_labels = [_label_for_offset(start, end, labeled_spans) for start, end in offsets]
-    return input_ids, token_labels
-
-
-def _normalize_ints(raw_ids: Any) -> list[int]:
-    if not isinstance(raw_ids, Sequence) or isinstance(raw_ids, (str, bytes)):
-        raise ValueError("Tokenizer `input_ids` must be a sequence of ints.")
-    return [int(item) for item in raw_ids]
-
-
-def _normalize_offsets(raw_offsets: Any) -> list[tuple[int, int]]:
-    if not isinstance(raw_offsets, Sequence) or isinstance(raw_offsets, (str, bytes)):
-        raise ValueError("Tokenizer `offset_mapping` must be a sequence of pairs.")
-    normalized: list[tuple[int, int]] = []
-    for offset in raw_offsets:
-        if not isinstance(offset, Sequence) or isinstance(offset, (str, bytes)) or len(offset) != 2:
-            raise ValueError("Each offset mapping entry must be a (start, end) pair.")
-        normalized.append((int(offset[0]), int(offset[1])))
-    return normalized
-
-
-def _label_for_offset(
-    start: int,
-    end: int,
-    labeled_spans: Sequence[tuple[int, int, TokenLabel]],
-) -> TokenLabel:
-    if end <= start:
-        return "other"
-    label: TokenLabel = "other"
-    for span_start, span_end, span_label in labeled_spans:
-        if end <= span_start or start >= span_end:
-            continue
-        if span_label == "tool_call":
-            return "tool_call"
-        if span_label == "think":
-            label = "think"
-    return label
 
 
 def _environment_step_to_dict(step: EnvironmentStep) -> dict[str, Any]:

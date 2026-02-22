@@ -40,3 +40,17 @@ def test_run_env_bridge_step_submit_is_terminal_without_execution() -> None:
     assert result.is_terminal is True
     assert result.steps == ()
     assert executor.requests == []
+
+
+def test_run_env_bridge_step_invalid_submit_surfaces_validation_errors() -> None:
+    executor = FakeExecutor(requests=[])
+    assistant_text = "<tool_call>{\"tool\":\"submit\",\"args\":{}}</tool_call>"
+
+    result = run_env_bridge_step(assistant_text, executor=executor)
+
+    assert result.is_terminal is True
+    assert len(result.steps) == 1
+    assert result.steps[0].response.exit_code == 2
+    assert "final_response" in result.steps[0].response.stderr
+    assert len(result.tool_response_blocks) == 1
+    assert executor.requests == []

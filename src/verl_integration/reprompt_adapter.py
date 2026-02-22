@@ -15,10 +15,29 @@ def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str,
     if max_reprompt_len <= 0:
         raise ValueError("max_reprompt_len must be > 0")
 
-    tokens = prompt.split()
-    if len(tokens) <= max_reprompt_len:
+    if len(prompt.split()) <= max_reprompt_len:
         return prompt, False
-    return " ".join(tokens[:max_reprompt_len]), True
+
+    lines = prompt.split("\n")
+    kept_lines: list[str] = []
+    budget = max_reprompt_len
+
+    for line in lines:
+        words = line.split()
+        if not words:
+            if budget > 0:
+                kept_lines.append(line)
+            continue
+        if len(words) <= budget:
+            kept_lines.append(line)
+            budget -= len(words)
+        else:
+            if budget > 0:
+                kept_lines.append(" ".join(words[:budget]))
+            budget = 0
+            break
+
+    return "\n".join(kept_lines), True
 
 
 def _coerce_step_index(value: Any, *, fallback: int) -> int:
@@ -126,7 +145,7 @@ def _build_prompt_for_sample(
         max_reprompt_len=max_reprompt_len,
     )
 
-    has_teacher_signal = bool(feedback_block.strip())
+    has_teacher_signal = feedback_packet.self_containment_checks.has_actionable_error_text
     return truncated_prompt, has_teacher_signal, {
         "feedback_packet": feedback_packet.to_dict(),
         "prompt_truncated": was_truncated,
