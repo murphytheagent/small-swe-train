@@ -42,7 +42,7 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
     data.on_policy.enabled=true \
     data.on_policy.data_config_name=on_policy_swe_smith \
     data.on_policy.turn_generator_mode=proof_tool_chain \
-    data.on_policy.total_steps=1 \
+    data.on_policy.total_steps="${STEPS}" \
     data.on_policy.output_dir="${PROOF_OUTPUT_DIR}" \
     +data.on_policy.runtime_overrides.task_batch_size="${TASK_BATCH_SIZE}" \
     +data.on_policy.runtime_overrides.attempts_per_task="${ATTEMPTS_PER_TASK}" \
@@ -68,7 +68,7 @@ NPROC_PER_NODE="${NPROC_PER_NODE}" "${SCRIPT_DIR}/run_rft.sh" \
   data.on_policy.enabled=true \
   data.on_policy.data_config_name=on_policy_swe_smith \
   data.on_policy.turn_generator_mode=proof_tool_chain \
-  data.on_policy.total_steps=1 \
+  data.on_policy.total_steps="${STEPS}" \
   data.on_policy.output_dir="${PROOF_OUTPUT_DIR}" \
   +data.on_policy.runtime_overrides.task_batch_size="${TASK_BATCH_SIZE}" \
   +data.on_policy.runtime_overrides.attempts_per_task="${ATTEMPTS_PER_TASK}" \

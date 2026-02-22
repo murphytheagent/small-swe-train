@@ -139,4 +139,39 @@ def test_onpolicy_collector_keeps_failed_rows() -> None:
     assert len(rows) == 2
     assert rows[0]["resolved"] is False
     assert "collector_error" in rows[0]
-    assert rows[1]["resolved"] is True
+    assert rows[1]["resolved"] is False
+
+
+def test_onpolicy_collector_resolver_sees_full_attempt_history() -> None:
+    settings = _settings()
+    pool = _FakePool()
+    executor = _FakeExecutor()
+    observed_step_counts: list[int] = []
+
+    def turn_generator(**kwargs: object) -> str:
+        turn_index = int(kwargs["turn_index"])
+        if turn_index == 0:
+            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+        if turn_index == 1:
+            return '<tool_call>{"tool":"bash","args":{"command":"echo ok"}}</tool_call>'
+        return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+
+    def resolver(task, attempt_index, is_terminal, steps):
+        del task, attempt_index
+        observed_step_counts.append(len(steps))
+        return is_terminal and len(steps) == 2
+
+    collector = OnPolicyRolloutCollector(
+        settings=settings,
+        turn_generator=turn_generator,
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+        attempt_resolver=resolver,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    assert observed_step_counts == [2]
+    assert rows[0]["resolved"] is True

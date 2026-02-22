@@ -70,6 +70,8 @@ def _default_attempt_resolver(
     del task, attempt_index
     if not is_terminal:
         return False
+    if not steps:
+        return False
     return all(step.response.exit_code == 0 for step in steps)
 
 
@@ -160,6 +162,7 @@ class OnPolicyRolloutCollector:
         executor_error = ""
         tool_name = ""
         exit_code = 0
+        attempt_steps: list[EnvironmentStep] = []
 
         for turn_index in range(runtime.max_turns_per_attempt):
             elapsed_sec = self._monotonic_clock() - attempt_start
@@ -194,6 +197,8 @@ class OnPolicyRolloutCollector:
 
             history.append(assistant_response)
             history.extend(bridge_result.tool_response_blocks)
+            if bridge_result.steps:
+                attempt_steps.extend(bridge_result.steps)
 
             if bridge_result.steps:
                 last_step = bridge_result.steps[-1]
@@ -216,7 +221,7 @@ class OnPolicyRolloutCollector:
                     task,
                     attempt_index,
                     bridge_result.is_terminal,
-                    bridge_result.steps,
+                    tuple(attempt_steps),
                 )
                 break
         else:

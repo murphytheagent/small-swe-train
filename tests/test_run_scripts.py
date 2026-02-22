@@ -1,21 +1,31 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+from typing import Mapping
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _run_script(script_name: str, *args: str) -> subprocess.CompletedProcess[str]:
+def _run_script(
+    script_name: str,
+    *args: str,
+    env_overrides: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     script_path = _repo_root() / "scripts" / script_name
+    env = os.environ.copy()
+    if env_overrides is not None:
+        env.update(env_overrides)
     return subprocess.run(
         ["bash", str(script_path), "--dry-run", *args],
         cwd=_repo_root(),
         check=True,
         text=True,
         capture_output=True,
+        env=env,
     )
 
 
@@ -48,3 +58,12 @@ def test_run_rft_onpolicy_rollout_proof_script_sets_onpolicy_overrides() -> None
     assert "data.on_policy.turn_generator_mode=proof_tool_chain" in result.stdout
     assert "data.on_policy.total_steps=1" in result.stdout
     assert "+data.on_policy.runtime_overrides.task_batch_size=" in result.stdout
+
+
+def test_run_rft_onpolicy_rollout_proof_script_propagates_steps() -> None:
+    result = _run_script(
+        "run_rft_onpolicy_rollout_proof.sh",
+        env_overrides={"ON_POLICY_PROOF_STEPS": "3"},
+    )
+    assert "trainer.total_training_steps=3" in result.stdout
+    assert "data.on_policy.total_steps=3" in result.stdout
