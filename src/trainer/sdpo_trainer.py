@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from config import MAX_TOOL_CALLS_PER_TURN
@@ -52,6 +54,8 @@ class OnPolicyRFTStepArtifacts:
     rejected_count: int
     dataproto_payload: Mapping[str, Any]
     selection_reasons: tuple[str, ...]
+    checkpoint_dir: str | None
+    checkpoint_exists: bool
 
 
 class SDPOTrainerScaffold:
@@ -227,6 +231,8 @@ class SDPOTrainerScaffold:
         tokenizer: SupportsOffsetsTokenizer,
         handoff_overrides: Mapping[str, Any] | None = None,
         output_dir: str | None = None,
+        checkpoint_dir: str | Path | None = None,
+        global_step: int | None = None,
     ) -> OnPolicyRFTStepArtifacts:
         """Run rollout -> preprocess -> centralized RFT selection -> RFT train stats."""
         handoff_result = collect_rft_sft_batch_for_steps(
@@ -245,6 +251,18 @@ class SDPOTrainerScaffold:
             for row in rejected_rows
             if row.get("rft_rejection_reason")
         )
+        checkpoint_path: Path | None = None
+        if checkpoint_dir is not None:
+            resolved_global_step = self._resolve_global_step(global_step, fallback=total_steps)
+            checkpoint_path = self._write_rft_checkpoint(
+                checkpoint_dir=Path(checkpoint_dir),
+                global_step=resolved_global_step,
+                training_stats=training_stats,
+                dataproto_payload=handoff_result["dataproto_payload"],
+                selected_count=len(selected_rows),
+                rejected_count=len(rejected_rows),
+                selection_reasons=reasons,
+            )
 
         return OnPolicyRFTStepArtifacts(
             training_stats=training_stats,
@@ -252,4 +270,55 @@ class SDPOTrainerScaffold:
             rejected_count=len(rejected_rows),
             dataproto_payload=handoff_result["dataproto_payload"],
             selection_reasons=reasons,
+            checkpoint_dir=str(checkpoint_path) if checkpoint_path is not None else None,
+            checkpoint_exists=checkpoint_path is not None,
         )
+
+    @staticmethod
+    def _resolve_global_step(global_step: int | None, *, fallback: int) -> int:
+        if global_step is None:
+            resolved = fallback
+        else:
+            resolved = global_step
+        if resolved < 0:
+            raise ValueError("global_step must be >= 0 when writing RFT checkpoint artifacts.")
+        return resolved
+
+    def _write_rft_checkpoint(
+        self,
+        *,
+        checkpoint_dir: Path,
+        global_step: int,
+        training_stats: TrainingStepStats,
+        dataproto_payload: Mapping[str, Any],
+        selected_count: int,
+        rejected_count: int,
+        selection_reasons: Sequence[str],
+    ) -> Path:
+        step_dir = checkpoint_dir / f"global_step_{global_step}"
+        step_dir.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "model_name": self._config.model_name,
+            "global_step": int(global_step),
+            "selected_count": int(selected_count),
+            "rejected_count": int(rejected_count),
+            "training_stats": {
+                "loss": float(training_stats.loss),
+                "teacher_student_kl": float(training_stats.teacher_student_kl),
+                "format_valid_rate": float(training_stats.format_valid_rate),
+            },
+            "selection_reasons": [str(reason) for reason in selection_reasons],
+            "dataproto_meta_info": dict(dataproto_payload.get("meta_info", {})),
+        }
+
+        manifest_path = step_dir / "rft_step_manifest.json"
+        with manifest_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=True, sort_keys=True, indent=2)
+            handle.write("\n")
+
+        latest_pointer = checkpoint_dir / "latest_checkpoint.txt"
+        latest_pointer.parent.mkdir(parents=True, exist_ok=True)
+        latest_pointer.write_text(str(step_dir), encoding="utf-8")
+
+        return step_dir

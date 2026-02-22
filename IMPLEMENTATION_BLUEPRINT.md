@@ -566,6 +566,8 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-22 21:27 UTC] Added regressions in `tests/test_onpolicy_collector.py` and `tests/test_docker_executor.py`; validation status: `python3 -m pytest tests/test_onpolicy_collector.py tests/test_onpolicy_rollout_adapter.py tests/test_sdpo_trainer.py tests/test_run_scripts.py tests/test_task_dataset.py tests/test_docker_executor.py -q` passing (`34 passed`).
 - [2026-02-22 23:26 UTC] Added explicit Step-SDPO runner I/O interface via `scripts/run_step_sdpo_scaffold.py`: JSON/JSONL input rows in, deterministic scaffold step execution, and stable output artifacts (`rollout_rows.jsonl`, `teacher_prompts.jsonl`, `sdpo_step_summary.json`) out.
 - [2026-02-22 23:26 UTC] Added CLI regression coverage in `tests/test_run_step_sdpo_scaffold_script.py` to validate artifact creation and summary/reward fields.
+- [2026-02-22 23:34 UTC] Added optional RFT checkpoint/saving scaffold in `SDPOTrainerScaffold.run_onpolicy_rft_step(...)`: when `checkpoint_dir` is provided, the trainer now writes `checkpoints/global_step_<n>/rft_step_manifest.json` plus `checkpoints/latest_checkpoint.txt`, and exposes `checkpoint_dir`/`checkpoint_exists` in `OnPolicyRFTStepArtifacts`.
+- [2026-02-22 23:34 UTC] Added regression coverage in `tests/test_sdpo_trainer.py` for checkpoint manifest and latest-pointer writes.
 
 ---
 
