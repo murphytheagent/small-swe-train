@@ -23,6 +23,7 @@ from .contracts import (
     make_tool_call,
     validate_tool_call,
 )
+from .rollout_records import RolloutRow, RolloutRowRequired
 
 __all__ = [
     "ALLOWED_TOOLS",
@@ -39,6 +40,8 @@ __all__ = [
     "SelfContainmentChecks",
     "ToolCall",
     "canonical_tool_name",
+    "RolloutRow",
+    "RolloutRowRequired",
     "make_tool_call",
     "validate_tool_call",
 ]

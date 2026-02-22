@@ -30,6 +30,10 @@ actor_rollout_ref:
   model:
     path: Qwen/Qwen3-4B
     enable_gradient_checkpointing: true
+    use_remove_padding: true
+    trust_remote_code: false
+    external_lib: null
+    override_config: {}
     lora:
       enable: true
       rank: 64
@@ -38,6 +42,8 @@ actor_rollout_ref:
       dropout: 0.05
 
   actor:
+    strategy: fsdp2
+
     # -- Policy loss ----------------------------------------------------------
     policy_loss:
       loss_mode: sdpo
@@ -78,8 +84,9 @@ actor_rollout_ref:
       lr_scheduler_type: cosine
 
     # -- Mini-batch / micro-batch ----------------------------------------------
-    ppo_mini_batch_size: 32
-    ppo_micro_batch_size_per_gpu: 2           # 2 seqs × 8 GPUs = 16 per accumulation step
+    ppo_mini_batch_size: 128
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: 24576
     ppo_epochs: 1                             # on-policy: single pass
 
     # -- Entropy ---------------------------------------------------------------
@@ -92,8 +99,17 @@ actor_rollout_ref:
     # -- FSDP ------------------------------------------------------------------
     use_remove_padding: true                  # pack variable-length seqs
     use_dynamic_bsz: true                     # handle mixed trajectory lengths
+    use_torch_compile: true
+    ulysses_sequence_parallel_size: 1
     fsdp_config:
       dtype: bfloat16
+      fsdp_size: 8
+      model_dtype: bf16
+      forward_prefetch: true
+      offload_policy: false
+      reshard_after_forward: true
+      wrap_policy:
+        min_num_params: 0
 
     # -- Misc ------------------------------------------------------------------
     clip_ratio: 0.2
@@ -101,21 +117,51 @@ actor_rollout_ref:
   # -- Rollout (vLLM) --------------------------------------------------------
   rollout:
     name: vllm
+    prompt_length: ${data.max_prompt_length}
+    response_length: ${data.max_response_length}
+    dtype: bfloat16
+    enforce_eager: true
+    free_cache_engine: true
+    tensor_model_parallel_size: 2
+    data_parallel_size: 4
     n: 8                                      # rollouts per prompt
     temperature: 0.7
     top_p: 0.95
-    gpu_memory_utilization: 0.5               # share GPU with training
+    gpu_memory_utilization: 0.9
+    max_num_batched_tokens: 262144
     max_num_seqs: 64
+    load_format: dummy
+    log_prob_micro_batch_size_per_gpu: 4
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     calculate_log_probs: true
+    engine_kwargs:
+      vllm:
+        data_parallel_size: 4
+      sglang: {}
     val_kwargs:
-      n: 16
-      temperature: 0.7
-      top_p: 0.95
+      top_k: -1
+      top_p: 1.0
+      temperature: 0
+      n: 1
+      do_sample: false
 
   # -- Reference model (doubles as EMA teacher target) -----------------------
   ref:
+    strategy: fsdp2
+    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+    log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
+    ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size}
     fsdp_config:
       dtype: bfloat16
+      fsdp_size: 8
+      model_dtype: bf16
+      forward_prefetch: true
+      offload_policy: false
+      reshard_after_forward: true
+      wrap_policy:
+        min_num_params: 0
 
 # ---------------------------------------------------------------------------
 # Algorithm

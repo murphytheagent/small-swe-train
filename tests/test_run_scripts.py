@@ -36,3 +36,10 @@ def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     result = _run_script("run_sdpo.sh", "data.train_batch_size=4")
     assert "--config-name sdpo_swe" in result.stdout
     assert "data.train_batch_size=4" in result.stdout
+
+
+def test_run_rft_onpolicy_rollout_proof_script_sets_onpolicy_overrides() -> None:
+    result = _run_script("run_rft_onpolicy_rollout_proof.sh")
+    assert "--config-name rft_swe" in result.stdout
+    assert "on_policy.enabled=true" in result.stdout
+    assert "on_policy.rollout_only=true" in result.stdout

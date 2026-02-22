@@ -9,6 +9,7 @@ transformers>=4.46
 flash-attn>=2.7
 peft>=0.13
 vllm>=0.8.4
+datasets>=3.0
 ray>=2.40
 verl @ git+https://github.com/lasgroup/SDPO.git
 omegaconf>=2.3

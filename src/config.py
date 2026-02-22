@@ -1,25 +1,67 @@
 """Centralized runtime config loader with schema-consistent exports.
 
 Runtime policy defaults live in ``configs/runtime/training_policy_defaults.v1.json``.
+Dataset config for on-policy collection lives in ``configs/data/*.yaml``.
 This module is the import surface for runtime knobs used by code paths across
-rollout, prompting, and trainer adapters.
+rollout, prompting, trainer adapters, and environment orchestration.
 """
 
 from __future__ import annotations
 
 import functools
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+import yaml
 
 from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIGS_DIR = _PROJECT_ROOT / "configs"
+_DATA_CONFIGS_DIR = _CONFIGS_DIR / "data"
 _TRAINING_POLICY_PATH = _CONFIGS_DIR / "runtime" / "training_policy_defaults.v1.json"
 _PHASE_TRANSITION_GATES_PATH = _CONFIGS_DIR / "runtime" / "phase_transition_gates.v1.json"
 _MODEL_CONFIG_OVERRIDE_DIR = _CONFIGS_DIR / "model"
 _BUNDLED_MODEL_CONFIGS_DIR = Path(__file__).resolve().parent / "prompts" / "model_configs"
+
+DEFAULT_ON_POLICY_DATA_CONFIG_NAME = "on_policy_swe_smith"
+
+
+@dataclass(frozen=True)
+class OnPolicyDatasetColumns:
+    image_name: str
+    problem_statement: str
+    fail_to_pass: str
+    pass_to_pass: str
+
+
+@dataclass(frozen=True)
+class OnPolicyDataConfig:
+    dataset_id: str
+    dataset_split: str
+    columns: OnPolicyDatasetColumns
+
+
+@dataclass(frozen=True)
+class OnPolicyRuntimeConfig:
+    enabled: bool
+    rollout_only: bool
+    task_batch_size: int
+    attempts_per_task: int
+    max_turns_per_attempt: int
+    env_pool_size: int
+    tool_timeout_sec: int
+    container_start_timeout_sec: int
+    attempt_timeout_sec: int
+    max_tool_calls_per_turn: int
+
+
+@dataclass(frozen=True)
+class OnPolicySettings:
+    data: OnPolicyDataConfig
+    runtime: OnPolicyRuntimeConfig
 
 
 @functools.lru_cache(maxsize=1)
@@ -34,6 +76,41 @@ def phase_transition_gates_defaults() -> dict[str, Any]:
     """Load and cache phase-transition gate thresholds."""
     with _PHASE_TRANSITION_GATES_PATH.open() as fh:
         return json.load(fh)
+
+
+@functools.lru_cache(maxsize=8)
+def on_policy_data_defaults(
+    config_name: str = DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
+) -> dict[str, Any]:
+    """Load a named on-policy dataset config from ``configs/data``."""
+    normalized = config_name.strip()
+    if not normalized:
+        raise ValueError("on-policy data config name must be a non-empty string")
+
+    config_path = _DATA_CONFIGS_DIR / f"{normalized}.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"On-policy data config {normalized!r} not found at {config_path}."
+        )
+
+    with config_path.open() as fh:
+        payload = yaml.safe_load(fh)
+
+    if not isinstance(payload, Mapping):
+        raise ValueError(
+            f"On-policy data config {config_path} must be a mapping at top level."
+        )
+
+    return dict(payload)
+
+
+def on_policy_runtime_defaults() -> dict[str, Any]:
+    """Return on-policy runtime defaults from centralized policy JSON."""
+    defaults = training_policy_defaults()
+    on_policy = defaults.get("on_policy")
+    if not isinstance(on_policy, Mapping):
+        raise ValueError("`on_policy` block is missing from training policy defaults.")
+    return dict(on_policy)
 
 
 def output_contract_defaults() -> dict[str, Any]:
@@ -71,6 +148,151 @@ if TERMINAL_TOOL_NAME != SCHEMA_TERMINAL_TOOL_NAME:
         "training_policy_defaults terminal_tool is inconsistent with schema authority: "
         f"{TERMINAL_TOOL_NAME!r} != {SCHEMA_TERMINAL_TOOL_NAME!r}"
     )
+
+
+def _require_mapping(value: Any, *, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a mapping.")
+    return value
+
+
+def _coerce_bool(value: Any, *, label: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{label} must be a boolean.")
+
+
+def _coerce_non_empty_str(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a non-empty string.")
+    return value.strip()
+
+
+def _coerce_positive_int(value: Any, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{label} must be an integer >= 1.")
+    return value
+
+
+def _parse_on_policy_data_config(payload: Mapping[str, Any]) -> OnPolicyDataConfig:
+    dataset_id = _coerce_non_empty_str(payload.get("dataset_id"), label="on_policy.data.dataset_id")
+    dataset_split = _coerce_non_empty_str(
+        payload.get("dataset_split"),
+        label="on_policy.data.dataset_split",
+    )
+
+    columns_payload = _require_mapping(payload.get("columns"), label="on_policy.data.columns")
+    columns = OnPolicyDatasetColumns(
+        image_name=_coerce_non_empty_str(
+            columns_payload.get("image_name"),
+            label="on_policy.data.columns.image_name",
+        ),
+        problem_statement=_coerce_non_empty_str(
+            columns_payload.get("problem_statement"),
+            label="on_policy.data.columns.problem_statement",
+        ),
+        fail_to_pass=_coerce_non_empty_str(
+            columns_payload.get("fail_to_pass"),
+            label="on_policy.data.columns.fail_to_pass",
+        ),
+        pass_to_pass=_coerce_non_empty_str(
+            columns_payload.get("pass_to_pass"),
+            label="on_policy.data.columns.pass_to_pass",
+        ),
+    )
+
+    return OnPolicyDataConfig(
+        dataset_id=dataset_id,
+        dataset_split=dataset_split,
+        columns=columns,
+    )
+
+
+def _parse_on_policy_runtime_config(payload: Mapping[str, Any]) -> OnPolicyRuntimeConfig:
+    runtime = OnPolicyRuntimeConfig(
+        enabled=_coerce_bool(payload.get("enabled"), label="on_policy.enabled"),
+        rollout_only=_coerce_bool(payload.get("rollout_only"), label="on_policy.rollout_only"),
+        task_batch_size=_coerce_positive_int(
+            payload.get("task_batch_size"),
+            label="on_policy.task_batch_size",
+        ),
+        attempts_per_task=_coerce_positive_int(
+            payload.get("attempts_per_task"),
+            label="on_policy.attempts_per_task",
+        ),
+        max_turns_per_attempt=_coerce_positive_int(
+            payload.get("max_turns_per_attempt"),
+            label="on_policy.max_turns_per_attempt",
+        ),
+        env_pool_size=_coerce_positive_int(
+            payload.get("env_pool_size"),
+            label="on_policy.env_pool_size",
+        ),
+        tool_timeout_sec=_coerce_positive_int(
+            payload.get("tool_timeout_sec"),
+            label="on_policy.tool_timeout_sec",
+        ),
+        container_start_timeout_sec=_coerce_positive_int(
+            payload.get("container_start_timeout_sec"),
+            label="on_policy.container_start_timeout_sec",
+        ),
+        attempt_timeout_sec=_coerce_positive_int(
+            payload.get("attempt_timeout_sec"),
+            label="on_policy.attempt_timeout_sec",
+        ),
+        max_tool_calls_per_turn=_coerce_positive_int(
+            payload.get("max_tool_calls_per_turn"),
+            label="on_policy.max_tool_calls_per_turn",
+        ),
+    )
+
+    if runtime.env_pool_size < runtime.task_batch_size:
+        raise ValueError(
+            "on_policy.env_pool_size must be >= on_policy.task_batch_size for per-task containers."
+        )
+    if runtime.max_tool_calls_per_turn > MAX_TOOL_CALLS_PER_TURN:
+        raise ValueError(
+            "on_policy.max_tool_calls_per_turn exceeds centralized output contract max "
+            f"({MAX_TOOL_CALLS_PER_TURN})."
+        )
+
+    return runtime
+
+
+def _merge_on_policy_data_payload(
+    base: Mapping[str, Any],
+    overrides: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in overrides.items():
+        if key == "columns" and isinstance(value, Mapping) and isinstance(merged.get("columns"), Mapping):
+            columns = dict(merged["columns"])
+            columns.update(value)
+            merged["columns"] = columns
+        else:
+            merged[key] = value
+    return merged
+
+
+def resolve_on_policy_settings(
+    *,
+    data_config_name: str = DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
+    runtime_overrides: Mapping[str, Any] | None = None,
+    data_overrides: Mapping[str, Any] | None = None,
+) -> OnPolicySettings:
+    """Resolve and validate merged on-policy settings from centralized configs."""
+    runtime_payload = on_policy_runtime_defaults()
+    if runtime_overrides is not None:
+        runtime_payload.update(runtime_overrides)
+
+    data_payload = on_policy_data_defaults(data_config_name)
+    if data_overrides is not None:
+        data_payload = _merge_on_policy_data_payload(data_payload, data_overrides)
+
+    runtime = _parse_on_policy_runtime_config(runtime_payload)
+    data = _parse_on_policy_data_config(data_payload)
+
+    return OnPolicySettings(data=data, runtime=runtime)
 
 
 def resolve_model_config_path(model_family: str) -> Path:

@@ -17,6 +17,10 @@ actor_rollout_ref:
   model:
     path: Qwen/Qwen3-4B
     enable_gradient_checkpointing: true
+    use_remove_padding: true
+    trust_remote_code: false
+    external_lib: null
+    override_config: {}
     lora:
       enable: true
       rank: 64
@@ -25,6 +29,7 @@ actor_rollout_ref:
       dropout: 0.05
 
   actor:
+    strategy: fsdp2
     optim:
       lr: 5.0e-5
       lr_warmup_steps: 50
@@ -35,8 +40,25 @@ actor_rollout_ref:
 
     fsdp_config:
       dtype: bfloat16
+      fsdp_size: 8
+      model_dtype: bf16
+      forward_prefetch: true
+      offload_policy: false
+      reshard_after_forward: true
+      wrap_policy:
+        min_num_params: 0
 
     use_remove_padding: true
+
+  rollout:
+    name: vllm
+    tensor_model_parallel_size: 2
+    data_parallel_size: 4
+    gpu_memory_utilization: 0.9
+    enforce_eager: true
+    free_cache_engine: true
+    max_num_seqs: 64
+    max_num_batched_tokens: 262144
 
 # Maximum sequence length for RFT data (shorter than SDPO — no reprompt overhead)
 max_model_len: 12288
@@ -49,3 +71,9 @@ trainer:
   save_freq: 200
   val_freq: 100
   group_name: small-swe-rft
+
+# On-policy rollout collection controls (defaults validated in src/config.py).
+on_policy:
+  enabled: true
+  rollout_only: true
+  data_config_name: on_policy_swe_smith

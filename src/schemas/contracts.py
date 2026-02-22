@@ -26,6 +26,36 @@ ALLOWED_TOOLS: tuple[str, ...] = (
 )
 _ALLOWED_TOOLS = set(ALLOWED_TOOLS)
 
+class BashArgs(TypedDict, total=False):
+    command: str
+    cwd: str
+    timeout_sec: int
+
+
+class SearchArgs(TypedDict, total=False):
+    query: str
+    path_hint: str
+    top_k: int
+
+
+class EditArgs(TypedDict, total=False):
+    path: str
+    patch: str
+    description: str
+
+
+class SubmitArgs(TypedDict, total=False):
+    final_response: str
+    changed_paths: list[str]
+    confidence: float
+
+
+class ToolOutput(TypedDict, total=False):
+    stdout: str
+    stderr: str
+    exit_code: int
+
+
 # ---------------------------------------------------------------------------
 # Tool schema registry + validator
 # ---------------------------------------------------------------------------
@@ -78,35 +108,6 @@ _TYPE_MAP: dict[type, tuple[type, ...]] = {
     bool: (bool,),
 }
 
-class BashArgs(TypedDict, total=False):
-    command: str
-    cwd: str
-    timeout_sec: int
-
-
-class SearchArgs(TypedDict, total=False):
-    query: str
-    path_hint: str
-    top_k: int
-
-
-class EditArgs(TypedDict, total=False):
-    path: str
-    patch: str
-    description: str
-
-
-class SubmitArgs(TypedDict, total=False):
-    final_response: str
-    changed_paths: list[str]
-    confidence: float
-
-
-class ToolOutput(TypedDict, total=False):
-    stdout: str
-    stderr: str
-    exit_code: int
-
 
 def canonical_tool_name(tool: str) -> AllowedTool:
     """Normalize legacy aliases and enforce canonical tool names."""
@@ -142,7 +143,7 @@ class ActionEnvelope:
             raise ValueError("At least one tool call is required.")
         has_submit = any(call.tool == TERMINAL_TOOL_NAME for call in self.tool_calls)
         if has_submit and len(self.tool_calls) != 1:
-            raise ValueError("Final turn, must be only one tool call in the turn.")
+            raise ValueError("'submit' must be the only tool call in the final turn.")
         if self.thinking is not None and not self.thinking.strip():
             object.__setattr__(self, "thinking", None)
 
