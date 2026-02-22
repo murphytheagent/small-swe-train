@@ -62,13 +62,22 @@ class DockerToolExecutor:
                 metadata={"container_id": self._container_id},
             )
         cwd = args.get("cwd")
+        stdin_payload = args.get("stdin")
+        if stdin_payload is not None and not isinstance(stdin_payload, str):
+            stdin_payload = str(stdin_payload)
         timeout_sec = _coerce_timeout(args.get("timeout_sec"), fallback=self._tool_timeout_sec)
 
         docker_cmd = ["docker", "exec"]
+        if stdin_payload is not None:
+            docker_cmd.append("-i")
         if isinstance(cwd, str) and cwd.strip():
             docker_cmd.extend(["-w", cwd.strip()])
         docker_cmd.extend([self._container_id, "sh", "-lc", command])
-        return self._run_command(docker_cmd, timeout_sec=timeout_sec)
+        return self._run_command(
+            docker_cmd,
+            timeout_sec=timeout_sec,
+            stdin_text=stdin_payload,
+        )
 
     def _run_search(self, args: dict[str, Any]) -> ToolResponse:
         query = str(args.get("query", ""))
@@ -132,9 +141,22 @@ class DockerToolExecutor:
         ]
         return self._run_command(docker_cmd, timeout_sec=timeout_sec)
 
-    def _run_command(self, command: list[str], *, timeout_sec: int) -> ToolResponse:
+    def _run_command(
+        self,
+        command: list[str],
+        *,
+        timeout_sec: int,
+        stdin_text: str | None = None,
+    ) -> ToolResponse:
         try:
-            result = self._runner(command, timeout_sec=timeout_sec)
+            if stdin_text is None:
+                result = self._runner(command, timeout_sec=timeout_sec)
+            else:
+                result = self._runner(
+                    command,
+                    timeout_sec=timeout_sec,
+                    stdin_text=stdin_text,
+                )
         except subprocess.TimeoutExpired:
             return ToolResponse(
                 stdout="",

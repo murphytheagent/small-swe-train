@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import shlex
 import time
 from typing import Callable, Protocol, Sequence
 
@@ -320,11 +318,15 @@ class OnPolicyRolloutCollector:
         init_request = ToolRequest(
             tool="bash",
             args={
-                "command": _build_patch_apply_command(patch),
+                "command": _build_patch_apply_command(),
+                "stdin": patch,
                 "timeout_sec": runtime.tool_timeout_sec,
             },
         )
-        response = executor.run(init_request)
+        try:
+            response = executor.run(init_request)
+        except Exception as exc:
+            return f"task_env_init_failed: {exc}"
         if response.exit_code == 0:
             return None
         stderr = response.stderr.strip()
@@ -363,9 +365,7 @@ def _task_patch(task: TaskSample) -> str | None:
     return raw_patch
 
 
-def _build_patch_apply_command(patch: str) -> str:
-    encoded_patch = base64.b64encode(patch.encode("utf-8")).decode("ascii")
-    quoted_payload = shlex.quote(encoded_patch)
+def _build_patch_apply_command() -> str:
     return (
         "set -eu; "
         'repo_root=""; '
@@ -382,9 +382,10 @@ def _build_patch_apply_command(patch: str) -> str:
         "exit 2; "
         "fi; "
         'patch_file="$(mktemp)"; '
-        f"printf %s {quoted_payload} | base64 -d > \"${{patch_file}}\"; "
+        'cleanup() { rm -f "${patch_file}"; }; '
+        "trap cleanup EXIT; "
+        'cat > "${patch_file}"; '
         'cd "${repo_root}"; '
         'git apply --whitespace=nowarn "${patch_file}"; '
-        'rm -f "${patch_file}"; '
         'printf "task patch applied in %s\\n" "${repo_root}"'
     )
