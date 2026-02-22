@@ -253,7 +253,7 @@ class SDPOTrainerScaffold:
         )
         checkpoint_path: Path | None = None
         if checkpoint_dir is not None:
-            resolved_global_step = self._resolve_global_step(global_step, fallback=total_steps)
+            resolved_global_step = self._resolve_global_step(global_step)
             checkpoint_path = self._write_rft_checkpoint(
                 checkpoint_dir=Path(checkpoint_dir),
                 global_step=resolved_global_step,
@@ -275,11 +275,12 @@ class SDPOTrainerScaffold:
         )
 
     @staticmethod
-    def _resolve_global_step(global_step: int | None, *, fallback: int) -> int:
+    def _resolve_global_step(global_step: int | None) -> int:
         if global_step is None:
-            resolved = fallback
-        else:
-            resolved = global_step
+            raise ValueError(
+                "global_step is required when writing RFT checkpoint artifacts."
+            )
+        resolved = global_step
         if resolved < 0:
             raise ValueError("global_step must be >= 0 when writing RFT checkpoint artifacts.")
         return resolved

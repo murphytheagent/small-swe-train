@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from config import (
     OnPolicyDataConfig,
     OnPolicyDatasetColumns,
@@ -254,3 +256,19 @@ def test_run_onpolicy_rft_step_writes_checkpoint_manifest(tmp_path: Path) -> Non
     assert payload["selected_count"] == 1
     assert payload["rejected_count"] == 1
     assert payload["training_stats"]["format_valid_rate"] == 1.0
+
+
+def test_run_onpolicy_rft_step_checkpoint_requires_explicit_global_step(tmp_path: Path) -> None:
+    collector, tokenizer = _build_test_onpolicy_rft_collector()
+    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B"))
+
+    with pytest.raises(
+        ValueError,
+        match="global_step is required when writing RFT checkpoint artifacts",
+    ):
+        trainer.run_onpolicy_rft_step(
+            total_steps=1,
+            collector=collector,
+            tokenizer=tokenizer,
+            checkpoint_dir=tmp_path / "checkpoints",
+        )

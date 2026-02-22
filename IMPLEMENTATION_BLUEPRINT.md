@@ -568,6 +568,8 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-22 23:26 UTC] Added CLI regression coverage in `tests/test_run_step_sdpo_scaffold_script.py` to validate artifact creation and summary/reward fields.
 - [2026-02-22 23:34 UTC] Added optional RFT checkpoint/saving scaffold in `SDPOTrainerScaffold.run_onpolicy_rft_step(...)`: when `checkpoint_dir` is provided, the trainer now writes `checkpoints/global_step_<n>/rft_step_manifest.json` plus `checkpoints/latest_checkpoint.txt`, and exposes `checkpoint_dir`/`checkpoint_exists` in `OnPolicyRFTStepArtifacts`.
 - [2026-02-22 23:34 UTC] Added regression coverage in `tests/test_sdpo_trainer.py` for checkpoint manifest and latest-pointer writes.
+- [2026-02-22 23:42 UTC] Hardened RFT checkpoint contract to require explicit `global_step` whenever `checkpoint_dir` is set; removed fallback to `total_steps` to prevent iterative runs from overwriting `global_step_1`.
+- [2026-02-22 23:42 UTC] Added regression coverage in `tests/test_sdpo_trainer.py` asserting checkpoint writes fail fast without explicit `global_step`.
 
 ---
 
