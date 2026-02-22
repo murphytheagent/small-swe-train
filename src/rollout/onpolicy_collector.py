@@ -161,6 +161,7 @@ class OnPolicyRolloutCollector:
         history: list[str] = []
         assistant_response = ""
         assistant_response_for_feedback = ""
+        turn_index_for_feedback = -1
         tool_output: dict[str, object] = {}
         turn_index = -1
         resolved = False
@@ -209,6 +210,7 @@ class OnPolicyRolloutCollector:
             if bridge_result.steps:
                 attempt_steps.extend(bridge_result.steps)
                 assistant_response_for_feedback = assistant_response
+                turn_index_for_feedback = turn_index
 
             if bridge_result.steps:
                 first_step = bridge_result.steps[0]
@@ -250,6 +252,10 @@ class OnPolicyRolloutCollector:
             + attempt_index
         )
         row_assistant_response = assistant_response_for_feedback or assistant_response
+        if turn_index_for_feedback >= 0:
+            row_turn_index = turn_index_for_feedback
+        else:
+            row_turn_index = max(turn_index, 0)
 
         row: RolloutRow = {
             "prompt": task.problem_statement,
@@ -259,7 +265,7 @@ class OnPolicyRolloutCollector:
             "step_index": row_step_index,
             "task_id": task.task_id,
             "attempt_index": attempt_index,
-            "turn_index": max(turn_index, 0),
+            "turn_index": row_turn_index,
             "container_id": handle.container_id,
             "is_terminal": is_terminal,
             "latency_ms": elapsed_ms,

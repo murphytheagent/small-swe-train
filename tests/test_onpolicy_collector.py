@@ -268,6 +268,7 @@ def test_onpolicy_collector_keeps_tool_output_aligned_with_first_tool_call() -> 
     assert row["is_terminal"] is True
     assert row["tool_name"] == "search"
     assert row["tool_output"]["stdout"] == "ran:search"
+    assert row["turn_index"] == 0
     assert '"tool":"search"' in row["assistant_response"]
 
 
@@ -287,5 +288,6 @@ def test_onpolicy_collector_default_turn_generator_produces_resolved_attempt() -
     assert len(rows) == 1
     assert rows[0]["is_terminal"] is True
     assert rows[0]["resolved"] is True
+    assert rows[0]["turn_index"] == 0
     assert rows[0]["tool_name"] == "bash"
     assert [request.tool for request in executor.requests] == ["bash"]
