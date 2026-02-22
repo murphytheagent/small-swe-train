@@ -76,5 +76,6 @@ def test_docker_executor_edit_uses_apply_or_replace_script() -> None:
     assert len(commands) == 1
     script = commands[0][-1]
     assert "patch --batch --forward --silent" in script
+    assert '[ -f "$TARGET_PATH" ]' not in script
     assert '>> "$TARGET_PATH"' not in script
     assert 'printf "%s\\n" "$PATCH_PAYLOAD" > "$TARGET_PATH"' in script

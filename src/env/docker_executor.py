@@ -107,7 +107,7 @@ class DockerToolExecutor:
             'mkdir -p "$(dirname "$TARGET_PATH")" && '
             'PATCH_FILE="$(mktemp)" && '
             'printf "%s\\n" "$PATCH_PAYLOAD" > "$PATCH_FILE" && '
-            'if [ -f "$TARGET_PATH" ] && grep -Eq "^(--- |\\+\\+\\+ |@@ |\\*\\*\\* Begin Patch)" "$PATCH_FILE"; then '
+            'if grep -Eq "^(--- |\\+\\+\\+ |@@ |\\*\\*\\* Begin Patch)" "$PATCH_FILE"; then '
             'if patch --batch --forward --silent "$TARGET_PATH" "$PATCH_FILE" >/dev/null 2>&1; then '
             ":; "
             "else "
