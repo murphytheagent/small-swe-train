@@ -43,6 +43,7 @@ def test_tool_call_bounds_are_valid() -> None:
 def test_prompt_contract_uses_centralized_terminal_tool_default() -> None:
     prompt = build_assistant_contract_prompt()
     assert f"Terminal tool is '{config.TERMINAL_TOOL_NAME}'" in prompt
+    assert "Allowed tools are exactly: bash, search, edit, submit." in prompt
 
 
 def test_terminal_tool_validator_rejects_unknown_name() -> None:
