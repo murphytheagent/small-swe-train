@@ -13,6 +13,7 @@ from typing import Any
 from transformers import AutoModelForCausalLM
 
 _ORIGINAL_FROM_PRETRAINED = AutoModelForCausalLM.from_pretrained
+_FLASH_ATTN_DISABLED = False
 
 
 def _resolved_attn_implementation() -> str | None:
@@ -34,6 +35,7 @@ def _coerce_bool_env(name: str, *, default: bool) -> bool:
 
 
 def _disable_flash_attn_availability(*, reason: str) -> None:
+    global _FLASH_ATTN_DISABLED
     from transformers import utils as transformers_utils
     from transformers.utils import import_utils as transformers_import_utils
 
@@ -42,6 +44,7 @@ def _disable_flash_attn_availability(*, reason: str) -> None:
 
     transformers_utils.is_flash_attn_2_available = _not_available
     transformers_import_utils.is_flash_attn_2_available = _not_available
+    _FLASH_ATTN_DISABLED = True
     print(
         f"[small-swe] flash-attn disabled for this run: {reason}",
         file=sys.stderr,
@@ -65,8 +68,14 @@ def _ensure_flash_attn_runtime_compatibility() -> None:
 
 def _patched_from_pretrained(*args: Any, **kwargs: Any):
     attn_implementation = _resolved_attn_implementation()
+    if attn_implementation is None and _FLASH_ATTN_DISABLED:
+        fallback = os.environ.get("SMALL_SWE_FALLBACK_ATTN_IMPL", "sdpa").strip()
+        if fallback:
+            attn_implementation = fallback
     if attn_implementation is not None:
-        kwargs["attn_implementation"] = attn_implementation
+        kwargs.setdefault("attn_implementation", attn_implementation)
+        if kwargs["attn_implementation"] != "flash_attention_2":
+            kwargs.setdefault("use_flash_attention_2", False)
     return _ORIGINAL_FROM_PRETRAINED(*args, **kwargs)
 
 
