@@ -223,6 +223,10 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 output_dir=config.output_dir,
                 keep_last=config.checkpoint_keep_last,
             )
+            pruned_step_payloads = prune_old_step_payloads(
+                output_dir=config.output_dir,
+                keep_last=config.checkpoint_keep_last,
+            )
             step_summary = {
                 "step_index": step_index,
                 "selected_count": selected_count,
@@ -232,6 +236,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "latest_hf_checkpoint": str(latest_hf_checkpoint),
                 "trainer_command": trainer_command,
                 "pruned_checkpoint_roots": [str(path) for path in pruned_checkpoint_roots],
+                "pruned_step_payloads": [str(path) for path in pruned_step_payloads],
             }
             runtime_manifest["steps"].append(step_summary)
             _write_json(step_dir / "rft_step_summary.json", step_summary)
@@ -396,6 +401,48 @@ def prune_old_step_checkpoints(*, output_dir: str | Path, keep_last: int) -> lis
     for _, checkpoint_root in to_prune:
         shutil.rmtree(checkpoint_root)
         pruned.append(checkpoint_root)
+    return pruned
+
+
+def prune_old_step_payloads(*, output_dir: str | Path, keep_last: int) -> list[Path]:
+    """Delete old per-step rollout payloads beyond the keep-last window.
+
+    Retained summaries (`rft_step_summary.json`) remain in each step directory for
+    lightweight auditability while bulky artifacts are pruned.
+    """
+    if keep_last < 1:
+        raise ValueError("keep_last must be >= 1 to preserve current step payload artifacts.")
+
+    resolved_output = Path(output_dir)
+    if not resolved_output.exists():
+        return []
+
+    step_dirs: list[tuple[int, Path]] = []
+    for step_dir in resolved_output.iterdir():
+        if not step_dir.is_dir():
+            continue
+        if not step_dir.name.startswith("rft_step_"):
+            continue
+        suffix = step_dir.name.removeprefix("rft_step_")
+        if not suffix.isdigit():
+            continue
+        step_dirs.append((int(suffix), step_dir))
+
+    step_dirs.sort(key=lambda item: item[0])
+    if len(step_dirs) <= keep_last:
+        return []
+
+    to_prune = step_dirs[: len(step_dirs) - keep_last]
+    pruned: list[Path] = []
+    for _, step_dir in to_prune:
+        for relative in ("collector_artifacts", "accepted_trajectories.parquet"):
+            target = step_dir / relative
+            if target.is_dir():
+                shutil.rmtree(target)
+                pruned.append(target)
+            elif target.is_file():
+                target.unlink()
+                pruned.append(target)
     return pruned
 
 

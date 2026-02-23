@@ -8,6 +8,7 @@ from trainer.rft_runtime_loop import (
     build_trainer_step_command,
     build_vllm_server_command,
     prune_old_step_checkpoints,
+    prune_old_step_payloads,
     resolve_latest_hf_checkpoint,
 )
 
@@ -103,3 +104,37 @@ def test_prune_old_step_checkpoints_keeps_latest_roots(tmp_path: Path) -> None:
 def test_prune_old_step_checkpoints_requires_positive_keep_last(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="keep_last must be >= 1"):
         prune_old_step_checkpoints(output_dir=tmp_path, keep_last=0)
+
+
+def test_prune_old_step_payloads_keeps_latest_step_payloads(tmp_path: Path) -> None:
+    output_dir = tmp_path / "rft_runtime"
+    for step in range(4):
+        step_dir = output_dir / f"rft_step_{step:05d}"
+        (step_dir / "collector_artifacts").mkdir(parents=True)
+        (step_dir / "collector_artifacts" / "rollout_rows.jsonl").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+        (step_dir / "accepted_trajectories.parquet").write_text("stub", encoding="utf-8")
+
+    pruned = prune_old_step_payloads(output_dir=output_dir, keep_last=2)
+
+    pruned_names = {str(path.relative_to(output_dir)) for path in pruned}
+    assert "rft_step_00000/collector_artifacts" in pruned_names
+    assert "rft_step_00000/accepted_trajectories.parquet" in pruned_names
+    assert "rft_step_00001/collector_artifacts" in pruned_names
+    assert "rft_step_00001/accepted_trajectories.parquet" in pruned_names
+
+    assert not (output_dir / "rft_step_00000" / "collector_artifacts").exists()
+    assert not (output_dir / "rft_step_00000" / "accepted_trajectories.parquet").exists()
+    assert not (output_dir / "rft_step_00001" / "collector_artifacts").exists()
+    assert not (output_dir / "rft_step_00001" / "accepted_trajectories.parquet").exists()
+    assert (output_dir / "rft_step_00002" / "collector_artifacts").is_dir()
+    assert (output_dir / "rft_step_00002" / "accepted_trajectories.parquet").is_file()
+    assert (output_dir / "rft_step_00003" / "collector_artifacts").is_dir()
+    assert (output_dir / "rft_step_00003" / "accepted_trajectories.parquet").is_file()
+
+
+def test_prune_old_step_payloads_requires_positive_keep_last(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="keep_last must be >= 1"):
+        prune_old_step_payloads(output_dir=tmp_path, keep_last=0)
