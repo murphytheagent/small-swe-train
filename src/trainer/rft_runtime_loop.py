@@ -256,7 +256,10 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 current_model_path = str(latest_hf_checkpoint)
                 checkpoint_step_dirs.append(step_dir)
 
-                if config.manage_vllm:
+                # Restart vLLM only when another collection step remains.
+                # Restarting after the final step adds unnecessary startup cost
+                # and can surface avoidable restart-path failures.
+                if config.manage_vllm and step_index + 1 < config.rft_steps:
                     vllm_controller.start(model_path=current_model_path)
 
             pruned_checkpoint_roots: list[Path] = []

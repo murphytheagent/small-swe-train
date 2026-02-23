@@ -405,6 +405,150 @@ def test_run_loop_checkpoint_pruning_tracks_only_checkpoint_steps(
     assert call_state["step_dir_args"][1] == ["rft_step_00000", "rft_step_00002"]
 
 
+def test_run_loop_does_not_restart_vllm_after_final_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_state: dict[str, object] = {"controllers": []}
+
+    class _FakeVLLMController:
+        def __init__(self, *, config, log_path: Path) -> None:
+            del config, log_path
+            self.start_calls: list[str] = []
+            self.stop_calls = 0
+            self._active = False
+            controllers = call_state["controllers"]
+            assert isinstance(controllers, list)
+            controllers.append(self)
+
+        def start(self, *, model_path: str) -> None:
+            self.start_calls.append(model_path)
+            self._active = True
+
+        def stop(self) -> None:
+            if self._active:
+                self.stop_calls += 1
+                self._active = False
+
+    def _fake_load_tokenizer(_model_path: str):
+        return object()
+
+    def _fake_collect(*, request, tokenizer):
+        del request, tokenizer
+        return {
+            "selected_rows": [
+                {
+                    "task_id": "task-1",
+                    "attempt_index": 0,
+                    "step_index": 0,
+                    "turn_index": 0,
+                    "resolved": False,
+                    "format_valid": True,
+                    "final_turn_has_submit": True,
+                    "final_submit_format_valid": True,
+                    "prompt": "Fix bug",
+                    "assistant_response": "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>",
+                    "trajectory_history": [
+                        "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
+                    ],
+                }
+            ],
+            "rejected_rows": [],
+        }
+
+    def _fake_write_selected_rows(_rows, parquet_path: Path):
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        parquet_path.write_text("stub", encoding="utf-8")
+        return 1
+
+    def _fake_build_trainer_step_command(**kwargs):
+        trainer_output_dir = Path(kwargs["trainer_output_dir"])
+        return ["fake-trainer", str(trainer_output_dir)]
+
+    def _fake_run_command(command, *, cwd: Path):
+        del cwd
+        trainer_output_dir = Path(command[1])
+        (trainer_output_dir / "global_step_1" / "huggingface").mkdir(parents=True, exist_ok=True)
+
+    def _fake_resolve_latest_hf_checkpoint(checkpoint_root: Path):
+        target = Path(checkpoint_root) / "global_step_1" / "huggingface"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    monkeypatch.setattr(rft_runtime_loop, "VLLMServerController", _FakeVLLMController)
+    monkeypatch.setattr(rft_runtime_loop, "_load_tokenizer", _fake_load_tokenizer)
+    monkeypatch.setattr(rft_runtime_loop, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "write_selected_rows_to_multiturn_parquet",
+        _fake_write_selected_rows,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "build_trainer_step_command",
+        _fake_build_trainer_step_command,
+    )
+    monkeypatch.setattr(rft_runtime_loop, "_run_command", _fake_run_command)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "resolve_latest_hf_checkpoint",
+        _fake_resolve_latest_hf_checkpoint,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_global_step_checkpoints",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_step_checkpoints",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_step_payloads",
+        lambda **_kwargs: [],
+    )
+
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=1,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=1,
+        train_batch_size=1,
+        output_dir=tmp_path / "runtime",
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=True,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+    )
+
+    rft_runtime_loop.run_rft_runtime_loop(config)
+
+    controllers = call_state["controllers"]
+    assert isinstance(controllers, list)
+    assert len(controllers) == 1
+    controller = controllers[0]
+    assert controller.start_calls == ["Qwen/Qwen3-0.6B"]
+    assert controller.stop_calls == 1
+
+
 def test_prune_old_global_step_checkpoints_keeps_latest_steps(tmp_path: Path) -> None:
     checkpoint_root = tmp_path / "trainer_checkpoints"
     newest = checkpoint_root / "global_step_1" / "huggingface"
