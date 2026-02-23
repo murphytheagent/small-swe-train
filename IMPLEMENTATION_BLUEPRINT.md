@@ -571,6 +571,9 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-22 23:42 UTC] Hardened RFT checkpoint contract to require explicit `global_step` whenever `checkpoint_dir` is set; removed fallback to `total_steps` to prevent iterative runs from overwriting `global_step_1`.
 - [2026-02-22 23:42 UTC] Added regression coverage in `tests/test_sdpo_trainer.py` asserting checkpoint writes fail fast without explicit `global_step`.
 - [2026-02-22 23:50 UTC] Moved `global_step` checkpoint validation to run before `collect_rft_sft_batch_for_steps(...)` so invalid checkpoint requests fail fast before rollout/training side effects; added regression `test_run_onpolicy_rft_step_checkpoint_validation_fails_before_rollout`.
+- [2026-02-23 02:30 UTC] Split RFT flow into dedicated `src/trainer/rft_trainer.py` (`RFTTrainerScaffold`) and kept `SDPOTrainerScaffold` as the SDPO-focused facade with compatibility delegation for `run_onpolicy_rft_step(...)`.
+- [2026-02-23 02:30 UTC] Extended on-policy rollout artifacts for GPU runs: collector rows now include `image_name` plus serialized `trajectory_steps`/`trajectory_history`, and `collect_rft_sft_batch_for_steps(...)` now writes `rollout_rows.jsonl` + `rollout_artifact_summary.json` (unique task IDs, task-image pairs, trajectory counts) under `output_dir`.
+- [2026-02-23 02:30 UTC] Hardened RFT handoff identity checks to fail fast on empty `task_id` before SFT batch assembly; added regression coverage in `tests/test_onpolicy_rollout_adapter.py`, `tests/test_rft_trainer.py`, and updated `tests/test_sdpo_trainer.py` to resolve settings from real dataset config name (`on_policy_swe_smith`) while preserving deterministic local fakes.
 
 ---
 

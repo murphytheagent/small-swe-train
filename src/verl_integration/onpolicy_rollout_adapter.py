@@ -14,7 +14,14 @@ from config import (
     resolve_rft_handoff_settings,
 )
 from data.tokenization import SupportsOffsetsTokenizer
-from rollout.onpolicy_collector import AssistantTurnGenerator, OnPolicyRolloutCollector
+from env.task_dataset import DatasetLoader
+from rollout.onpolicy_collector import (
+    AssistantTurnGenerator,
+    AttemptResolver,
+    ExecutorFactory,
+    OnPolicyRolloutCollector,
+    PoolFactory,
+)
 from schemas import RolloutRow
 from verl_integration.data_preprocessor import preprocess_trajectories
 
@@ -28,6 +35,10 @@ def build_onpolicy_collector(
     data_config_name: str = DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
     runtime_overrides: Mapping[str, Any] | None = None,
     data_overrides: Mapping[str, Any] | None = None,
+    dataset_loader: DatasetLoader | None = None,
+    pool_factory: PoolFactory | None = None,
+    executor_factory: ExecutorFactory | None = None,
+    attempt_resolver: AttemptResolver | None = None,
 ) -> OnPolicyRolloutCollector:
     """Build a collector using centralized config authority only."""
     settings = resolve_on_policy_settings(
@@ -38,6 +49,10 @@ def build_onpolicy_collector(
     return OnPolicyRolloutCollector(
         settings=settings,
         turn_generator=turn_generator,
+        dataset_loader=dataset_loader,
+        pool_factory=pool_factory,
+        executor_factory=executor_factory,
+        attempt_resolver=attempt_resolver,
     )
 
 
@@ -117,6 +132,7 @@ def collect_rft_sft_batch_for_steps(
     if output_dir is not None:
         base_dir = Path(output_dir)
         base_dir.mkdir(parents=True, exist_ok=True)
+        write_jsonl_rows(base_dir / "rollout_rows.jsonl", rollout_rows)
         write_jsonl_rows(base_dir / "selected_rows.jsonl", selected_rows)
         write_jsonl_rows(base_dir / "rejected_rows.jsonl", rejected_rows)
         _write_json(
@@ -127,6 +143,15 @@ def collect_rft_sft_batch_for_steps(
                 "max_padded_length": sft_batch["meta_info"]["max_padded_length"],
                 "max_sequence_length_limit": sft_batch["meta_info"]["max_sequence_length_limit"],
             },
+        )
+        _write_json(
+            base_dir / "rollout_artifact_summary.json",
+            _build_rollout_artifact_summary(
+                rollout_rows=rollout_rows,
+                total_steps=total_steps,
+                selected_count=len(selected_rows),
+                rejected_count=len(rejected_rows),
+            ),
         )
 
     return result
@@ -144,11 +169,12 @@ def merge_rollout_and_preprocessed_rows(
         )
 
     merged_rows: list[dict[str, Any]] = []
-    for rollout_row, preprocessed_row in zip(rollout_rows, preprocessed_rows):
+    for index, (rollout_row, preprocessed_row) in enumerate(zip(rollout_rows, preprocessed_rows)):
+        task_id = _require_non_empty_task_id(rollout_row.get("task_id"), index=index)
         merged = dict(preprocessed_row)
         merged.update(
             {
-                "task_id": rollout_row.get("task_id", ""),
+                "task_id": task_id,
                 "attempt_index": rollout_row.get("attempt_index", 0),
                 "turn_index": rollout_row.get("turn_index", 0),
                 "step_index": rollout_row.get("step_index", 0),
@@ -161,6 +187,9 @@ def merge_rollout_and_preprocessed_rows(
                 "exit_code": rollout_row.get("exit_code"),
                 "tool_name": rollout_row.get("tool_name", ""),
                 "container_id": rollout_row.get("container_id", ""),
+                "image_name": rollout_row.get("image_name", ""),
+                "trajectory_steps": rollout_row.get("trajectory_steps", ()),
+                "trajectory_history": rollout_row.get("trajectory_history", ()),
             }
         )
         merged_rows.append(merged)
@@ -296,6 +325,8 @@ def build_verl_sft_batch(
         # Match verl SFT behavior by masking the final token target.
         action_mask[-1] = 0
 
+        task_id = _require_non_empty_task_id(row.get("task_id"), index=index)
+        attempt_index = _coerce_int(row.get("attempt_index"), fallback=0)
         max_length = max(max_length, len(input_ids))
         packed_rows.append(
             {
@@ -305,9 +336,9 @@ def build_verl_sft_batch(
                 "loss_mask": action_mask,
                 "token_labels": token_labels,
                 "original_length": len(input_ids),
-                "group_id": _build_group_id(row, index=index),
-                "task_id": str(row.get("task_id", "")),
-                "attempt_index": _coerce_int(row.get("attempt_index"), fallback=0),
+                "group_id": _build_group_id(task_id=task_id, attempt_index=attempt_index),
+                "task_id": task_id,
+                "attempt_index": attempt_index,
                 "step_index": _coerce_int(row.get("step_index"), fallback=index),
                 "turn_index": _coerce_int(row.get("turn_index"), fallback=0),
                 "resolved": _coerce_bool(row.get("resolved"), fallback=False),
@@ -475,7 +506,67 @@ def _coerce_token_labels(value: Any, *, length_hint: int) -> list[str]:
     return ["other"] * length_hint
 
 
-def _build_group_id(row: Mapping[str, Any], *, index: int) -> str:
-    task_id = str(row.get("task_id", "")).strip() or f"task-{index}"
-    attempt_index = _coerce_int(row.get("attempt_index"), fallback=0)
+def _build_group_id(*, task_id: str, attempt_index: int) -> str:
     return f"{task_id}#attempt-{attempt_index}"
+
+
+def _require_non_empty_task_id(value: Any, *, index: int) -> str:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    raise ValueError(f"rows[{index}].task_id must be a non-empty string.")
+
+
+def _build_rollout_artifact_summary(
+    *,
+    rollout_rows: Sequence[Mapping[str, Any]],
+    total_steps: int,
+    selected_count: int,
+    rejected_count: int,
+) -> dict[str, Any]:
+    unique_task_ids: list[str] = []
+    unique_image_names: list[str] = []
+    seen_task_ids: set[str] = set()
+    seen_image_names: set[str] = set()
+    task_image_pairs: list[dict[str, str]] = []
+    seen_task_image_pairs: set[tuple[str, str]] = set()
+    rows_with_trajectory_steps = 0
+    trajectory_step_count = 0
+
+    for index, row in enumerate(rollout_rows):
+        task_id = _require_non_empty_task_id(row.get("task_id"), index=index)
+        if task_id not in seen_task_ids:
+            seen_task_ids.add(task_id)
+            unique_task_ids.append(task_id)
+
+        image_name_raw = row.get("image_name", "")
+        image_name = image_name_raw.strip() if isinstance(image_name_raw, str) else ""
+        if image_name and image_name not in seen_image_names:
+            seen_image_names.add(image_name)
+            unique_image_names.append(image_name)
+
+        if image_name:
+            pair = (task_id, image_name)
+            if pair not in seen_task_image_pairs:
+                seen_task_image_pairs.add(pair)
+                task_image_pairs.append({"task_id": task_id, "image_name": image_name})
+
+        trajectory_steps = row.get("trajectory_steps")
+        if isinstance(trajectory_steps, Sequence) and not isinstance(trajectory_steps, (str, bytes)):
+            step_count = len(trajectory_steps)
+            if step_count > 0:
+                rows_with_trajectory_steps += 1
+                trajectory_step_count += step_count
+
+    return {
+        "total_steps": int(total_steps),
+        "rollout_row_count": len(rollout_rows),
+        "selected_count": int(selected_count),
+        "rejected_count": int(rejected_count),
+        "unique_task_ids": unique_task_ids,
+        "unique_image_names": unique_image_names,
+        "task_image_pairs": task_image_pairs,
+        "rows_with_trajectory_steps": rows_with_trajectory_steps,
+        "trajectory_step_count": trajectory_step_count,
+    }

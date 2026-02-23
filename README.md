@@ -9,9 +9,11 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 - Deterministic adapter layer from SWE-style tool traces into canonical tools.
 - Stage-aware masking policy helpers for `rft` and `step_sdpo`.
 - Initial trainer/prompt/eval interface signatures.
+- Dedicated `RFTTrainerScaffold` for on-policy RFT rollout/rejection/checkpoint flow, with `SDPOTrainerScaffold` delegating RFT compatibility calls.
 - Optional RFT checkpoint scaffold manifests under `checkpoints/global_step_<n>/rft_step_manifest.json`.
 - RFT checkpoint writes require explicit `global_step` to avoid accidental step-directory reuse.
 - RFT checkpoint argument validation is fail-fast: invalid checkpoint inputs raise before rollout/training side effects.
+- On-policy RFT output artifacts include `rollout_rows.jsonl` and `rollout_artifact_summary.json` (task IDs, task-image pairs, and trajectory counts) when `data.on_policy.output_dir` is set.
 
 ## Layout
 - `src/schemas/`: frozen JSON schema contracts + typed protocol models.

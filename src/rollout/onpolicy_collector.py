@@ -176,6 +176,7 @@ class OnPolicyRolloutCollector:
         exit_code = 0
         task_patch_applied = False
         attempt_steps: list[EnvironmentStep] = []
+        trajectory_steps: list[dict[str, object]] = []
 
         init_failure = self._initialize_task_environment(
             task=task,
@@ -226,6 +227,7 @@ class OnPolicyRolloutCollector:
             history.extend(bridge_result.tool_response_blocks)
             if bridge_result.steps:
                 attempt_steps.extend(bridge_result.steps)
+                trajectory_steps.extend(_serialize_environment_steps(bridge_result.steps))
                 assistant_response_for_feedback = assistant_response
                 turn_index_for_feedback = turn_index
 
@@ -281,12 +283,15 @@ class OnPolicyRolloutCollector:
             "resolved": bool(resolved),
             "step_index": row_step_index,
             "task_id": task.task_id,
+            "image_name": task.image_name,
             "attempt_index": attempt_index,
             "turn_index": row_turn_index,
             "container_id": handle.container_id,
             "is_terminal": is_terminal,
             "latency_ms": elapsed_ms,
             "batch_container_count": batch_container_count,
+            "trajectory_steps": trajectory_steps,
+            "trajectory_history": list(history),
         }
         if collector_error:
             row["collector_error"] = collector_error
@@ -353,6 +358,23 @@ def _default_executor_factory(
         container_id=handle.container_id,
         tool_timeout_sec=runtime.tool_timeout_sec,
     )
+
+
+def _serialize_environment_steps(steps: Sequence[EnvironmentStep]) -> list[dict[str, object]]:
+    payload: list[dict[str, object]] = []
+    for step in steps:
+        payload.append(
+            {
+                "step_index": int(step.step_index),
+                "tool": step.request.tool,
+                "args": dict(step.request.args),
+                "stdout": step.response.stdout,
+                "stderr": step.response.stderr,
+                "exit_code": int(step.response.exit_code),
+                "metadata": dict(step.response.metadata),
+            }
+        )
+    return payload
 
 
 def _task_patch(task: TaskSample) -> str | None:

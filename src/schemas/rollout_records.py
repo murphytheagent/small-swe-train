@@ -12,6 +12,7 @@ class RolloutRowRequired(TypedDict):
     resolved: bool
     step_index: int
     task_id: str
+    image_name: str
     attempt_index: int
     turn_index: int
     container_id: str
@@ -28,3 +29,5 @@ class RolloutRow(RolloutRowRequired, total=False):
     latency_ms: float
     task_patch_applied: bool
     batch_container_count: int
+    trajectory_steps: list[dict[str, Any]]
+    trajectory_history: list[str]

@@ -164,6 +164,9 @@ def test_onpolicy_collector_collects_terminal_attempt_rows() -> None:
     assert row["resolved"] is True
     assert row["is_terminal"] is True
     assert row["task_id"] == "task-1"
+    assert row["image_name"] == "img:1"
+    assert row["trajectory_steps"]
+    assert row["trajectory_history"]
     assert row["attempt_index"] == 0
     assert pool.release_called is True
 
@@ -458,6 +461,7 @@ def test_onpolicy_collector_keeps_tool_output_aligned_with_first_tool_call() -> 
     assert row["tool_output"]["stdout"] == "ran:search"
     assert row["turn_index"] == 0
     assert '"tool":"search"' in row["assistant_response"]
+    assert row["trajectory_steps"][0]["tool"] == "search"
 
 
 def test_onpolicy_collector_default_turn_generator_produces_resolved_attempt() -> None:

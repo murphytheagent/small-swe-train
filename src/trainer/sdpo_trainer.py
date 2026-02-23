@@ -1,36 +1,18 @@
-"""Deterministic trainer scaffolds delegating to integration-layer adapters."""
+"""Deterministic SDPO trainer scaffold with delegated RFT utilities."""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from config import MAX_TOOL_CALLS_PER_TURN
 from data.tokenization import SupportsOffsetsTokenizer
 from rollout.onpolicy_collector import OnPolicyRolloutCollector
-from verl_integration.mask_injector import inject_response_mask
+from trainer.common import SDPOTrainerConfig, TrainingStepStats
+from trainer.rft_trainer import OnPolicyRFTStepArtifacts, RFTTrainerScaffold
+from verl_integration.env_bridge import ToolExecutor, run_env_bridge_step
 from verl_integration.reprompt_adapter import build_self_distillation_batch
 from verl_integration.reward_function import reward_fn
-from verl_integration.env_bridge import ToolExecutor, run_env_bridge_step
-from verl_integration.onpolicy_rollout_adapter import collect_rft_sft_batch_for_steps
-
-
-@dataclass(frozen=True)
-class SDPOTrainerConfig:
-    model_name: str
-    max_tool_calls_per_turn: int = MAX_TOOL_CALLS_PER_TURN
-    include_student_attempt_for_teacher: bool = True
-    top_k_distillation: int = 100
-    ema_beta: float = 0.005
-
-
-@dataclass(frozen=True)
-class TrainingStepStats:
-    loss: float
-    teacher_student_kl: float
-    format_valid_rate: float
 
 
 @dataclass(frozen=True)
@@ -47,22 +29,12 @@ class EndToEndStepArtifacts:
     loss_history: tuple[float, ...]
 
 
-@dataclass(frozen=True)
-class OnPolicyRFTStepArtifacts:
-    training_stats: TrainingStepStats
-    selected_count: int
-    rejected_count: int
-    dataproto_payload: Mapping[str, Any]
-    selection_reasons: tuple[str, ...]
-    checkpoint_dir: str | None
-    checkpoint_exists: bool
-
-
 class SDPOTrainerScaffold:
-    """Deterministic trainer facade until full verl runtime wiring lands."""
+    """Deterministic SDPO facade until full verl runtime wiring lands."""
 
     def __init__(self, config: SDPOTrainerConfig) -> None:
         self._config = config
+        self._rft_trainer = RFTTrainerScaffold(config=config)
         self._teacher_ema_proxy = 0.0
         self._loss_history: list[float] = []
 
@@ -70,29 +42,14 @@ class SDPOTrainerScaffold:
     def config(self) -> SDPOTrainerConfig:
         return self._config
 
+    @property
+    def rft_trainer(self) -> RFTTrainerScaffold:
+        """Dedicated RFT trainer scaffold sharing the same model/runtime config."""
+        return self._rft_trainer
+
     def run_rft_epoch(self, batch: Sequence[Mapping[str, Any]]) -> TrainingStepStats:
-        """Run a deterministic RFT pass over pre-labeled records.
-
-        This method computes stage masks and returns aggregate statistics only;
-        it does not execute model optimization.
-        """
-        if not batch:
-            return TrainingStepStats(loss=0.0, teacher_student_kl=0.0, format_valid_rate=0.0)
-
-        masked_batch = inject_response_mask(batch, stage="rft")
-        token_totals = [len(sample["response_mask"]) for sample in masked_batch]
-        trained_totals = [sum(1 for flag in sample["response_mask"] if flag) for sample in masked_batch]
-
-        average_train_fraction = sum(
-            trained / total for trained, total in zip(trained_totals, token_totals) if total > 0
-        ) / len(masked_batch)
-        format_valid_rate = sum(1.0 for sample in batch if sample.get("format_valid", True)) / len(batch)
-
-        return TrainingStepStats(
-            loss=1.0 - average_train_fraction,
-            teacher_student_kl=0.0,
-            format_valid_rate=format_valid_rate,
-        )
+        """Compatibility shim that delegates deterministic RFT stats to RFTTrainerScaffold."""
+        return self._rft_trainer.run_rft_epoch(batch)
 
     def run_sdpo_step(self, batch: Sequence[Mapping[str, Any]]) -> TrainingStepStats:
         """Run a deterministic SDPO-style step with reward-function diagnostics."""
@@ -234,96 +191,13 @@ class SDPOTrainerScaffold:
         checkpoint_dir: str | Path | None = None,
         global_step: int | None = None,
     ) -> OnPolicyRFTStepArtifacts:
-        """Run rollout -> preprocess -> centralized RFT selection -> RFT train stats."""
-        resolved_global_step: int | None = None
-        if checkpoint_dir is not None:
-            resolved_global_step = self._resolve_global_step(global_step)
-
-        handoff_result = collect_rft_sft_batch_for_steps(
+        """Compatibility shim delegating RFT handoff + checkpoint logic to RFTTrainerScaffold."""
+        return self._rft_trainer.run_onpolicy_rft_step(
             total_steps=total_steps,
             collector=collector,
             tokenizer=tokenizer,
             handoff_overrides=handoff_overrides,
             output_dir=output_dir,
+            checkpoint_dir=checkpoint_dir,
+            global_step=global_step,
         )
-
-        selected_rows = handoff_result["selected_rows"]
-        rejected_rows = handoff_result["rejected_rows"]
-        training_stats = self.run_rft_epoch(selected_rows)
-        reasons = tuple(
-            str(row.get("rft_rejection_reason", ""))
-            for row in rejected_rows
-            if row.get("rft_rejection_reason")
-        )
-        checkpoint_path: Path | None = None
-        if checkpoint_dir is not None:
-            assert resolved_global_step is not None
-            checkpoint_path = self._write_rft_checkpoint(
-                checkpoint_dir=Path(checkpoint_dir),
-                global_step=resolved_global_step,
-                training_stats=training_stats,
-                dataproto_payload=handoff_result["dataproto_payload"],
-                selected_count=len(selected_rows),
-                rejected_count=len(rejected_rows),
-                selection_reasons=reasons,
-            )
-
-        return OnPolicyRFTStepArtifacts(
-            training_stats=training_stats,
-            selected_count=len(selected_rows),
-            rejected_count=len(rejected_rows),
-            dataproto_payload=handoff_result["dataproto_payload"],
-            selection_reasons=reasons,
-            checkpoint_dir=str(checkpoint_path) if checkpoint_path is not None else None,
-            checkpoint_exists=checkpoint_path is not None,
-        )
-
-    @staticmethod
-    def _resolve_global_step(global_step: int | None) -> int:
-        if global_step is None:
-            raise ValueError(
-                "global_step is required when writing RFT checkpoint artifacts."
-            )
-        resolved = global_step
-        if resolved < 0:
-            raise ValueError("global_step must be >= 0 when writing RFT checkpoint artifacts.")
-        return resolved
-
-    def _write_rft_checkpoint(
-        self,
-        *,
-        checkpoint_dir: Path,
-        global_step: int,
-        training_stats: TrainingStepStats,
-        dataproto_payload: Mapping[str, Any],
-        selected_count: int,
-        rejected_count: int,
-        selection_reasons: Sequence[str],
-    ) -> Path:
-        step_dir = checkpoint_dir / f"global_step_{global_step}"
-        step_dir.mkdir(parents=True, exist_ok=True)
-
-        payload = {
-            "model_name": self._config.model_name,
-            "global_step": int(global_step),
-            "selected_count": int(selected_count),
-            "rejected_count": int(rejected_count),
-            "training_stats": {
-                "loss": float(training_stats.loss),
-                "teacher_student_kl": float(training_stats.teacher_student_kl),
-                "format_valid_rate": float(training_stats.format_valid_rate),
-            },
-            "selection_reasons": [str(reason) for reason in selection_reasons],
-            "dataproto_meta_info": dict(dataproto_payload.get("meta_info", {})),
-        }
-
-        manifest_path = step_dir / "rft_step_manifest.json"
-        with manifest_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=True, sort_keys=True, indent=2)
-            handle.write("\n")
-
-        latest_pointer = checkpoint_dir / "latest_checkpoint.txt"
-        latest_pointer.parent.mkdir(parents=True, exist_ok=True)
-        latest_pointer.write_text(str(step_dir), encoding="utf-8")
-
-        return step_dir

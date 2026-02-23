@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from config import (
@@ -14,6 +15,7 @@ from verl_integration.onpolicy_rollout_adapter import (
     build_verl_sft_batch,
     collect_rft_sft_batch_for_steps,
     collect_rollouts_for_steps,
+    merge_rollout_and_preprocessed_rows,
     select_rft_attempt_rows,
 )
 
@@ -112,6 +114,9 @@ def test_collect_rollouts_for_steps_writes_jsonl_artifacts(tmp_path: Path) -> No
     assert len(rows[0]) == 1
     assert (tmp_path / "step_00000.jsonl").exists()
     assert (tmp_path / "step_00001.jsonl").exists()
+    assert rows[0][0]["image_name"] == "img:1"
+    assert "trajectory_steps" in rows[0][0]
+    assert rows[0][0]["trajectory_history"]
 
 
 def test_select_rft_attempt_rows_relabels_deterministically() -> None:
@@ -270,5 +275,30 @@ def test_collect_rft_sft_batch_for_steps_filters_failed_attempts(tmp_path: Path)
     assert result["rejected_rows"][0]["rft_rejection_reason"]
     assert result["sft_batch"]["meta_info"]["selected_count"] == 1
     assert result["dataproto_payload"]["meta_info"]["selected_count"] == 1
+    assert (tmp_path / "rollout_rows.jsonl").exists()
+    assert (tmp_path / "rollout_artifact_summary.json").exists()
     assert (tmp_path / "selected_rows.jsonl").exists()
     assert (tmp_path / "rejected_rows.jsonl").exists()
+
+    summary = json.loads((tmp_path / "rollout_artifact_summary.json").read_text(encoding="utf-8"))
+    assert summary["rollout_row_count"] == 2
+    assert summary["unique_task_ids"] == ["task-1"]
+    assert summary["unique_image_names"] == ["img:1"]
+    assert summary["rows_with_trajectory_steps"] >= 1
+
+
+def test_merge_rollout_and_preprocessed_rows_requires_non_empty_task_id() -> None:
+    try:
+        merge_rollout_and_preprocessed_rows(
+            rollout_rows=[
+                {
+                    "task_id": "",
+                }
+            ],
+            preprocessed_rows=[{}],
+        )
+    except ValueError as exc:
+        assert "rows[0].task_id must be a non-empty string" in str(exc)
+        return
+
+    raise AssertionError("Expected merge_rollout_and_preprocessed_rows to fail on empty task_id")

@@ -6,12 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from config import (
-    OnPolicyDataConfig,
-    OnPolicyDatasetColumns,
-    OnPolicyRuntimeConfig,
-    OnPolicySettings,
-)
+from config import resolve_on_policy_settings
 from env.runtime_protocol import ToolRequest, ToolResponse
 from rollout.onpolicy_collector import OnPolicyRolloutCollector
 from trainer.sdpo_trainer import SDPOTrainerConfig, SDPOTrainerScaffold
@@ -74,29 +69,20 @@ class _FakeCollectorExecutor:
 
 
 def _build_test_onpolicy_rft_collector() -> tuple[OnPolicyRolloutCollector, _CharTokenizer]:
-    settings = OnPolicySettings(
-        data=OnPolicyDataConfig(
-            dataset_id="dummy/local",
-            dataset_split="train",
-            columns=OnPolicyDatasetColumns(
-                image_name="image_name",
-                problem_statement="problem_statement",
-                fail_to_pass="FAIL_TO_PASS",
-                pass_to_pass="PASS_TO_PASS",
-            ),
-        ),
-        runtime=OnPolicyRuntimeConfig(
-            enabled=True,
-            rollout_only=True,
-            task_batch_size=1,
-            attempts_per_task=2,
-            max_turns_per_attempt=2,
-            env_pool_size=1,
-            tool_timeout_sec=1,
-            container_start_timeout_sec=1,
-            attempt_timeout_sec=10,
-            max_tool_calls_per_turn=3,
-        ),
+    settings = resolve_on_policy_settings(
+        data_config_name="on_policy_swe_smith",
+        runtime_overrides={
+            "enabled": True,
+            "rollout_only": True,
+            "task_batch_size": 1,
+            "attempts_per_task": 2,
+            "max_turns_per_attempt": 2,
+            "env_pool_size": 1,
+            "tool_timeout_sec": 1,
+            "container_start_timeout_sec": 1,
+            "attempt_timeout_sec": 10,
+            "max_tool_calls_per_turn": 3,
+        },
     )
 
     def turn_generator(**kwargs: object) -> str:
@@ -282,7 +268,7 @@ def test_run_onpolicy_rft_step_checkpoint_validation_fails_before_rollout(
     def _unexpected_collect(**_kwargs: object) -> dict[str, object]:
         raise AssertionError("collect_rft_sft_batch_for_steps should not run")
 
-    monkeypatch.setattr("trainer.sdpo_trainer.collect_rft_sft_batch_for_steps", _unexpected_collect)
+    monkeypatch.setattr("trainer.rft_trainer.collect_rft_sft_batch_for_steps", _unexpected_collect)
 
     with pytest.raises(
         ValueError,
