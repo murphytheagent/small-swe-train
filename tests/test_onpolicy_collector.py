@@ -67,9 +67,11 @@ class _BatchTrackingPool:
     def __init__(self) -> None:
         self.acquire_inputs: list[list[str]] = []
         self.release_calls = 0
+        self._lock = threading.Lock()
 
     def acquire(self, tasks: list[TaskSample]) -> tuple[ContainerHandle, ...]:
-        self.acquire_inputs.append([task.task_id for task in tasks])
+        with self._lock:
+            self.acquire_inputs.append([task.task_id for task in tasks])
         return tuple(
             ContainerHandle(
                 task_id=task.task_id,
@@ -81,7 +83,8 @@ class _BatchTrackingPool:
         )
 
     def release_all(self) -> None:
-        self.release_calls += 1
+        with self._lock:
+            self.release_calls += 1
 
 
 class _FakeExecutor:
@@ -306,7 +309,7 @@ def test_onpolicy_collector_uses_fresh_container_per_attempt() -> None:
     assert pool.release_calls == 2
 
 
-def test_onpolicy_collector_acquires_full_task_batch_once_per_attempt() -> None:
+def test_onpolicy_collector_dispatches_one_task_per_trajectory_attempt() -> None:
     settings = _settings()
     settings = OnPolicySettings(
         data=settings.data,
@@ -349,9 +352,15 @@ def test_onpolicy_collector_acquires_full_task_batch_once_per_attempt() -> None:
     rows = collector.collect_step(0)
 
     assert len(rows) == 4
-    assert pool.acquire_inputs == [["task-a", "task-b"], ["task-a", "task-b"]]
-    assert pool.release_calls == 2
-    assert all(row["batch_container_count"] == 2 for row in rows)
+    assert pool.acquire_inputs == [["task-a"], ["task-a"], ["task-b"], ["task-b"]]
+    assert pool.release_calls == 4
+    assert [(row["task_id"], row["attempt_index"]) for row in rows] == [
+        ("task-a", 0),
+        ("task-a", 1),
+        ("task-b", 0),
+        ("task-b", 1),
+    ]
+    assert all(row["batch_container_count"] == 1 for row in rows)
 
 
 def test_onpolicy_collector_runs_task_attempts_concurrently_when_enabled(
@@ -436,8 +445,9 @@ def test_onpolicy_collector_runs_task_attempts_concurrently_when_enabled(
 
     assert len(rows) == 4
     assert max_active >= 2
+    assert sorted(pool.acquire_inputs) == [["task-a"], ["task-b"], ["task-c"], ["task-d"]]
     assert [row["task_position"] for row in rows] == [0, 1, 2, 3]
-    assert pool.release_calls == 1
+    assert pool.release_calls == 4
 
 
 def test_onpolicy_collector_applies_task_patch_before_rollout_turns() -> None:
@@ -546,7 +556,7 @@ def test_onpolicy_collector_keeps_batch_running_when_patch_init_executor_raises(
     assert rows[1]["task_id"] == "task-b"
     assert rows[1]["resolved"] is True
     assert rows[1]["task_patch_applied"] is True
-    assert pool.release_calls == 1
+    assert pool.release_calls == 2
 
 
 def test_onpolicy_collector_keeps_tool_output_aligned_with_first_tool_call() -> None:
