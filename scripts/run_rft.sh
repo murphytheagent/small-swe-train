@@ -24,6 +24,14 @@ NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 NNODES="${NNODES:-1}"
 RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE:-verl.trainer.fsdp_sft_trainer}"
 RFT_TASK_NAME="${RFT_TASK_NAME:-small-swe-rft}"
+RFT_RUNTIME_MODE="${RFT_RUNTIME_MODE:-loop}"
+RFT_MANAGE_VLLM="${RFT_MANAGE_VLLM:-1}"
+RFT_VLLM_LAUNCH_MODULE="${RFT_VLLM_LAUNCH_MODULE:-vllm.entrypoints.openai.api_server}"
+RFT_VLLM_READY_TIMEOUT_SEC="${RFT_VLLM_READY_TIMEOUT_SEC:-180}"
+RFT_VLLM_STOP_TIMEOUT_SEC="${RFT_VLLM_STOP_TIMEOUT_SEC:-30}"
+RFT_VLLM_EXTRA_ARGS="${RFT_VLLM_EXTRA_ARGS:-}"
+RFT_DATA_CONFIG_NAME="${RFT_DATA_CONFIG_NAME:-on_policy_swe_smith}"
+RFT_TURN_GENERATOR_MODE="${RFT_TURN_GENERATOR_MODE:-default}"
 
 _load_rft_runtime_defaults() {
   "${PYTHON_BIN}" - <<'PY'
@@ -87,6 +95,8 @@ RFT_TASK_BATCH_SIZE="${RFT_TASK_BATCH_SIZE:-${DEFAULT_RFT_TASK_BATCH_SIZE}}"
 RFT_SFT_NUM_EPOCH_PER_BATCH="${RFT_SFT_NUM_EPOCH_PER_BATCH:-${DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH}}"
 RFT_BATCH_SIZE="${RFT_BATCH_SIZE:-$((SAMPLES_PER_TASK * RFT_TASK_BATCH_SIZE))}"
 RFT_TRAIN_BATCH_SIZE="${RFT_TRAIN_BATCH_SIZE:-${RFT_BATCH_SIZE}}"
+RFT_OUTPUT_DIR="${RFT_OUTPUT_DIR:-${PROJECT_ROOT}/outputs/rft_runtime}"
+RFT_INITIAL_MODEL="${RFT_INITIAL_MODEL:-${DEFAULT_VLLM_MODEL}}"
 
 export SMALL_SWE_VLLM_BASE_URL="${SMALL_SWE_VLLM_BASE_URL:-${DEFAULT_VLLM_BASE_URL}}"
 export SMALL_SWE_VLLM_MODEL="${SMALL_SWE_VLLM_MODEL:-${DEFAULT_VLLM_MODEL}}"
@@ -95,35 +105,88 @@ export SMALL_SWE_VLLM_MAX_TOKENS="${SMALL_SWE_VLLM_MAX_TOKENS:-${DEFAULT_VLLM_MA
 export SMALL_SWE_VLLM_TEMPERATURE="${SMALL_SWE_VLLM_TEMPERATURE:-${DEFAULT_VLLM_TEMPERATURE}}"
 export SMALL_SWE_VLLM_TOP_P="${SMALL_SWE_VLLM_TOP_P:-${DEFAULT_VLLM_TOP_P}}"
 
-CMD=(
-  torchrun
-  --standalone
-  --nnodes "${NNODES}"
-  --nproc_per_node "${NPROC_PER_NODE}"
-  -m "${RFT_TRAINER_MODULE}"
-  --config-name rft_swe
-  --config-dir "${CONFIG_DIR}"
-  trainer.total_epochs="${RFT_SFT_NUM_EPOCH_PER_BATCH}"
-  trainer.total_training_steps="${RFT_STEPS}"
-  data.train_batch_size="${RFT_TRAIN_BATCH_SIZE}"
-  data.on_policy.total_steps="${RFT_STEPS}"
-  +data.on_policy.runtime_overrides.task_batch_size="${RFT_TASK_BATCH_SIZE}"
-  +data.on_policy.runtime_overrides.attempts_per_task="${SAMPLES_PER_TASK}"
-  +data.on_policy.runtime_overrides.env_pool_size="${RFT_TASK_BATCH_SIZE}"
-  "$@"
-)
+if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
+  CMD=(
+    torchrun
+    --standalone
+    --nnodes "${NNODES}"
+    --nproc_per_node "${NPROC_PER_NODE}"
+    -m "${RFT_TRAINER_MODULE}"
+    --config-name rft_swe
+    --config-dir "${CONFIG_DIR}"
+    trainer.total_epochs="${RFT_SFT_NUM_EPOCH_PER_BATCH}"
+    trainer.total_training_steps="${RFT_STEPS}"
+    data.train_batch_size="${RFT_TRAIN_BATCH_SIZE}"
+    data.on_policy.total_steps="${RFT_STEPS}"
+    +data.on_policy.runtime_overrides.task_batch_size="${RFT_TASK_BATCH_SIZE}"
+    +data.on_policy.runtime_overrides.attempts_per_task="${SAMPLES_PER_TASK}"
+    +data.on_policy.runtime_overrides.env_pool_size="${RFT_TASK_BATCH_SIZE}"
+    "$@"
+  )
 
-if [[ "${DRY_RUN}" -eq 1 ]]; then
-  printf '%q ' "${CMD[@]}"
-  printf '\n'
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    printf '%q ' "${CMD[@]}"
+    printf '\n'
+    exit 0
+  fi
+
+  if ! "${PYTHON_BIN}" -c "import verl" >/dev/null 2>&1; then
+    echo "verl is not installed. Install SDPO/verl and retry."
+    echo "  pip install -e \".[train]\""
+    exit 1
+  fi
+
+  export TASK="${TASK:-${RFT_TASK_NAME}}"
+  "${CMD[@]}"
   exit 0
 fi
 
-if ! "${PYTHON_BIN}" -c "import verl" >/dev/null 2>&1; then
-  echo "verl is not installed. Install SDPO/verl and retry."
-  echo "  pip install -e \".[train]\""
-  exit 1
+LOOP_CMD=(
+  "${PYTHON_BIN}"
+  -m trainer.rft_runtime_loop
+  --project-root "${PROJECT_ROOT}"
+  --config-dir "${CONFIG_DIR}"
+  --config-name rft_swe
+  --trainer-module "${RFT_TRAINER_MODULE}"
+  --python-bin "${PYTHON_BIN}"
+  --nnodes "${NNODES}"
+  --nproc-per-node "${NPROC_PER_NODE}"
+  --rft-steps "${RFT_STEPS}"
+  --samples-per-task "${SAMPLES_PER_TASK}"
+  --task-batch-size "${RFT_TASK_BATCH_SIZE}"
+  --sft-num-epoch-per-batch "${RFT_SFT_NUM_EPOCH_PER_BATCH}"
+  --train-batch-size "${RFT_TRAIN_BATCH_SIZE}"
+  --output-dir "${RFT_OUTPUT_DIR}"
+  --data-config-name "${RFT_DATA_CONFIG_NAME}"
+  --turn-generator-mode "${RFT_TURN_GENERATOR_MODE}"
+  --initial-model "${RFT_INITIAL_MODEL}"
+  --vllm-base-url "${SMALL_SWE_VLLM_BASE_URL}"
+  --vllm-served-model "${SMALL_SWE_VLLM_MODEL}"
+  --vllm-launch-module "${RFT_VLLM_LAUNCH_MODULE}"
+  --vllm-ready-timeout-sec "${RFT_VLLM_READY_TIMEOUT_SEC}"
+  --vllm-stop-timeout-sec "${RFT_VLLM_STOP_TIMEOUT_SEC}"
+  --vllm-extra-args "${RFT_VLLM_EXTRA_ARGS}"
+)
+
+if [[ "${RFT_MANAGE_VLLM}" == "0" ]]; then
+  LOOP_CMD+=(--skip-vllm-management)
+fi
+
+for override in "$@"; do
+  LOOP_CMD+=(--trainer-override "${override}")
+done
+
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  LOOP_CMD+=(--dry-run)
+fi
+
+if [[ "${DRY_RUN}" -eq 0 ]]; then
+  if ! "${PYTHON_BIN}" -c "import verl" >/dev/null 2>&1; then
+    echo "verl is not installed. Install SDPO/verl and retry."
+    echo "  pip install -e \".[train]\""
+    exit 1
+  fi
 fi
 
 export TASK="${TASK:-${RFT_TASK_NAME}}"
-"${CMD[@]}"
+"${LOOP_CMD[@]}"

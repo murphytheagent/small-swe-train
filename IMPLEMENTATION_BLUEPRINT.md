@@ -579,6 +579,9 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-23 10:15 UTC] Rewired `data.on_policy.turn_generator_mode=default` to a live vLLM OpenAI-compatible generator (`src/rollout/vllm_turn_generator.py`) and updated `scripts/run_rft.sh` to load centralized `rft_runtime.loop` defaults (`RFT_STEPS`, `SAMPLES_PER_TASK`, `RFT_TASK_BATCH_SIZE`, `RFT_SFT_NUM_EPOCH_PER_BATCH`) from `configs/runtime/training_policy_defaults.v1.json`.
 - [2026-02-23 10:15 UTC] Updated collector/handoff/rejection flow to enforce trajectory-level RFT rejection criteria (any tool formatting failure, missing terminal submit, invalid terminal submit args) via rollout metadata fields (`trajectory_format_valid`, `final_turn_has_submit`, `final_submit_format_valid`), plus regression coverage in `tests/test_onpolicy_collector.py`, `tests/test_onpolicy_rollout_adapter.py`, `tests/test_rft_runtime.py`, and new `tests/test_vllm_turn_generator.py`.
 - [2026-02-23 10:15 UTC] Test status: `python3 -m pytest -q` passing (`126 passed, 2 skipped`).
+- [2026-02-23 10:45 UTC] Implemented an end-to-end RFT supervisor loop in `src/trainer/rft_runtime_loop.py`: per step it collects live trajectories, writes selected samples to `MultiTurnSFTDataset` parquet (`src/trainer/rft_multiturn_dataset.py`), trains via `torchrun -m verl.trainer.fsdp_sft_trainer` with per-step `data.train_files`, then resolves the newest `global_step_*` checkpoint and points vLLM to the new `huggingface/` snapshot for the next step.
+- [2026-02-23 10:45 UTC] Updated `scripts/run_rft.sh` to use this loop by default (`RFT_RUNTIME_MODE=loop`) while preserving `RFT_RUNTIME_MODE=direct` for proof/legacy one-shot launches; updated `scripts/run_rft_onpolicy_rollout_proof.sh` to pin `direct` mode explicitly.
+- [2026-02-23 10:45 UTC] Added regression coverage in `tests/test_rft_multiturn_dataset.py` and `tests/test_rft_runtime_loop.py`, plus launcher compatibility checks in `tests/test_run_scripts.py`.
 
 ---
 

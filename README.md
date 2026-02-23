@@ -18,6 +18,12 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 - Default on-policy turn generation now uses a live OpenAI-compatible vLLM endpoint (`data.on_policy.turn_generator_mode=default`), with runtime settings sourced from centralized policy + `SMALL_SWE_VLLM_*` overrides.
 - RFT rejection-policy logic is centralized in `src/trainer/rft_rejection.py` with typed selection outputs/signatures.
 - RFT rejection now enforces trajectory-level checks (all tool calls formatted, terminal submit present, terminal submit args valid).
+- `scripts/run_rft.sh` now defaults to a real RFT runtime loop:
+  - collect live rollouts from vLLM + Docker envs,
+  - write selected trajectories to `MultiTurnSFTDataset`-compatible parquet shards,
+  - train `verl.trainer.fsdp_sft_trainer` with per-step `data.train_files=<accepted_step.parquet>`,
+  - detect the latest trainer checkpoint and restart vLLM on that snapshot for the next RFT step.
+- `scripts/run_rft.sh` preserves a `RFT_RUNTIME_MODE=direct` path for proof/legacy one-shot launcher behavior.
 - `src/verl_integration/` keeps thin compatibility wrappers for trainer-owned runtime/handoff modules.
 
 ## Layout
@@ -42,5 +48,5 @@ python scripts/run_step_sdpo_scaffold.py \
 ```
 
 ## Notes
-- This commit intentionally implements interfaces and tests first, not training-loop execution.
+- End-to-end RFT runtime orchestration lives in `src/trainer/rft_runtime_loop.py`.
 - Design artifacts remain under `outputs/1771579678.414229/` as frozen planning context.
