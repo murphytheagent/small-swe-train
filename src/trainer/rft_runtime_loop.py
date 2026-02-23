@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import shutil
@@ -76,6 +77,7 @@ class VLLMServerController:
         self._process: subprocess.Popen[str] | None = None
         self._log_path = log_path
         self._models_url = _build_models_url(config.vllm_base_url)
+        self._api_key = _resolve_vllm_api_key()
 
     def start(self, *, model_path: str) -> None:
         if self._process is not None and self._process.poll() is None:
@@ -125,7 +127,7 @@ class VLLMServerController:
                     f"vLLM server exited early with code {self._process.returncode}. "
                     f"Inspect logs at {self._log_path}."
                 )
-            if _is_http_endpoint_ready(self._models_url):
+            if _is_http_endpoint_ready(self._models_url, api_key=self._api_key):
                 return
             time.sleep(1.0)
         raise RuntimeError(
@@ -164,6 +166,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     current_model_path = config.initial_model
     vllm_controller = VLLMServerController(config=config, log_path=vllm_logs)
     run_step_dirs: list[Path] = []
+    checkpoint_step_dirs: list[Path] = []
 
     try:
         if config.manage_vllm:
@@ -251,6 +254,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                     keep_last=config.checkpoint_keep_last,
                 )
                 current_model_path = str(latest_hf_checkpoint)
+                checkpoint_step_dirs.append(step_dir)
 
                 if config.manage_vllm:
                     vllm_controller.start(model_path=current_model_path)
@@ -258,7 +262,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             pruned_checkpoint_roots: list[Path] = []
             if latest_hf_checkpoint is not None:
                 pruned_checkpoint_roots = prune_old_step_checkpoints(
-                    step_dirs=run_step_dirs,
+                    step_dirs=checkpoint_step_dirs,
                     keep_last=config.checkpoint_keep_last,
                 )
             pruned_step_payloads = prune_old_step_payloads(
@@ -606,8 +610,11 @@ def _build_models_url(base_url: str) -> str:
     return base_url.rstrip("/") + "/models"
 
 
-def _is_http_endpoint_ready(url: str) -> bool:
-    request = Request(url, method="GET")
+def _is_http_endpoint_ready(url: str, *, api_key: str | None = None) -> bool:
+    headers = {}
+    if api_key is not None and api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+    request = Request(url, headers=headers, method="GET")
     try:
         with urlopen(request, timeout=2.0) as response:
             return 200 <= int(response.status) < 300
@@ -615,6 +622,17 @@ def _is_http_endpoint_ready(url: str) -> bool:
         return False
     except (URLError, TimeoutError, OSError):
         return False
+
+
+def _resolve_vllm_api_key() -> str | None:
+    for name in ("SMALL_SWE_VLLM_API_KEY", "OPENAI_API_KEY"):
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if value:
+            return value
+    return None
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

@@ -272,6 +272,138 @@ def test_run_loop_skips_checkpoint_root_prune_when_trainer_is_skipped(
     assert "trainer_skipped" in summary_path.read_text(encoding="utf-8")
 
 
+def test_run_loop_checkpoint_pruning_tracks_only_checkpoint_steps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_state = {"collect_calls": 0, "prune_calls": 0, "step_dir_args": []}
+
+    def _fake_load_tokenizer(_model_path: str):
+        return object()
+
+    def _selected_row(step_index: int) -> dict[str, object]:
+        return {
+            "task_id": f"task-{step_index}",
+            "attempt_index": 0,
+            "step_index": step_index,
+            "turn_index": 0,
+            "resolved": False,
+            "format_valid": True,
+            "final_turn_has_submit": True,
+            "final_submit_format_valid": True,
+            "prompt": "Fix bug",
+            "assistant_response": "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>",
+            "trajectory_history": [
+                "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
+            ],
+        }
+
+    def _fake_collect(*, request, tokenizer):
+        del request, tokenizer
+        step = call_state["collect_calls"]
+        call_state["collect_calls"] += 1
+        if step in {0, 2}:
+            return {"selected_rows": [_selected_row(step)], "rejected_rows": []}
+        return {
+            "selected_rows": [],
+            "rejected_rows": [{"task_id": "task-skip", "rft_rejection_reason": "non_terminal"}],
+        }
+
+    def _fake_write_selected_rows(_rows, parquet_path: Path):
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        parquet_path.write_text("stub", encoding="utf-8")
+        return 1
+
+    def _fake_build_trainer_step_command(**kwargs):
+        trainer_output_dir = Path(kwargs["trainer_output_dir"])
+        return ["fake-trainer", str(trainer_output_dir)]
+
+    def _fake_run_command(command, *, cwd: Path):
+        del cwd
+        trainer_output_dir = Path(command[1])
+        (trainer_output_dir / "global_step_1" / "huggingface").mkdir(parents=True, exist_ok=True)
+
+    def _fake_resolve_latest_hf_checkpoint(checkpoint_root: Path):
+        target = Path(checkpoint_root) / "global_step_1" / "huggingface"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def _fake_prune_old_global_step_checkpoints(*, checkpoint_root, keep_last):
+        del checkpoint_root, keep_last
+        return []
+
+    def _fake_prune_old_step_checkpoints(*, step_dirs, keep_last):
+        del keep_last
+        call_state["prune_calls"] += 1
+        call_state["step_dir_args"].append([Path(item).name for item in step_dirs])
+        return []
+
+    monkeypatch.setattr(rft_runtime_loop, "_load_tokenizer", _fake_load_tokenizer)
+    monkeypatch.setattr(rft_runtime_loop, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "write_selected_rows_to_multiturn_parquet",
+        _fake_write_selected_rows,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "build_trainer_step_command",
+        _fake_build_trainer_step_command,
+    )
+    monkeypatch.setattr(rft_runtime_loop, "_run_command", _fake_run_command)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "resolve_latest_hf_checkpoint",
+        _fake_resolve_latest_hf_checkpoint,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_global_step_checkpoints",
+        _fake_prune_old_global_step_checkpoints,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_step_checkpoints",
+        _fake_prune_old_step_checkpoints,
+    )
+
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=3,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=2,
+        train_batch_size=1,
+        output_dir=tmp_path / "runtime",
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=False,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+    )
+
+    rft_runtime_loop.run_rft_runtime_loop(config)
+
+    assert call_state["collect_calls"] == 3
+    assert call_state["prune_calls"] == 2
+    assert call_state["step_dir_args"][0] == ["rft_step_00000"]
+    assert call_state["step_dir_args"][1] == ["rft_step_00000", "rft_step_00002"]
+
+
 def test_prune_old_global_step_checkpoints_keeps_latest_steps(tmp_path: Path) -> None:
     checkpoint_root = tmp_path / "trainer_checkpoints"
     newest = checkpoint_root / "global_step_1" / "huggingface"
@@ -427,3 +559,40 @@ def test_http_readiness_rejects_http_error(monkeypatch) -> None:
 
     monkeypatch.setattr(rft_runtime_loop, "urlopen", _raise_http_error)
     assert _is_http_endpoint_ready("http://127.0.0.1:8000/v1/models") is False
+
+
+def test_http_readiness_includes_authorization_header_when_api_key_present(monkeypatch) -> None:
+    captured = {"authorization": None}
+
+    class _Response:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_urlopen(request, timeout):
+        del timeout
+        captured["authorization"] = request.get_header("Authorization")
+        return _Response(200)
+
+    monkeypatch.setattr(rft_runtime_loop, "urlopen", _fake_urlopen)
+
+    assert (
+        _is_http_endpoint_ready(
+            "http://127.0.0.1:8000/v1/models",
+            api_key="api-test-key",
+        )
+        is True
+    )
+    assert captured["authorization"] == "Bearer api-test-key"
+
+
+def test_resolve_vllm_api_key_prefers_small_swe_env(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-value")
+    monkeypatch.setenv("SMALL_SWE_VLLM_API_KEY", "small-swe-value")
+
+    assert rft_runtime_loop._resolve_vllm_api_key() == "small-swe-value"
