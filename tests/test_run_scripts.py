@@ -128,7 +128,8 @@ def test_run_rft_onpolicy_rollout_proof_script_honors_explicit_batch_overrides()
 
 def test_run_flash_attn_rebuild_script_dry_run_uses_safe_defaults() -> None:
     result = _run_script("run_flash_attn_rebuild.sh")
-    assert "--partition cpu" in result.stdout
+    assert "--partition gpu" in result.stdout
+    assert "--gres gpu:1" in result.stdout
     assert "--cpus-per-task 8" in result.stdout
     assert "--mem 128G" in result.stdout
     assert "rebuild-flash-attn" in result.stdout
@@ -152,6 +153,7 @@ def test_run_flash_attn_rebuild_script_honors_env_overrides() -> None:
         "run_flash_attn_rebuild.sh",
         env_overrides={
             "FLASH_ATTN_BUILD_PARTITION": "gpu",
+            "FLASH_ATTN_BUILD_GRES": "gpu:2",
             "FLASH_ATTN_BUILD_CPUS_PER_TASK": "12",
             "FLASH_ATTN_BUILD_MEM": "96G",
             "FLASH_ATTN_BUILD_TIME": "02:30:00",
@@ -160,6 +162,7 @@ def test_run_flash_attn_rebuild_script_honors_env_overrides() -> None:
         },
     )
     assert "--partition gpu" in result.stdout
+    assert "--gres gpu:2" in result.stdout
     assert "--cpus-per-task 12" in result.stdout
     assert "--mem 96G" in result.stdout
     assert "--time 02:30:00" in result.stdout

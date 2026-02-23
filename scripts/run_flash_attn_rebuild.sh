@@ -10,7 +10,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-PARTITION="${FLASH_ATTN_BUILD_PARTITION:-cpu}"
+PARTITION="${FLASH_ATTN_BUILD_PARTITION:-gpu}"
+GRES="${FLASH_ATTN_BUILD_GRES:-gpu:1}"
 CPUS_PER_TASK="${FLASH_ATTN_BUILD_CPUS_PER_TASK:-8}"
 MEMORY="${FLASH_ATTN_BUILD_MEM:-128G}"
 TIME_LIMIT="${FLASH_ATTN_BUILD_TIME:-03:00:00}"
@@ -32,6 +33,7 @@ SBATCH_CMD=(
   sbatch
   --parsable
   --partition "${PARTITION}"
+  --gres "${GRES}"
   --cpus-per-task "${CPUS_PER_TASK}"
   --mem "${MEMORY}"
   --time "${TIME_LIMIT}"

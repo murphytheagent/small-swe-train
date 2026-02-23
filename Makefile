@@ -43,7 +43,7 @@ rebuild-flash-attn:
 verify-flash-attn:
 	@$(VENV_PYTHON) -c "import flash_attn; from flash_attn import flash_attn_interface; print('flash-attn import OK')"
 
-# Submits a constrained Slurm rebuild job (CPU partition by default).
+# Submits a constrained Slurm rebuild job (GPU partition by default).
 submit-flash-attn-rebuild:
 	bash scripts/run_flash_attn_rebuild.sh
 
