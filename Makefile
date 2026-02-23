@@ -1,11 +1,13 @@
-.PHONY: setup build-train build-dev build-all clean-venv ensure-flash-attn rebuild-flash-attn verify-flash-attn
+.PHONY: setup build-train build-dev build-all clean-venv ensure-flash-attn rebuild-flash-attn verify-flash-attn submit-flash-attn-rebuild
 
 # Number of cores to use for compilation
-CORES ?= 16
+# Keep compile fan-out conservative by default for shared nodes.
+CORES ?= 2
 UV ?= uv
 VENV_PYTHON ?= .venv/bin/python
 FLASH_ATTN_PACKAGE ?= flash-attn
-FLASH_ATTN_CUDA_ARCHS ?= 120
+# A100-friendly default. Override when targeting different GPU architectures.
+FLASH_ATTN_CUDA_ARCHS ?= 80
 
 # Syncs only the base dependencies
 setup:
@@ -34,11 +36,16 @@ ensure-flash-attn:
 rebuild-flash-attn:
 	@echo "Rebuilding flash-attn from source against current torch..."
 	$(UV) pip install --python $(VENV_PYTHON) "setuptools>=80.0" "wheel>=0.46.0" "packaging>=24.0" "ninja>=1.13.0"
-	MAX_JOBS=$(CORES) FLASH_ATTN_CUDA_ARCHS=$(FLASH_ATTN_CUDA_ARCHS) FLASH_ATTENTION_FORCE_BUILD=1 \
+	$(UV) pip uninstall --python $(VENV_PYTHON) -y $(FLASH_ATTN_PACKAGE) || true
+	MAX_JOBS=$(CORES) TORCH_CUDA_ARCH_LIST=$(FLASH_ATTN_CUDA_ARCHS) FLASH_ATTN_CUDA_ARCHS=$(FLASH_ATTN_CUDA_ARCHS) FLASH_ATTENTION_FORCE_BUILD=1 \
 	$(UV) pip install --python $(VENV_PYTHON) --no-build-isolation --no-cache --no-binary $(FLASH_ATTN_PACKAGE) --reinstall-package $(FLASH_ATTN_PACKAGE) $(FLASH_ATTN_PACKAGE)
 
 verify-flash-attn:
 	@$(VENV_PYTHON) -c "import flash_attn; from flash_attn import flash_attn_interface; print('flash-attn import OK')"
+
+# Submits a constrained Slurm rebuild job (CPU partition by default).
+submit-flash-attn-rebuild:
+	bash scripts/run_flash_attn_rebuild.sh
 
 # Wipes the environment clean so you can start fresh
 clean-venv:
