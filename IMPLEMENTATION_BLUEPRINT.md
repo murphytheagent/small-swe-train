@@ -574,6 +574,7 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-23 02:30 UTC] Split RFT flow into dedicated `src/trainer/rft_trainer.py` (`RFTTrainerScaffold`) and kept `SDPOTrainerScaffold` as the SDPO-focused facade with compatibility delegation for `run_onpolicy_rft_step(...)`.
 - [2026-02-23 02:30 UTC] Extended on-policy rollout artifacts for GPU runs: collector rows now include `image_name` plus serialized `trajectory_steps`/`trajectory_history`, and `collect_rft_sft_batch_for_steps(...)` now writes `rollout_rows.jsonl` + `rollout_artifact_summary.json` (unique task IDs, task-image pairs, trajectory counts) under `output_dir`.
 - [2026-02-23 02:30 UTC] Hardened RFT handoff identity checks to fail fast on empty `task_id` before SFT batch assembly; added regression coverage in `tests/test_onpolicy_rollout_adapter.py`, `tests/test_rft_trainer.py`, and updated `tests/test_sdpo_trainer.py` to resolve settings from real dataset config name (`on_policy_swe_smith`) while preserving deterministic local fakes.
+- [2026-02-23 03:08 UTC] Wired live on-policy RFT runtime orchestration into a dedicated module `src/verl_integration/rft_runtime.py` (typed request signature + `rft_runtime_manifest.json` artifact), moved rejection-policy selection logic into `src/verl_integration/rft_rejection.py`, and updated `OnPolicyRFTDataset` to route runtime collection through this explicit handoff layer.
 
 ---
 

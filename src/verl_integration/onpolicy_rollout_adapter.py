@@ -9,7 +9,6 @@ from typing import Any, Mapping, Sequence
 from config import (
     DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
     RFTHandoffSettings,
-    RFTSelectionPolicy,
     resolve_on_policy_settings,
     resolve_rft_handoff_settings,
 )
@@ -24,6 +23,10 @@ from rollout.onpolicy_collector import (
 )
 from schemas import RolloutRow
 from verl_integration.data_preprocessor import preprocess_trajectories
+from verl_integration.rft_rejection import (
+    evaluate_rft_rejection_reason,
+    select_rft_attempt_rows,
+)
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
@@ -196,87 +199,6 @@ def merge_rollout_and_preprocessed_rows(
     return merged_rows
 
 
-def select_rft_attempt_rows(
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    selection_policy: RFTSelectionPolicy,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Apply centralized RFT rejection policy and annotate row-level labels."""
-    selected_rows: list[dict[str, Any]] = []
-    rejected_rows: list[dict[str, Any]] = []
-
-    for row in rows:
-        mutable_row = dict(row)
-        rejection_reason = evaluate_rft_rejection_reason(
-            mutable_row,
-            selection_policy=selection_policy,
-        )
-
-        if rejection_reason is None:
-            mutable_row["rft_selected"] = True
-            mutable_row["rft_label"] = "accept"
-            selected_rows.append(mutable_row)
-            continue
-
-        mutable_row["rft_selected"] = False
-        mutable_row["rft_label"] = "reject" if selection_policy.relabel_rejected_attempts else "drop"
-        mutable_row["rft_rejection_reason"] = rejection_reason
-        rejected_rows.append(mutable_row)
-
-    return selected_rows, rejected_rows
-
-
-def evaluate_rft_rejection_reason(
-    row: Mapping[str, Any],
-    *,
-    selection_policy: RFTSelectionPolicy,
-) -> str | None:
-    """Return deterministic rejection reason list for one rollout attempt row."""
-    reasons: list[str] = []
-
-    if selection_policy.require_terminal and not _coerce_bool(row.get("is_terminal"), fallback=False):
-        reasons.append("non_terminal")
-    if selection_policy.require_format_valid and not _coerce_bool(
-        row.get("format_valid"),
-        fallback=False,
-    ):
-        reasons.append("format_invalid")
-    if selection_policy.require_resolved and not _coerce_bool(row.get("resolved"), fallback=False):
-        reasons.append("unresolved")
-
-    if selection_policy.require_zero_exit_code:
-        raw_exit_code = row.get("exit_code")
-        if raw_exit_code is not None:
-            try:
-                exit_code = int(raw_exit_code)
-            except (TypeError, ValueError):
-                reasons.append("invalid_exit_code")
-            else:
-                if exit_code != 0:
-                    reasons.append("nonzero_exit_code")
-
-    if selection_policy.reject_on_collector_error and _has_error_text(row.get("collector_error")):
-        reasons.append("collector_error")
-    if selection_policy.reject_on_bridge_error and _has_error_text(row.get("bridge_error")):
-        reasons.append("bridge_error")
-    if selection_policy.reject_on_timeout_error and _has_error_text(row.get("timeout_error")):
-        reasons.append("timeout_error")
-    if selection_policy.reject_on_executor_error and _has_error_text(row.get("executor_error")):
-        reasons.append("executor_error")
-    if selection_policy.reject_on_parse_error and _has_error_text(row.get("parse_error")):
-        reasons.append("parse_error")
-    if selection_policy.reject_on_validation_errors and _has_nonempty_sequence(
-        row.get("validation_errors")
-    ):
-        reasons.append("validation_errors")
-
-    if not reasons:
-        return None
-    # Preserve deterministic first-seen order while removing duplicates.
-    ordered_unique = list(dict.fromkeys(reasons))
-    return ",".join(ordered_unique)
-
-
 def build_verl_sft_batch(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -439,16 +361,6 @@ def _flatten_rollout_steps(steps: Sequence[Sequence[Mapping[str, Any]]]) -> list
     for step_rows in steps:
         flattened.extend(dict(row) for row in step_rows)
     return flattened
-
-
-def _has_error_text(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _has_nonempty_sequence(value: Any) -> bool:
-    if isinstance(value, (str, bytes)):
-        return bool(value)
-    return isinstance(value, Sequence) and bool(value)
 
 
 def _coerce_bool(value: Any, *, fallback: bool) -> bool:

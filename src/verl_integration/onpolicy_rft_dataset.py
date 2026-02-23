@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME
-from verl_integration.onpolicy_rollout_adapter import (
-    build_onpolicy_collector,
-    collect_rft_sft_batch_for_steps,
+from verl_integration.rft_runtime import (
+    OnPolicyRFTRuntimeRequest,
+    collect_onpolicy_rft_runtime_batch,
 )
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
@@ -67,21 +67,18 @@ class OnPolicyRFTDataset:
         cached_result = _ONPOLICY_RFT_CACHE.get(cache_key)
         if cached_result is None:
             def _collect_once() -> dict[str, Any]:
-                collector = build_onpolicy_collector(
+                request = OnPolicyRFTRuntimeRequest(
                     data_config_name=data_config_name,
+                    turn_generator_mode=turn_generator_mode,
+                    total_steps=total_steps,
                     runtime_overrides=runtime_overrides,
                     data_overrides=data_overrides,
-                    turn_generator=_resolve_turn_generator(turn_generator_mode),
-                )
-                resolved_output_dir = output_dir
-                if resolved_output_dir is not None:
-                    Path(resolved_output_dir).mkdir(parents=True, exist_ok=True)
-                return collect_rft_sft_batch_for_steps(
-                    total_steps=total_steps,
-                    collector=collector,
-                    tokenizer=tokenizer,
                     handoff_overrides=handoff_overrides,
-                    output_dir=resolved_output_dir,
+                    output_dir=output_dir,
+                )
+                return collect_onpolicy_rft_runtime_batch(
+                    request=request,
+                    tokenizer=tokenizer,
                 )
 
             cached_result = _collect_on_rank0_and_broadcast(
@@ -322,59 +319,3 @@ def _tokenizer_cache_fingerprint(tokenizer: Any) -> dict[str, Any]:
         fingerprint["instance_id"] = id(tokenizer)
 
     return _normalize_mapping(fingerprint)
-
-
-def _resolve_turn_generator(mode: str):
-    if mode == "default":
-        return None
-    if mode == "proof_tool_chain":
-        return _proof_tool_chain_turn_generator
-    raise ValueError(
-        "data.on_policy.turn_generator_mode must be one of: "
-        "'default', 'proof_tool_chain'."
-    )
-
-
-def _proof_tool_chain_turn_generator(
-    *,
-    task,
-    attempt_index: int,
-    turn_index: int,
-    step_index: int,
-    history,
-) -> str:
-    del task, step_index, history
-    path = f"/tmp/rft_proof_attempt_{attempt_index}.txt"
-    if turn_index == 0:
-        return (
-            "<tool_call>"
-            '{"tool":"bash","args":{"command":"printf \'proof_seed\\n\' > '
-            + path
-            + "\"}}"
-            "</tool_call>"
-        )
-    if turn_index == 1:
-        return (
-            "<tool_call>"
-            '{"tool":"search","args":{"query":"proof_seed","path_hint":"/tmp","top_k":5}}'
-            "</tool_call>"
-        )
-    if turn_index == 2:
-        return (
-            "<tool_call>"
-            '{"tool":"edit","args":{"path":"'
-            + path
-            + '","patch":"proof_patch"}}'
-            "</tool_call>"
-        )
-    if turn_index == 3:
-        return (
-            "<tool_call>"
-            '{"tool":"search","args":{"query":"proof_patch","path_hint":"/tmp","top_k":5}}'
-            "</tool_call>"
-        )
-    return (
-        "<tool_call>"
-        '{"tool":"submit","args":{"final_response":"proof terminal submit"}}'
-        "</tool_call>"
-    )
