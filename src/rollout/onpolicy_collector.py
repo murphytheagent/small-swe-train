@@ -220,6 +220,9 @@ class OnPolicyRolloutCollector:
                     step_index_start=turn_index * runtime.max_tool_calls_per_turn,
                 )
             except Exception as exc:
+                # Preserve the generated assistant turn in rollout history even if bridge
+                # parsing/execution fails, so failure artifacts remain debuggable.
+                history.append(assistant_response)
                 bridge_error = str(exc)
                 break
 

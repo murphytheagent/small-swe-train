@@ -11,6 +11,7 @@ from config import (
 from env.container_pool import ContainerHandle
 from env.runtime_protocol import ToolRequest, ToolResponse
 from env.task_dataset import TaskSample
+import rollout.onpolicy_collector as onpolicy_collector_module
 from rollout.onpolicy_collector import OnPolicyRolloutCollector
 
 
@@ -462,6 +463,42 @@ def test_onpolicy_collector_keeps_tool_output_aligned_with_first_tool_call() -> 
     assert row["turn_index"] == 0
     assert '"tool":"search"' in row["assistant_response"]
     assert row["trajectory_steps"][0]["tool"] == "search"
+
+
+def test_onpolicy_collector_keeps_failed_bridge_turn_in_trajectory_history(
+    monkeypatch,
+) -> None:
+    pool = _FakePool()
+    executor = _FakeExecutor()
+    assistant_turn = '<tool_call>{"tool":"bash","args":{"command":"echo broken"}}</tool_call>'
+
+    def broken_bridge_step(*_args, **_kwargs):
+        raise ValueError("bridge parse failed")
+
+    monkeypatch.setattr(
+        onpolicy_collector_module,
+        "run_env_bridge_step",
+        broken_bridge_step,
+    )
+
+    collector = OnPolicyRolloutCollector(
+        settings=_settings(),
+        turn_generator=lambda **_kwargs: assistant_turn,
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["resolved"] is False
+    assert row["is_terminal"] is False
+    assert row["assistant_response"] == assistant_turn
+    assert row["trajectory_history"] == [assistant_turn]
+    assert "bridge_error" in row
+    assert "bridge parse failed" in str(row["bridge_error"])
 
 
 def test_onpolicy_collector_default_turn_generator_produces_resolved_attempt() -> None:
