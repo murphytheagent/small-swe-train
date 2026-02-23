@@ -226,6 +226,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 )
 
                 trainer_command = build_trainer_step_command(
+                    python_bin=config.python_bin,
                     nnodes=config.nnodes,
                     nproc_per_node=config.nproc_per_node,
                     trainer_module=config.trainer_module,
@@ -295,6 +296,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
 
 def build_trainer_step_command(
     *,
+    python_bin: str,
     nnodes: int,
     nproc_per_node: int,
     trainer_module: str,
@@ -333,7 +335,9 @@ def build_trainer_step_command(
     ]
 
     return [
-        "torchrun",
+        python_bin,
+        "-m",
+        "torch.distributed.run",
         "--standalone",
         "--nnodes",
         str(nnodes),
@@ -548,6 +552,7 @@ def _print_dry_run_plan(config: RFTLoopConfig) -> None:
             f"# [dry-run] step={step_index} collect selected trajectories -> {parquet_path}"
         )
         trainer_command = build_trainer_step_command(
+            python_bin=config.python_bin,
             nnodes=config.nnodes,
             nproc_per_node=config.nproc_per_node,
             trainer_module=config.trainer_module,

@@ -31,7 +31,7 @@ def _run_script(
 
 def test_run_rft_script_dry_run_prints_verl_command() -> None:
     result = _run_script("run_rft.sh", "trainer.total_training_steps=1")
-    assert "torchrun" in result.stdout
+    assert "-m torch.distributed.run" in result.stdout
     assert "-m verl_integration.fsdp_sft_trainer_entry" in result.stdout
     assert "--config-name rft_swe" in result.stdout
     assert "trainer.total_training_steps=1" in result.stdout

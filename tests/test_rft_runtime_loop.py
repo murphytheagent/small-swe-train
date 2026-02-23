@@ -25,6 +25,7 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
     tmp_path: Path,
 ) -> None:
     command = build_trainer_step_command(
+        python_bin="python3",
         nnodes=1,
         nproc_per_node=8,
         trainer_module="verl.trainer.fsdp_sft_trainer",
@@ -40,7 +41,7 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
     )
 
     command_text = " ".join(command)
-    assert "torchrun" in command_text
+    assert "python3 -m torch.distributed.run" in command_text
     assert "-m verl.trainer.fsdp_sft_trainer" in command_text
     assert "trainer.total_training_steps=1" in command_text
     assert "trainer.checkpoint.save_contents=[model,hf_model,extra]" in command_text
