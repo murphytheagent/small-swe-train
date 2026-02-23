@@ -16,6 +16,12 @@ _ORIGINAL_FROM_PRETRAINED = AutoModelForCausalLM.from_pretrained
 _FLASH_ATTN_DISABLED = False
 
 
+def _clear_cached_flash_attn_modules() -> None:
+    for name in list(sys.modules):
+        if name == "flash_attn" or name.startswith("flash_attn."):
+            sys.modules.pop(name, None)
+
+
 def _resolved_attn_implementation() -> str | None:
     value = os.environ.get("SMALL_SWE_RFT_ATTN_IMPL")
     if value is None:
@@ -38,10 +44,14 @@ def _disable_flash_attn_availability(*, reason: str) -> None:
     global _FLASH_ATTN_DISABLED
     from transformers import utils as transformers_utils
     from transformers.utils import import_utils as transformers_import_utils
+    from sitecustomize import apply_small_swe_runtime_patches
 
     def _not_available() -> bool:
         return False
 
+    _clear_cached_flash_attn_modules()
+    os.environ["SMALL_SWE_HIDE_EXTERNAL_FLASH_ATTN"] = "1"
+    apply_small_swe_runtime_patches()
     transformers_utils.is_flash_attn_2_available = _not_available
     transformers_import_utils.is_flash_attn_2_available = _not_available
     _FLASH_ATTN_DISABLED = True

@@ -6,10 +6,14 @@ present on `PYTHONPATH`. Patches are opt-in through environment variables.
 
 from __future__ import annotations
 
+import builtins
 import importlib.util
 import os
+import sys
 from collections.abc import Callable
 from importlib.machinery import ModuleSpec
+
+_ORIGINAL_IMPORT = builtins.__import__
 
 
 def _coerce_bool_env(name: str, *, default: bool) -> bool:
@@ -35,9 +39,38 @@ def _install_flash_attn_find_spec_guard() -> None:
     importlib.util.find_spec = _small_swe_guarded_find_spec
 
 
+def _install_flash_attn_import_guard() -> None:
+    current = builtins.__import__
+    if getattr(current, "__name__", "") == "_small_swe_guarded_import":
+        return
+
+    def _small_swe_guarded_import(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ):
+        if name == "flash_attn" or name.startswith("flash_attn."):
+            raise ModuleNotFoundError(
+                "No module named 'flash_attn' (hidden by SMALL_SWE_HIDE_EXTERNAL_FLASH_ATTN)"
+            )
+        return _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
+
+    builtins.__import__ = _small_swe_guarded_import
+
+
+def _clear_cached_flash_attn_modules() -> None:
+    for name in list(sys.modules):
+        if name == "flash_attn" or name.startswith("flash_attn."):
+            sys.modules.pop(name, None)
+
+
 def apply_small_swe_runtime_patches() -> None:
     if _coerce_bool_env("SMALL_SWE_HIDE_EXTERNAL_FLASH_ATTN", default=False):
+        _clear_cached_flash_attn_modules()
         _install_flash_attn_find_spec_guard()
+        _install_flash_attn_import_guard()
 
 
 apply_small_swe_runtime_patches()
