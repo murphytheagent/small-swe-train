@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME
 from data.tokenization import SupportsOffsetsTokenizer
+from rollout.vllm_turn_generator import build_vllm_turn_generator
 from trainer.rft_handoff import (
     build_onpolicy_collector,
     collect_rft_sft_batch_for_steps,
@@ -134,12 +135,14 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
 def _resolve_turn_generator(mode: str):
     normalized_mode = mode.strip().lower()
     if normalized_mode == "default":
-        return None
+        return build_vllm_turn_generator()
+    if normalized_mode == "vllm_live":
+        return build_vllm_turn_generator()
     if normalized_mode == "proof_tool_chain":
         return _proof_tool_chain_turn_generator
     raise ValueError(
         "data.on_policy.turn_generator_mode must be one of: "
-        "'default', 'proof_tool_chain'."
+        "'default', 'vllm_live', 'proof_tool_chain'."
     )
 
 

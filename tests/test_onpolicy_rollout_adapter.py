@@ -146,7 +146,7 @@ def test_select_rft_attempt_rows_relabels_deterministically() -> None:
     assert selected[0]["rft_label"] == "accept"
     assert len(rejected) == 1
     assert rejected[0]["rft_label"] == "reject"
-    assert rejected[0]["rft_rejection_reason"] == "format_invalid"
+    assert rejected[0]["rft_rejection_reason"] == "non_terminal,format_invalid"
 
 
 def test_build_verl_sft_batch_masks_last_token_and_pads() -> None:
@@ -186,6 +186,29 @@ def test_build_verl_sft_batch_masks_last_token_and_pads() -> None:
     assert batch["tensors"]["loss_mask"] == [[1, 1, 0], [1, 0, 0]]
     assert batch["grouping_metadata"]["group_id"][0] == "task-1#attempt-0"
     assert batch["meta_info"]["selected_count"] == 2
+
+
+def test_select_rft_attempt_rows_rejects_invalid_final_submit_even_when_format_flag_true() -> None:
+    selection = resolve_rft_handoff_settings().selection
+    selected, rejected = select_rft_attempt_rows(
+        [
+            {
+                "is_terminal": True,
+                "final_turn_has_submit": True,
+                "final_submit_format_valid": False,
+                "trajectory_format_valid": True,
+                "format_valid": True,
+                "resolved": True,
+                "action_mask_rft": [1, 1],
+                "input_ids": [1, 2],
+            }
+        ],
+        selection_policy=selection,
+    )
+
+    assert selected == []
+    assert len(rejected) == 1
+    assert rejected[0]["rft_rejection_reason"] == "final_submit_invalid"
 
 
 def test_collect_rft_sft_batch_for_steps_filters_failed_attempts(tmp_path: Path) -> None:

@@ -71,13 +71,29 @@ def evaluate_rft_rejection_reason(
     """Return deterministic rejection reason list for one rollout attempt row."""
     reasons: list[str] = []
 
-    if selection_policy.require_terminal and not _coerce_bool(row.get("is_terminal"), fallback=False):
+    has_terminal_submit = _coerce_bool(
+        row.get("final_turn_has_submit"),
+        fallback=_coerce_bool(row.get("is_terminal"), fallback=False),
+    )
+    trajectory_format_valid = _coerce_bool(
+        row.get("trajectory_format_valid"),
+        fallback=_coerce_bool(row.get("format_valid"), fallback=False),
+    )
+    final_submit_format_valid = _coerce_bool(
+        row.get("final_submit_format_valid"),
+        fallback=trajectory_format_valid and has_terminal_submit,
+    )
+
+    if selection_policy.require_terminal and not has_terminal_submit:
         reasons.append("non_terminal")
-    if selection_policy.require_format_valid and not _coerce_bool(
-        row.get("format_valid"),
-        fallback=False,
-    ):
+    if selection_policy.require_format_valid and not trajectory_format_valid:
         reasons.append("format_invalid")
+    if (
+        selection_policy.reject_on_invalid_final_submit
+        and has_terminal_submit
+        and not final_submit_format_valid
+    ):
+        reasons.append("final_submit_invalid")
     if selection_policy.require_resolved and not _coerce_bool(row.get("resolved"), fallback=False):
         reasons.append("unresolved")
 

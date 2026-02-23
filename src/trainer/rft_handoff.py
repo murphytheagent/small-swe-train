@@ -171,6 +171,18 @@ def merge_rollout_and_preprocessed_rows(
     merged_rows: list[dict[str, Any]] = []
     for index, (rollout_row, preprocessed_row) in enumerate(zip(rollout_rows, preprocessed_rows)):
         task_id = _require_non_empty_task_id(rollout_row.get("task_id"), index=index)
+        trajectory_format_valid = _coerce_bool(
+            rollout_row.get("trajectory_format_valid"),
+            fallback=_coerce_bool(preprocessed_row.get("format_valid"), fallback=False),
+        )
+        final_turn_has_submit = _coerce_bool(
+            rollout_row.get("final_turn_has_submit"),
+            fallback=_coerce_bool(rollout_row.get("is_terminal"), fallback=False),
+        )
+        final_submit_format_valid = _coerce_bool(
+            rollout_row.get("final_submit_format_valid"),
+            fallback=trajectory_format_valid and final_turn_has_submit,
+        )
         merged = dict(preprocessed_row)
         merged.update(
             {
@@ -188,6 +200,15 @@ def merge_rollout_and_preprocessed_rows(
                 "tool_name": rollout_row.get("tool_name", ""),
                 "container_id": rollout_row.get("container_id", ""),
                 "image_name": rollout_row.get("image_name", ""),
+                "format_valid": trajectory_format_valid,
+                "trajectory_format_valid": trajectory_format_valid,
+                "final_turn_has_submit": final_turn_has_submit,
+                "final_submit_format_valid": final_submit_format_valid,
+                "trajectory_tool_validation_errors": rollout_row.get(
+                    "trajectory_tool_validation_errors",
+                    (),
+                ),
+                "trajectory_assistant_turns": rollout_row.get("trajectory_assistant_turns", ()),
                 "trajectory_steps": rollout_row.get("trajectory_steps", ()),
                 "trajectory_history": rollout_row.get("trajectory_history", ()),
             }

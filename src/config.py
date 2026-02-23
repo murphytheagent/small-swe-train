@@ -77,6 +77,7 @@ class RFTSelectionPolicy:
     reject_on_executor_error: bool
     reject_on_parse_error: bool
     reject_on_validation_errors: bool
+    reject_on_invalid_final_submit: bool
     relabel_rejected_attempts: bool
 
 
@@ -171,6 +172,15 @@ def rft_handoff_defaults() -> dict[str, Any]:
     if not isinstance(handoff, Mapping):
         raise ValueError("`rft_handoff` block is missing from training policy defaults.")
     return dict(handoff)
+
+
+def rft_runtime_defaults() -> dict[str, Any]:
+    """Return centralized RFT runtime loop/vLLM defaults from runtime policy JSON."""
+    defaults = training_policy_defaults()
+    runtime_defaults = defaults.get("rft_runtime")
+    if not isinstance(runtime_defaults, Mapping):
+        raise ValueError("`rft_runtime` block is missing from training policy defaults.")
+    return dict(runtime_defaults)
 
 
 def output_contract_defaults() -> dict[str, Any]:
@@ -403,6 +413,10 @@ def _parse_rft_selection_policy(payload: Mapping[str, Any]) -> RFTSelectionPolic
         reject_on_validation_errors=_coerce_bool(
             payload.get("reject_on_validation_errors"),
             label="rft_handoff.selection.reject_on_validation_errors",
+        ),
+        reject_on_invalid_final_submit=_coerce_bool(
+            payload.get("reject_on_invalid_final_submit"),
+            label="rft_handoff.selection.reject_on_invalid_final_submit",
         ),
         relabel_rejected_attempts=_coerce_bool(
             payload.get("relabel_rejected_attempts"),

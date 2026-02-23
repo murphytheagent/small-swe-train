@@ -168,6 +168,11 @@ def test_onpolicy_collector_collects_terminal_attempt_rows() -> None:
     assert row["image_name"] == "img:1"
     assert row["trajectory_steps"]
     assert row["trajectory_history"]
+    assert row["trajectory_assistant_turns"]
+    assert row["trajectory_tool_validation_errors"] == []
+    assert row["trajectory_format_valid"] is True
+    assert row["final_turn_has_submit"] is True
+    assert row["final_submit_format_valid"] is True
     assert row["attempt_index"] == 0
     assert pool.release_called is True
 
@@ -202,6 +207,30 @@ def test_onpolicy_collector_keeps_failed_rows() -> None:
     assert rows[0]["resolved"] is False
     assert "collector_error" in rows[0]
     assert rows[1]["resolved"] is False
+
+
+def test_onpolicy_collector_tracks_invalid_terminal_submit_metadata() -> None:
+    pool = _FakePool()
+    executor = _FakeExecutor()
+
+    collector = OnPolicyRolloutCollector(
+        settings=_settings(),
+        turn_generator=lambda **_kwargs: '<tool_call>{"tool":"submit","args":{}}</tool_call>',
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["is_terminal"] is True
+    assert row["final_turn_has_submit"] is True
+    assert row["final_submit_format_valid"] is False
+    assert row["trajectory_format_valid"] is False
+    assert row["trajectory_tool_validation_errors"]
+    assert "Missing required arg 'final_response'" in row["trajectory_tool_validation_errors"][0]
 
 
 def test_onpolicy_collector_resolver_sees_full_attempt_history() -> None:
@@ -497,6 +526,10 @@ def test_onpolicy_collector_keeps_failed_bridge_turn_in_trajectory_history(
     assert row["is_terminal"] is False
     assert row["assistant_response"] == assistant_turn
     assert row["trajectory_history"] == [assistant_turn]
+    assert row["trajectory_assistant_turns"] == [assistant_turn]
+    assert row["final_turn_has_submit"] is False
+    assert row["final_submit_format_valid"] is False
+    assert row["trajectory_format_valid"] is False
     assert "bridge_error" in row
     assert "bridge parse failed" in str(row["bridge_error"])
 
@@ -519,4 +552,7 @@ def test_onpolicy_collector_default_turn_generator_produces_resolved_attempt() -
     assert rows[0]["resolved"] is True
     assert rows[0]["turn_index"] == 0
     assert rows[0]["tool_name"] == "bash"
+    assert rows[0]["trajectory_format_valid"] is True
+    assert rows[0]["final_turn_has_submit"] is True
+    assert rows[0]["final_submit_format_valid"] is True
     assert [request.tool for request in executor.requests] == ["bash"]

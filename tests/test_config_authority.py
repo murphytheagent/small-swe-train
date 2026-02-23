@@ -73,12 +73,20 @@ def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     assert settings.runtime.max_tool_calls_per_turn <= config.MAX_TOOL_CALLS_PER_TURN
 
 
+def test_rft_runtime_defaults_load_loop_and_vllm_config() -> None:
+    runtime_defaults = config.rft_runtime_defaults()
+    assert runtime_defaults["loop"]["steps"] >= 1
+    assert runtime_defaults["loop"]["samples_per_task"] >= 1
+    assert runtime_defaults["loop"]["task_batch_size"] >= 1
+    assert runtime_defaults["vllm"]["base_url"].startswith("http://")
+
+
 def test_resolve_rft_handoff_settings_loads_selection_policy() -> None:
     settings = config.resolve_rft_handoff_settings()
     assert settings.max_sequence_length >= 2
     assert settings.pad_token_id >= 0
     assert settings.selection.require_format_valid is True
-    assert settings.selection.require_terminal is False
+    assert settings.selection.require_terminal is True
     assert settings.selection.require_resolved is False
     assert settings.selection.require_zero_exit_code is False
     assert settings.selection.reject_on_collector_error is False
@@ -87,6 +95,7 @@ def test_resolve_rft_handoff_settings_loads_selection_policy() -> None:
     assert settings.selection.reject_on_executor_error is False
     assert settings.selection.reject_on_parse_error is False
     assert settings.selection.reject_on_validation_errors is False
+    assert settings.selection.reject_on_invalid_final_submit is True
 
 
 def test_verl_integration_has_no_config_dataclass_definitions() -> None:

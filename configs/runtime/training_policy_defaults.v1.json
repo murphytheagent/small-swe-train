@@ -1,5 +1,5 @@
 {
-  "generated_utc": "2026-02-21 06:24 UTC",
+  "generated_utc": "2026-02-23 10:42 UTC",
   "thread_ts": "1771579678.414229",
   "pipeline": {
     "pre_main_sequence": [
@@ -100,7 +100,7 @@
     "max_sequence_length": 12288,
     "pad_token_id": 0,
     "selection": {
-      "require_terminal": false,
+      "require_terminal": true,
       "require_format_valid": true,
       "require_resolved": false,
       "require_zero_exit_code": false,
@@ -110,7 +110,24 @@
       "reject_on_executor_error": false,
       "reject_on_parse_error": false,
       "reject_on_validation_errors": false,
+      "reject_on_invalid_final_submit": true,
       "relabel_rejected_attempts": true
+    }
+  },
+  "rft_runtime": {
+    "loop": {
+      "sft_num_epoch_per_batch": 1,
+      "steps": 100,
+      "samples_per_task": 8,
+      "task_batch_size": 128
+    },
+    "vllm": {
+      "base_url": "http://127.0.0.1:8000/v1",
+      "model_name": "Qwen/Qwen3-4B-Instruct-2507",
+      "request_timeout_sec": 90,
+      "max_tokens": 1024,
+      "temperature": 0.0,
+      "top_p": 1.0
     }
   },
   "runtime": {

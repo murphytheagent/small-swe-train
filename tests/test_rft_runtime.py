@@ -98,3 +98,60 @@ def test_collect_onpolicy_rft_runtime_batch_rejects_unknown_turn_generator_mode(
             request=request,
             tokenizer="tokenizer",
         )
+
+
+def test_collect_onpolicy_rft_runtime_batch_default_mode_uses_vllm_turn_generator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_collector = object()
+    sentinel_turn_generator = object()
+    captured_turn_generator = {"value": None}
+
+    def fake_build_vllm_turn_generator():
+        return sentinel_turn_generator
+
+    def fake_build_onpolicy_collector(**kwargs):
+        captured_turn_generator["value"] = kwargs.get("turn_generator")
+        return fake_collector
+
+    def fake_collect_rft_sft_batch_for_steps(
+        *,
+        total_steps,
+        collector,
+        tokenizer,
+        handoff_overrides,
+        output_dir,
+    ):
+        assert total_steps == 1
+        assert collector is fake_collector
+        assert tokenizer == "tokenizer"
+        assert handoff_overrides is None
+        assert output_dir is None
+        return {
+            "rollout_rows": [{"task_id": "task-1"}],
+            "selected_rows": [{"task_id": "task-1"}],
+            "rejected_rows": [],
+            "sft_batch": {"meta_info": {"selected_count": 1}},
+            "dataproto_payload": {"meta_info": {"max_padded_length": 16}},
+        }
+
+    monkeypatch.setattr(
+        rft_runtime_module,
+        "build_vllm_turn_generator",
+        fake_build_vllm_turn_generator,
+    )
+    monkeypatch.setattr(
+        rft_runtime_module,
+        "build_onpolicy_collector",
+        fake_build_onpolicy_collector,
+    )
+    monkeypatch.setattr(
+        rft_runtime_module,
+        "collect_rft_sft_batch_for_steps",
+        fake_collect_rft_sft_batch_for_steps,
+    )
+
+    request = OnPolicyRFTRuntimeRequest(turn_generator_mode="default")
+    collect_onpolicy_rft_runtime_batch(request=request, tokenizer="tokenizer")
+
+    assert captured_turn_generator["value"] is sentinel_turn_generator

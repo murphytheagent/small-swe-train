@@ -177,6 +177,10 @@ class OnPolicyRolloutCollector:
         task_patch_applied = False
         attempt_steps: list[EnvironmentStep] = []
         trajectory_steps: list[dict[str, object]] = []
+        trajectory_assistant_turns: list[str] = []
+        trajectory_tool_validation_errors: list[str] = []
+        final_turn_has_submit = False
+        final_submit_format_valid = False
 
         init_failure = self._initialize_task_environment(
             task=task,
@@ -222,9 +226,18 @@ class OnPolicyRolloutCollector:
             except Exception as exc:
                 # Preserve the generated assistant turn in rollout history even if bridge
                 # parsing/execution fails, so failure artifacts remain debuggable.
+                trajectory_assistant_turns.append(assistant_response)
                 history.append(assistant_response)
                 bridge_error = str(exc)
                 break
+
+            trajectory_assistant_turns.append(assistant_response)
+            turn_validation_errors = _collect_validation_errors(bridge_result.steps)
+            if turn_validation_errors:
+                trajectory_tool_validation_errors.extend(turn_validation_errors)
+            if bridge_result.is_terminal:
+                final_turn_has_submit = True
+                final_submit_format_valid = not bool(turn_validation_errors)
 
             history.append(assistant_response)
             history.extend(bridge_result.tool_response_blocks)
@@ -267,6 +280,7 @@ class OnPolicyRolloutCollector:
                 f"Attempt reached max_turns_per_attempt={runtime.max_turns_per_attempt} without terminal submit."
             )
 
+        trajectory_format_valid = not trajectory_tool_validation_errors and not bool(bridge_error)
         elapsed_ms = (self._monotonic_clock() - attempt_start) * 1000.0
         row_step_index = (
             step_index * runtime.task_batch_size * runtime.attempts_per_task
@@ -295,6 +309,13 @@ class OnPolicyRolloutCollector:
             "batch_container_count": batch_container_count,
             "trajectory_steps": trajectory_steps,
             "trajectory_history": list(history),
+            "trajectory_assistant_turns": list(trajectory_assistant_turns),
+            "trajectory_tool_validation_errors": _stable_unique_strings(
+                trajectory_tool_validation_errors
+            ),
+            "trajectory_format_valid": trajectory_format_valid,
+            "final_turn_has_submit": final_turn_has_submit,
+            "final_submit_format_valid": final_submit_format_valid,
         }
         if collector_error:
             row["collector_error"] = collector_error
@@ -378,6 +399,32 @@ def _serialize_environment_steps(steps: Sequence[EnvironmentStep]) -> list[dict[
             }
         )
     return payload
+
+
+def _collect_validation_errors(steps: Sequence[EnvironmentStep]) -> list[str]:
+    errors: list[str] = []
+    for step in steps:
+        metadata = step.response.metadata
+        raw_errors = metadata.get("validation_errors")
+        if not isinstance(raw_errors, Sequence) or isinstance(raw_errors, (str, bytes)):
+            continue
+        for raw_error in raw_errors:
+            message = str(raw_error).strip()
+            if message:
+                errors.append(message)
+    return errors
+
+
+def _stable_unique_strings(values: Sequence[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        value = str(raw_value).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
 
 
 def _task_patch(task: TaskSample) -> str | None:
