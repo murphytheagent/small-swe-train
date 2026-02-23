@@ -59,10 +59,20 @@ def _load_external_module() -> ModuleType | None:
             return None
 
     module = module_from_spec(spec)
+    existing_module = sys.modules.get("qwen_vl_utils")
+    sys.modules["qwen_vl_utils"] = module
     try:
         spec.loader.exec_module(module)
     except Exception:
+        if existing_module is None:
+            sys.modules.pop("qwen_vl_utils", None)
+        else:
+            sys.modules["qwen_vl_utils"] = existing_module
         return None
+    if existing_module is None:
+        sys.modules.pop("qwen_vl_utils", None)
+    else:
+        sys.modules["qwen_vl_utils"] = existing_module
     return module
 
 
