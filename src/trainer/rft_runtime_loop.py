@@ -214,6 +214,10 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             _run_command(trainer_command, cwd=config.project_root)
 
             latest_hf_checkpoint = resolve_latest_hf_checkpoint(trainer_checkpoint_root)
+            pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
+                checkpoint_root=trainer_checkpoint_root,
+                keep_last=config.checkpoint_keep_last,
+            )
             current_model_path = str(latest_hf_checkpoint)
 
             if config.manage_vllm:
@@ -235,6 +239,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "trainer_checkpoint_root": str(trainer_checkpoint_root),
                 "latest_hf_checkpoint": str(latest_hf_checkpoint),
                 "trainer_command": trainer_command,
+                "pruned_global_step_checkpoints": [
+                    str(path) for path in pruned_global_step_checkpoints
+                ],
                 "pruned_checkpoint_roots": [str(path) for path in pruned_checkpoint_roots],
                 "pruned_step_payloads": [str(path) for path in pruned_step_payloads],
             }
@@ -401,6 +408,36 @@ def prune_old_step_checkpoints(*, output_dir: str | Path, keep_last: int) -> lis
     for _, checkpoint_root in to_prune:
         shutil.rmtree(checkpoint_root)
         pruned.append(checkpoint_root)
+    return pruned
+
+
+def prune_old_global_step_checkpoints(*, checkpoint_root: str | Path, keep_last: int) -> list[Path]:
+    """Delete old global_step_* directories in one trainer checkpoint root."""
+    if keep_last < 1:
+        raise ValueError("keep_last must be >= 1 to preserve the latest global step checkpoint.")
+
+    resolved_root = Path(checkpoint_root)
+    if not resolved_root.exists():
+        return []
+
+    global_step_dirs: list[tuple[int, Path]] = []
+    for path in resolved_root.iterdir():
+        if not path.is_dir():
+            continue
+        match = _GLOBAL_STEP_PATTERN.match(path.name)
+        if match is None:
+            continue
+        global_step_dirs.append((int(match.group(1)), path))
+
+    global_step_dirs.sort(key=lambda item: item[0])
+    if len(global_step_dirs) <= keep_last:
+        return []
+
+    to_prune = global_step_dirs[: len(global_step_dirs) - keep_last]
+    pruned: list[Path] = []
+    for _, path in to_prune:
+        shutil.rmtree(path)
+        pruned.append(path)
     return pruned
 
 

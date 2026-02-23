@@ -7,6 +7,7 @@ import pytest
 from trainer.rft_runtime_loop import (
     build_trainer_step_command,
     build_vllm_server_command,
+    prune_old_global_step_checkpoints,
     prune_old_step_checkpoints,
     prune_old_step_payloads,
     resolve_latest_hf_checkpoint,
@@ -104,6 +105,24 @@ def test_prune_old_step_checkpoints_keeps_latest_roots(tmp_path: Path) -> None:
 def test_prune_old_step_checkpoints_requires_positive_keep_last(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="keep_last must be >= 1"):
         prune_old_step_checkpoints(output_dir=tmp_path, keep_last=0)
+
+
+def test_prune_old_global_step_checkpoints_keeps_latest_steps(tmp_path: Path) -> None:
+    checkpoint_root = tmp_path / "trainer_checkpoints"
+    for step in (1, 3, 5):
+        (checkpoint_root / f"global_step_{step}" / "huggingface").mkdir(parents=True)
+
+    pruned = prune_old_global_step_checkpoints(checkpoint_root=checkpoint_root, keep_last=1)
+
+    assert [path.name for path in pruned] == ["global_step_1", "global_step_3"]
+    assert not (checkpoint_root / "global_step_1").exists()
+    assert not (checkpoint_root / "global_step_3").exists()
+    assert (checkpoint_root / "global_step_5").is_dir()
+
+
+def test_prune_old_global_step_checkpoints_requires_positive_keep_last(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="keep_last must be >= 1"):
+        prune_old_global_step_checkpoints(checkpoint_root=tmp_path, keep_last=0)
 
 
 def test_prune_old_step_payloads_keeps_latest_step_payloads(tmp_path: Path) -> None:
