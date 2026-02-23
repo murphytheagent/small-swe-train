@@ -1,25 +1,46 @@
-.PHONY: setup build-train build-dev build-all clean-venv
+.PHONY: setup build-train build-dev build-all clean-venv ensure-flash-attn rebuild-flash-attn verify-flash-attn
 
 # Number of cores to use for compilation
 CORES ?= 16
+UV ?= uv
+VENV_PYTHON ?= .venv/bin/python
+FLASH_ATTN_PACKAGE ?= flash-attn
+FLASH_ATTN_CUDA_ARCHS ?= 120
 
 # Syncs only the base dependencies
 setup:
-	uv sync
+	$(UV) sync
 
 # Syncs the training environment (compiles flash-attn)
 build-train:
-	export MAX_JOBS=$(CORES) && uv sync --extra train
+	MAX_JOBS=$(CORES) $(UV) sync --extra train
+	$(MAKE) ensure-flash-attn
 
 # Syncs dev dependencies
 build-dev:
-	uv sync --extra dev
+	$(UV) sync --extra dev
 
 # Syncs absolutely everything
 build-all:
-	export MAX_JOBS=$(CORES) && uv sync --all-extras
+	MAX_JOBS=$(CORES) $(UV) sync --all-extras
+	$(MAKE) ensure-flash-attn
+
+# Ensures flash-attn is import-compatible with the current torch/cuda stack.
+ensure-flash-attn:
+	@$(VENV_PYTHON) -c "import flash_attn; from flash_attn import flash_attn_interface" >/dev/null 2>&1 || $(MAKE) rebuild-flash-attn
+	$(MAKE) verify-flash-attn
+
+# Forces a source build against the torch version already installed in .venv.
+rebuild-flash-attn:
+	@echo "Rebuilding flash-attn from source against current torch..."
+	$(UV) pip install --python $(VENV_PYTHON) "setuptools>=80.0" "wheel>=0.46.0" "packaging>=24.0" "ninja>=1.13.0"
+	MAX_JOBS=$(CORES) FLASH_ATTN_CUDA_ARCHS=$(FLASH_ATTN_CUDA_ARCHS) FLASH_ATTENTION_FORCE_BUILD=1 \
+	$(UV) pip install --python $(VENV_PYTHON) --no-build-isolation --no-cache --no-binary $(FLASH_ATTN_PACKAGE) --reinstall-package $(FLASH_ATTN_PACKAGE) $(FLASH_ATTN_PACKAGE)
+
+verify-flash-attn:
+	@$(VENV_PYTHON) -c "import flash_attn; from flash_attn import flash_attn_interface; print('flash-attn import OK')"
 
 # Wipes the environment clean so you can start fresh
 clean-venv:
 	rm -rf .venv
-	uv venv
+	$(UV) venv

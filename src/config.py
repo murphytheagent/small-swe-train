@@ -23,6 +23,7 @@ _CONFIGS_DIR = _PROJECT_ROOT / "configs"
 _DATA_CONFIGS_DIR = _CONFIGS_DIR / "data"
 _TRAINING_POLICY_PATH = _CONFIGS_DIR / "runtime" / "training_policy_defaults.v1.json"
 _PHASE_TRANSITION_GATES_PATH = _CONFIGS_DIR / "runtime" / "phase_transition_gates.v1.json"
+_VERL_MODEL_DEFAULTS_PATH = _CONFIGS_DIR / "verl" / "model_defaults.yaml"
 _MODEL_CONFIG_OVERRIDE_DIR = _CONFIGS_DIR / "model"
 _BUNDLED_MODEL_CONFIGS_DIR = Path(__file__).resolve().parent / "prompts" / "model_configs"
 
@@ -100,6 +101,34 @@ def phase_transition_gates_defaults() -> dict[str, Any]:
         return json.load(fh)
 
 
+@functools.lru_cache(maxsize=1)
+def verl_model_defaults() -> dict[str, Any]:
+    """Load and cache shared verl model defaults."""
+    with _VERL_MODEL_DEFAULTS_PATH.open() as fh:
+        payload = yaml.safe_load(fh)
+    if not isinstance(payload, Mapping):
+        raise ValueError(
+            f"Shared verl model defaults {_VERL_MODEL_DEFAULTS_PATH} must be a mapping."
+        )
+    return dict(payload)
+
+
+def default_training_model_name() -> str:
+    """Return the canonical training model name from shared verl config."""
+    defaults = verl_model_defaults()
+    model_defaults = defaults.get("model_defaults")
+    if not isinstance(model_defaults, Mapping):
+        raise ValueError(
+            f"`model_defaults` block is missing from {_VERL_MODEL_DEFAULTS_PATH}."
+        )
+    model_name = model_defaults.get("primary_name")
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError(
+            f"`model_defaults.primary_name` must be a non-empty string in {_VERL_MODEL_DEFAULTS_PATH}."
+        )
+    return model_name.strip()
+
+
 @functools.lru_cache(maxsize=8)
 def on_policy_data_defaults(
     config_name: str = DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
@@ -168,6 +197,7 @@ MIN_TOOL_CALLS_PER_TURN: int = int(_output_contract["min_tool_calls_per_turn"])
 MAX_TOOL_CALLS_PER_TURN: int = int(_output_contract["max_tool_calls_per_turn"])
 TERMINAL_TOOL_NAME: str = str(_output_contract["terminal_tool"]).strip().lower()
 SUBMIT_MUST_BE_ONLY_TOOL_CALL: bool = bool(_output_contract["submit_must_be_only_tool_call"])
+DEFAULT_TRAINING_MODEL_NAME: str = default_training_model_name()
 
 if MIN_TOOL_CALLS_PER_TURN < 1:
     raise ValueError("min_tool_calls_per_turn must be >= 1")

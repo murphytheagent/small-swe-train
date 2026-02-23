@@ -8,17 +8,22 @@ Requires-Dist: pyyaml>=6.0
 Provides-Extra: dev
 Requires-Dist: pytest>=8.3; extra == "dev"
 Provides-Extra: train
-Requires-Dist: torch>=2.5.1; extra == "train"
-Requires-Dist: transformers>=4.46; extra == "train"
-Requires-Dist: flash-attn>=2.7; extra == "train"
-Requires-Dist: peft>=0.13; extra == "train"
+Requires-Dist: torch<2.10,>=2.9.1; extra == "train"
+Requires-Dist: transformers>=4.57.3; extra == "train"
+Requires-Dist: flash-attn>=2.8.3; extra == "train"
+Requires-Dist: peft>=0.18; extra == "train"
 Requires-Dist: vllm>=0.8.4; extra == "train"
-Requires-Dist: datasets>=3.0; extra == "train"
+Requires-Dist: datasets>=4.4.2; extra == "train"
 Requires-Dist: ray>=2.40; extra == "train"
 Requires-Dist: verl @ git+https://github.com/lasgroup/SDPO.git ; extra == "train"
 Requires-Dist: omegaconf>=2.3; extra == "train"
 Requires-Dist: hydra-core>=1.3; extra == "train"
-Requires-Dist: wandb>=0.19; extra == "train"
+Requires-Dist: wandb>=0.23.1; extra == "train"
+Requires-Dist: ninja>=1.13.0; extra == "train"
+Requires-Dist: packaging>=24.0; extra == "train"
+Requires-Dist: setuptools>=80.0; extra == "train"
+Requires-Dist: wheel>=0.46.0; extra == "train"
+Requires-Dist: qwen-vl-utils>=0.0.14; extra == "train"
 
 # small-swe-train
 
@@ -31,6 +36,14 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 - Deterministic adapter layer from SWE-style tool traces into canonical tools.
 - Stage-aware masking policy helpers for `rft` and `step_sdpo`.
 - Initial trainer/prompt/eval interface signatures.
+- Dedicated `RFTTrainerScaffold` for on-policy RFT rollout/rejection/checkpoint flow, with `SDPOTrainerScaffold` delegating RFT compatibility calls.
+- Optional RFT checkpoint scaffold manifests under `checkpoints/global_step_<n>/rft_step_manifest.json`.
+- RFT checkpoint writes require explicit `global_step` to avoid accidental step-directory reuse.
+- RFT checkpoint argument validation is fail-fast: invalid checkpoint inputs raise before rollout/training side effects.
+- On-policy RFT output artifacts include `rollout_rows.jsonl` and `rollout_artifact_summary.json` (task IDs, task-image pairs, and trajectory counts) when `data.on_policy.output_dir` is set.
+- Live runtime handoff orchestration is centralized in `src/trainer/rft_runtime.py` and emits `rft_runtime_manifest.json` with selected/rejected counts and rejection-reason tallies.
+- RFT rejection-policy logic is centralized in `src/trainer/rft_rejection.py` with typed selection outputs/signatures.
+- `src/verl_integration/` keeps thin compatibility wrappers for trainer-owned runtime/handoff modules.
 
 ## Layout
 - `src/schemas/`: frozen JSON schema contracts + typed protocol models.
@@ -44,6 +57,13 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 ## Quick start
 ```bash
 python -m pytest
+```
+
+Run one deterministic Step-SDPO scaffold step from JSON/JSONL rows:
+```bash
+python scripts/run_step_sdpo_scaffold.py \
+  --input /path/to/rollout_rows.jsonl \
+  --output-dir /path/to/sdpo_step_outputs
 ```
 
 ## Notes

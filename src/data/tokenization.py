@@ -25,8 +25,8 @@ class SupportsOffsetsTokenizer(Protocol):
         ...
 
 
-def load_qwen_tokenizer(model_name: str = "Qwen/Qwen3-4B") -> SupportsOffsetsTokenizer:
-    """Load a fast tokenizer compatible with Qwen3-4B chat format."""
+def load_qwen_tokenizer(model_name: str) -> SupportsOffsetsTokenizer:
+    """Load a fast tokenizer for the configured Qwen chat format."""
     try:
         from transformers import AutoTokenizer
     except ImportError as exc:  # pragma: no cover

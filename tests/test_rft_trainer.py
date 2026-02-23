@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from config import DEFAULT_TRAINING_MODEL_NAME
 from trainer.common import SDPOTrainerConfig
 from trainer.rft_trainer import RFTTrainerScaffold
 
@@ -55,7 +56,7 @@ class _FakeCollectorExecutor:
 
 
 def test_run_onpolicy_rft_step_from_config_uses_real_data_config_and_collector(tmp_path: Path) -> None:
-    trainer = RFTTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B"))
+    trainer = RFTTrainerScaffold(SDPOTrainerConfig(model_name=DEFAULT_TRAINING_MODEL_NAME))
 
     def turn_generator(**kwargs: object) -> str:
         attempt_index = int(kwargs["attempt_index"])

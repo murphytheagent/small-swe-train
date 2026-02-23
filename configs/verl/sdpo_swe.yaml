@@ -2,13 +2,14 @@
 # Extends lasgroup/SDPO's sdpo.yaml with SWE-bench-specific settings
 #
 # Hardware target: single node, 8× A100/H100 GPUs
-# Model: Qwen3-4B with LoRA
+# Model: Qwen3-4B-Instruct-2507 with LoRA
 # Sequence budget: up to ~19K tokens (prompt + trajectory + response)
 #
 # Usage:
 #   python -m verl.trainer.main_ppo --config-name sdpo_swe "$@"
 
 defaults:
+  - model_defaults
   - ppo_trainer
   - user
   - _self_
@@ -28,7 +29,7 @@ max_model_len: 18944
 # ---------------------------------------------------------------------------
 actor_rollout_ref:
   model:
-    path: Qwen/Qwen3-4B
+    path: ${model_defaults.primary_name}
     enable_gradient_checkpointing: true
     use_remove_padding: true
     trust_remote_code: false

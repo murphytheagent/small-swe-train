@@ -146,8 +146,7 @@ def test_select_rft_attempt_rows_relabels_deterministically() -> None:
     assert selected[0]["rft_label"] == "accept"
     assert len(rejected) == 1
     assert rejected[0]["rft_label"] == "reject"
-    assert "non_terminal" in rejected[0]["rft_rejection_reason"]
-    assert "timeout_error" in rejected[0]["rft_rejection_reason"]
+    assert rejected[0]["rft_rejection_reason"] == "format_invalid"
 
 
 def test_build_verl_sft_batch_masks_last_token_and_pads() -> None:

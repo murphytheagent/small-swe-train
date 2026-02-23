@@ -17,7 +17,7 @@ dev = [
   "pytest>=8.3",
 ]
 train = [
-  "torch>=2.9.1",
+  "torch>=2.9.1,<2.10",
   "transformers>=4.57.3",
   "flash-attn>=2.8.3",
   "peft>=0.18",
@@ -28,7 +28,11 @@ train = [
   "omegaconf>=2.3",
   "hydra-core>=1.3",
   "wandb>=0.23.1",
-  "ninja>=1.13.0", # Added to accelerate the C++ compilation
+  "ninja>=1.13.0",
+  "packaging>=24.0",
+  "setuptools>=80.0",
+  "wheel>=0.46.0",
+  "qwen-vl-utils>=0.0.14",
 ]
 
 [tool.setuptools]
@@ -50,5 +54,5 @@ addopts = "-q"
 package = true
 
 [tool.uv.extra-build-dependencies]
-# This guarantees torch is in the isolated build environment BEFORE compiling flash-attn
-flash-attn = ["torch>=2.9.1"]
+# Keep uv's isolated flash-attn builds on the same torch ABI series as runtime deps.
+flash-attn = ["torch>=2.9.1,<2.10", "setuptools>=80.0", "wheel>=0.46.0"]

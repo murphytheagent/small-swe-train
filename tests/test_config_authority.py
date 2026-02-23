@@ -24,6 +24,12 @@ def test_output_contract_exports_match_runtime_defaults() -> None:
     assert config.SUBMIT_MUST_BE_ONLY_TOOL_CALL is bool(output_contract["submit_must_be_only_tool_call"])
 
 
+def test_default_training_model_name_is_loaded_from_shared_verl_config() -> None:
+    defaults = config.verl_model_defaults()
+    assert defaults["model_defaults"]["primary_name"] == config.DEFAULT_TRAINING_MODEL_NAME
+    assert config.DEFAULT_TRAINING_MODEL_NAME == "Qwen/Qwen3-4B-Instruct-2507"
+
+
 def test_phase_transition_gates_defaults_load() -> None:
     gates = config.phase_transition_gates_defaults()
     assert "entry_gate_for_main_sdpo" in gates
@@ -71,9 +77,16 @@ def test_resolve_rft_handoff_settings_loads_selection_policy() -> None:
     settings = config.resolve_rft_handoff_settings()
     assert settings.max_sequence_length >= 2
     assert settings.pad_token_id >= 0
-    assert settings.selection.require_terminal is True
-    assert settings.selection.require_resolved is True
-    assert settings.selection.reject_on_validation_errors is True
+    assert settings.selection.require_format_valid is True
+    assert settings.selection.require_terminal is False
+    assert settings.selection.require_resolved is False
+    assert settings.selection.require_zero_exit_code is False
+    assert settings.selection.reject_on_collector_error is False
+    assert settings.selection.reject_on_bridge_error is False
+    assert settings.selection.reject_on_timeout_error is False
+    assert settings.selection.reject_on_executor_error is False
+    assert settings.selection.reject_on_parse_error is False
+    assert settings.selection.reject_on_validation_errors is False
 
 
 def test_verl_integration_has_no_config_dataclass_definitions() -> None:

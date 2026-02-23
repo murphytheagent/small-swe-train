@@ -17,7 +17,6 @@ ENV_POOL_SIZE="${ON_POLICY_ENV_POOL_SIZE:-${TASK_BATCH_SIZE}}"
 MAX_TURNS_PER_ATTEMPT="${ON_POLICY_MAX_TURNS_PER_ATTEMPT:-5}"
 TRAIN_BATCH_SIZE="${ON_POLICY_TRAIN_BATCH_SIZE:-${NPROC_PER_NODE}}"
 MICRO_BATCH_SIZE_PER_GPU="${ON_POLICY_MICRO_BATCH_SIZE_PER_GPU:-1}"
-MODEL_PATH="${ON_POLICY_PROOF_MODEL_PATH:-Qwen/Qwen2.5-0.5B-Instruct}"
 PROOF_OUTPUT_DIR="${ON_POLICY_PROOF_OUTPUT_DIR:-${PROJECT_ROOT}/outputs/integration/rft_onpolicy_rollout_train_step}"
 RFT_ATTN_IMPLEMENTATION="${RFT_ATTN_IMPLEMENTATION:-eager}"
 RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE:-verl_integration.fsdp_sft_trainer_entry}"
@@ -32,7 +31,6 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   WANDB_MODE="${WANDB_MODE}" \
   NPROC_PER_NODE="${NPROC_PER_NODE}" "${SCRIPT_DIR}/run_rft.sh" \
     --dry-run \
-    model.partial_pretrain="${MODEL_PATH}" \
     trainer.total_epochs=1 \
     trainer.total_training_steps="${STEPS}" \
     trainer.n_gpus_per_node="${NPROC_PER_NODE}" \
@@ -60,7 +58,6 @@ SMALL_SWE_RFT_ATTN_IMPL="${RFT_ATTN_IMPLEMENTATION}" \
 RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE}" \
 WANDB_MODE="${WANDB_MODE}" \
 NPROC_PER_NODE="${NPROC_PER_NODE}" "${SCRIPT_DIR}/run_rft.sh" \
-  model.partial_pretrain="${MODEL_PATH}" \
   trainer.total_epochs=1 \
   trainer.total_training_steps="${STEPS}" \
   trainer.n_gpus_per_node="${NPROC_PER_NODE}" \

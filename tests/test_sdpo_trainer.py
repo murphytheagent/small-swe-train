@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from config import resolve_on_policy_settings
+from config import DEFAULT_TRAINING_MODEL_NAME, resolve_on_policy_settings
 from env.runtime_protocol import ToolRequest, ToolResponse
 from rollout.onpolicy_collector import OnPolicyRolloutCollector
 from trainer.sdpo_trainer import SDPOTrainerConfig, SDPOTrainerScaffold
@@ -113,7 +113,7 @@ def _build_test_onpolicy_rft_collector() -> tuple[OnPolicyRolloutCollector, _Cha
 
 
 def test_run_rft_epoch_computes_mask_based_stats() -> None:
-    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B"))
+    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name=DEFAULT_TRAINING_MODEL_NAME))
     batch = [
         {"token_labels": ["think", "tool_call", "other"], "format_valid": True},
         {"token_labels": ["tool_call", "tool_call"], "format_valid": False},
@@ -127,7 +127,7 @@ def test_run_rft_epoch_computes_mask_based_stats() -> None:
 
 
 def test_run_sdpo_step_uses_reward_fn_metrics() -> None:
-    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B"))
+    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name=DEFAULT_TRAINING_MODEL_NAME))
     batch = [
         {
             "response_text": (
@@ -145,7 +145,7 @@ def test_run_sdpo_step_uses_reward_fn_metrics() -> None:
 
 
 def test_run_end_to_end_global_step_exposes_reprompt_and_ema_artifacts() -> None:
-    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B", ema_beta=0.5))
+    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name=DEFAULT_TRAINING_MODEL_NAME, ema_beta=0.5))
     executor = FakeExecutor(requests=[])
     batch = [
         {
@@ -169,7 +169,7 @@ def test_run_end_to_end_global_step_exposes_reprompt_and_ema_artifacts() -> None
 
 
 def test_evaluate_format_gates_requires_all_thresholds() -> None:
-    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B"))
+    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name=DEFAULT_TRAINING_MODEL_NAME))
     assert trainer.evaluate_format_gates(
         {
             "parse_valid_rate": 0.99,
@@ -198,7 +198,7 @@ def test_evaluate_format_gates_requires_all_thresholds() -> None:
 def test_run_onpolicy_rft_step_uses_centralized_handoff_filter() -> None:
     collector, tokenizer = _build_test_onpolicy_rft_collector()
 
-    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B"))
+    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name=DEFAULT_TRAINING_MODEL_NAME))
     artifacts = trainer.run_onpolicy_rft_step(
         total_steps=1,
         collector=collector,
@@ -215,7 +215,7 @@ def test_run_onpolicy_rft_step_uses_centralized_handoff_filter() -> None:
 
 def test_run_onpolicy_rft_step_writes_checkpoint_manifest(tmp_path: Path) -> None:
     collector, tokenizer = _build_test_onpolicy_rft_collector()
-    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B"))
+    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name=DEFAULT_TRAINING_MODEL_NAME))
 
     artifacts = trainer.run_onpolicy_rft_step(
         total_steps=1,
@@ -246,7 +246,7 @@ def test_run_onpolicy_rft_step_writes_checkpoint_manifest(tmp_path: Path) -> Non
 
 def test_run_onpolicy_rft_step_checkpoint_requires_explicit_global_step(tmp_path: Path) -> None:
     collector, tokenizer = _build_test_onpolicy_rft_collector()
-    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B"))
+    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name=DEFAULT_TRAINING_MODEL_NAME))
 
     with pytest.raises(
         ValueError,
@@ -263,7 +263,7 @@ def test_run_onpolicy_rft_step_checkpoint_requires_explicit_global_step(tmp_path
 def test_run_onpolicy_rft_step_checkpoint_validation_fails_before_rollout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name="Qwen/Qwen3-4B"))
+    trainer = SDPOTrainerScaffold(SDPOTrainerConfig(model_name=DEFAULT_TRAINING_MODEL_NAME))
 
     def _unexpected_collect(**_kwargs: object) -> dict[str, object]:
         raise AssertionError("collect_rft_sft_batch_for_steps should not run")

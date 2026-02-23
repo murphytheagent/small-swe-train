@@ -59,6 +59,7 @@ def test_run_rft_onpolicy_rollout_proof_script_sets_onpolicy_overrides() -> None
     assert "data.on_policy.turn_generator_mode=proof_tool_chain" in result.stdout
     assert "data.on_policy.total_steps=1" in result.stdout
     assert "+data.on_policy.runtime_overrides.task_batch_size=" in result.stdout
+    assert "model.partial_pretrain=" not in result.stdout
 
 
 def test_run_rft_onpolicy_rollout_proof_script_propagates_steps() -> None:

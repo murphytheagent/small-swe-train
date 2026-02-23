@@ -9,13 +9,13 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 try:
-    from config import MAX_TOOL_CALLS_PER_TURN
+    from config import DEFAULT_TRAINING_MODEL_NAME, MAX_TOOL_CALLS_PER_TURN
     from trainer.sdpo_trainer import SDPOTrainerConfig, SDPOTrainerScaffold
 except ModuleNotFoundError:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    from config import MAX_TOOL_CALLS_PER_TURN
+    from config import DEFAULT_TRAINING_MODEL_NAME, MAX_TOOL_CALLS_PER_TURN
     from trainer.sdpo_trainer import SDPOTrainerConfig, SDPOTrainerScaffold
 
 
@@ -64,7 +64,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path, help="Input rollout rows JSON/JSONL.")
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory for runner artifacts.")
-    parser.add_argument("--model-name", default="Qwen/Qwen3-4B", help="Model identifier for trainer config.")
     parser.add_argument(
         "--max-tool-calls",
         type=int,
@@ -89,7 +88,7 @@ def main() -> None:
 
     trainer = SDPOTrainerScaffold(
         SDPOTrainerConfig(
-            model_name=args.model_name,
+            model_name=DEFAULT_TRAINING_MODEL_NAME,
             max_tool_calls_per_turn=args.max_tool_calls,
             include_student_attempt_for_teacher=not args.exclude_student_attempt_for_teacher,
             ema_beta=args.ema_beta,
