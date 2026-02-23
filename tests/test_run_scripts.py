@@ -132,8 +132,19 @@ def test_run_flash_attn_rebuild_script_dry_run_uses_safe_defaults() -> None:
     assert "--cpus-per-task 8" in result.stdout
     assert "--mem 128G" in result.stdout
     assert "rebuild-flash-attn" in result.stdout
-    assert "CORES=2" in result.stdout
-    assert "FLASH_ATTN_CUDA_ARCHS=80" in result.stdout
+    assert "CORES=8" in result.stdout
+    assert "FLASH_ATTN_CUDA_ARCHS=120" in result.stdout
+
+
+def test_run_flash_attn_rebuild_script_dry_run_has_no_log_dir_side_effect(tmp_path: Path) -> None:
+    log_dir = tmp_path / "flash-attn-rebuild-logs"
+    result = _run_script(
+        "run_flash_attn_rebuild.sh",
+        env_overrides={"FLASH_ATTN_BUILD_LOG_DIR": str(log_dir)},
+    )
+    assert str(log_dir / "slurm-%j.out") in result.stdout
+    assert str(log_dir / "slurm-%j.err") in result.stdout
+    assert not log_dir.exists()
 
 
 def test_run_flash_attn_rebuild_script_honors_env_overrides() -> None:

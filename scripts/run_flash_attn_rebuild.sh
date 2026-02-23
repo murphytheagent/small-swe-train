@@ -14,14 +14,13 @@ PARTITION="${FLASH_ATTN_BUILD_PARTITION:-cpu}"
 CPUS_PER_TASK="${FLASH_ATTN_BUILD_CPUS_PER_TASK:-8}"
 MEMORY="${FLASH_ATTN_BUILD_MEM:-128G}"
 TIME_LIMIT="${FLASH_ATTN_BUILD_TIME:-03:00:00}"
-MAX_JOBS="${FLASH_ATTN_BUILD_MAX_JOBS:-2}"
+MAX_JOBS="${FLASH_ATTN_BUILD_MAX_JOBS:-8}"
 UV_BIN="${UV_BIN:-uv}"
 VENV_PYTHON="${VENV_PYTHON:-${PROJECT_ROOT}/.venv/bin/python}"
-FLASH_ATTN_CUDA_ARCHS="${FLASH_ATTN_CUDA_ARCHS:-80}"
+FLASH_ATTN_CUDA_ARCHS="${FLASH_ATTN_CUDA_ARCHS:-120}"
 FLASH_ATTN_PACKAGE="${FLASH_ATTN_PACKAGE:-flash-attn}"
 RUN_LABEL="${FLASH_ATTN_BUILD_RUN_LABEL:-$(date -u +%Y%m%dT%H%M%SZ)_flash_attn_rebuild}"
 LOG_DIR="${FLASH_ATTN_BUILD_LOG_DIR:-${PROJECT_ROOT}/outputs/flash_attn_rebuild/${RUN_LABEL}}"
-mkdir -p "${LOG_DIR}"
 
 WRAP_CMD=(
   "set -euo pipefail"
@@ -47,6 +46,8 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   printf '\n'
   exit 0
 fi
+
+mkdir -p "${LOG_DIR}"
 
 if ! command -v sbatch >/dev/null 2>&1; then
   echo "sbatch is not available in PATH."

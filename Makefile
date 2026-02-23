@@ -1,13 +1,13 @@
 .PHONY: setup build-train build-dev build-all clean-venv ensure-flash-attn rebuild-flash-attn verify-flash-attn submit-flash-attn-rebuild
 
 # Number of cores to use for compilation
-# Keep compile fan-out conservative by default for shared nodes.
-CORES ?= 2
+# Default for dedicated Blackwell build nodes; override when needed.
+CORES ?= 8
 UV ?= uv
 VENV_PYTHON ?= .venv/bin/python
 FLASH_ATTN_PACKAGE ?= flash-attn
-# A100-friendly default. Override when targeting different GPU architectures.
-FLASH_ATTN_CUDA_ARCHS ?= 80
+# Blackwell default (SM120). Override when targeting different GPU architectures.
+FLASH_ATTN_CUDA_ARCHS ?= 120
 
 # Syncs only the base dependencies
 setup:
