@@ -54,3 +54,28 @@ def test_patched_from_pretrained_honors_explicit_attn_impl_override(monkeypatch)
     assert payload["attn_implementation"] == "flash_attention_2"
     assert "use_flash_attention_2" not in payload
     assert captured["attn_implementation"] == "flash_attention_2"
+
+
+def test_patched_from_pretrained_replaces_flash_attn_impl_when_disabled(monkeypatch) -> None:
+    entry = _load_entry_module()
+
+    captured: dict[str, object] = {}
+
+    def _fake_from_pretrained(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(entry, "_ORIGINAL_FROM_PRETRAINED", _fake_from_pretrained)
+    monkeypatch.setattr(entry, "_FLASH_ATTN_DISABLED", True)
+    monkeypatch.delenv("SMALL_SWE_RFT_ATTN_IMPL", raising=False)
+    monkeypatch.setenv("SMALL_SWE_FALLBACK_ATTN_IMPL", "sdpa")
+
+    payload = entry._patched_from_pretrained(
+        "Qwen/Qwen3-4B-Instruct-2507",
+        attn_implementation="flash_attention_2",
+    )
+
+    assert payload["attn_implementation"] == "sdpa"
+    assert payload["use_flash_attention_2"] is False
+    assert captured["attn_implementation"] == "sdpa"

@@ -68,13 +68,18 @@ def _ensure_flash_attn_runtime_compatibility() -> None:
 
 def _patched_from_pretrained(*args: Any, **kwargs: Any):
     attn_implementation = _resolved_attn_implementation()
-    if attn_implementation is None and _FLASH_ATTN_DISABLED:
+    current_attn_impl = str(kwargs.get("attn_implementation", "")).strip().lower()
+    if _FLASH_ATTN_DISABLED:
         fallback = os.environ.get("SMALL_SWE_FALLBACK_ATTN_IMPL", "sdpa").strip()
-        if fallback:
+        if (
+            attn_implementation is None
+            and fallback
+            and (not current_attn_impl or current_attn_impl == "flash_attention_2")
+        ):
             attn_implementation = fallback
     if attn_implementation is not None:
-        kwargs.setdefault("attn_implementation", attn_implementation)
-        if kwargs["attn_implementation"] != "flash_attention_2":
+        kwargs["attn_implementation"] = attn_implementation
+        if str(kwargs["attn_implementation"]).strip().lower() != "flash_attention_2":
             kwargs.setdefault("use_flash_attention_2", False)
     return _ORIGINAL_FROM_PRETRAINED(*args, **kwargs)
 
