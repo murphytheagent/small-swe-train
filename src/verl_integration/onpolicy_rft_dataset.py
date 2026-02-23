@@ -66,6 +66,7 @@ class OnPolicyRFTDataset:
         )
         cached_result = _ONPOLICY_RFT_CACHE.get(cache_key)
         if cached_result is None:
+
             def _collect_once() -> dict[str, Any]:
                 request = OnPolicyRFTRuntimeRequest(
                     data_config_name=data_config_name,
@@ -81,11 +82,14 @@ class OnPolicyRFTDataset:
                     tokenizer=tokenizer,
                 )
 
-            cached_result = _collect_on_rank0_and_broadcast(
+            collected_result = _collect_on_rank0_and_broadcast(
                 torch_module=torch,
                 collect_fn=_collect_once,
             )
-            _ONPOLICY_RFT_CACHE[cache_key] = cached_result
+            if _selected_sample_count(collected_result) < 1:
+                raise ValueError("OnPolicyRFTDataset produced zero selected rows for training.")
+            _ONPOLICY_RFT_CACHE[cache_key] = collected_result
+            cached_result = collected_result
 
         sft_batch = _as_mapping(cached_result["sft_batch"])
         tensors = _as_mapping(sft_batch["tensors"])
@@ -98,6 +102,7 @@ class OnPolicyRFTDataset:
         if max_samples > 0:
             sample_count = min(sample_count, max_samples)
         if sample_count < 1:
+            _ONPOLICY_RFT_CACHE.pop(cache_key, None)
             raise ValueError("OnPolicyRFTDataset produced zero selected rows for training.")
 
         self._samples: list[dict[str, Any]] = []
@@ -133,6 +138,18 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
     raise ValueError("Expected mapping-like configuration payload.")
+
+
+def _selected_sample_count(result: Mapping[str, Any]) -> int:
+    try:
+        sft_batch = _as_mapping(result.get("sft_batch"))
+        tensors = _as_mapping(sft_batch.get("tensors"))
+    except ValueError:
+        return 0
+    input_ids = tensors.get("input_ids")
+    if not isinstance(input_ids, Sequence) or isinstance(input_ids, (str, bytes)):
+        return 0
+    return len(input_ids)
 
 
 def _as_rows(value: Any, *, label: str) -> list[list[int]]:
