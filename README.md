@@ -14,8 +14,9 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 - RFT checkpoint writes require explicit `global_step` to avoid accidental step-directory reuse.
 - RFT checkpoint argument validation is fail-fast: invalid checkpoint inputs raise before rollout/training side effects.
 - On-policy RFT output artifacts include `rollout_rows.jsonl` and `rollout_artifact_summary.json` (task IDs, task-image pairs, and trajectory counts) when `data.on_policy.output_dir` is set.
-- Live runtime handoff orchestration is centralized in `src/verl_integration/rft_runtime.py` and emits `rft_runtime_manifest.json` with selected/rejected counts and rejection-reason tallies.
-- RFT rejection-policy logic is centralized in `src/verl_integration/rft_rejection.py` with typed selection outputs/signatures.
+- Live runtime handoff orchestration is centralized in `src/trainer/rft_runtime.py` and emits `rft_runtime_manifest.json` with selected/rejected counts and rejection-reason tallies.
+- RFT rejection-policy logic is centralized in `src/trainer/rft_rejection.py` with typed selection outputs/signatures.
+- `src/verl_integration/` keeps thin compatibility wrappers for trainer-owned runtime/handoff modules.
 
 ## Layout
 - `src/schemas/`: frozen JSON schema contracts + typed protocol models.

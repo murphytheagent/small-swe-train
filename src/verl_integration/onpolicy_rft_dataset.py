@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME
-from verl_integration.rft_runtime import (
+from trainer.rft_runtime import (
     OnPolicyRFTRuntimeRequest,
     collect_onpolicy_rft_runtime_batch,
 )

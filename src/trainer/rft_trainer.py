@@ -18,11 +18,11 @@ from rollout.onpolicy_collector import (
     PoolFactory,
 )
 from trainer.common import SDPOTrainerConfig, TrainingStepStats
-from verl_integration.mask_injector import inject_response_mask
-from verl_integration.onpolicy_rollout_adapter import (
+from trainer.rft_handoff import (
     build_onpolicy_collector,
     collect_rft_sft_batch_for_steps,
 )
+from verl_integration.mask_injector import inject_response_mask
 
 
 @dataclass(frozen=True)

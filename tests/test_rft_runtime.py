@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-import verl_integration.rft_runtime as rft_runtime_module
-from verl_integration.rft_runtime import (
+import trainer.rft_runtime as rft_runtime_module
+from trainer.rft_runtime import (
     OnPolicyRFTRuntimeRequest,
     collect_onpolicy_rft_runtime_batch,
 )
