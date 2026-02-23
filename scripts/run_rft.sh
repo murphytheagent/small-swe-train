@@ -116,9 +116,7 @@ RFT_INITIAL_MODEL="${RFT_INITIAL_MODEL:-${DEFAULT_VLLM_MODEL}}"
 _resolve_default_vllm_parallel_sizes() {
   local nproc="$1"
   local default_tp=1
-  if (( nproc >= 8 )); then
-    default_tp=4
-  elif (( nproc >= 4 )); then
+  if (( nproc >= 4 )); then
     default_tp=2
   fi
   if (( nproc % default_tp != 0 )); then

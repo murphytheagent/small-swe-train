@@ -43,8 +43,8 @@ def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
         "trainer.total_training_steps=1",
         env_overrides={"NPROC_PER_NODE": "8"},
     )
-    assert "--tensor-parallel-size 4" in result.stdout
-    assert "--data-parallel-size 2" in result.stdout
+    assert "--tensor-parallel-size 2" in result.stdout
+    assert "--data-parallel-size 4" in result.stdout
 
 
 def test_run_rft_script_dry_run_allows_explicit_tp_override() -> None:
