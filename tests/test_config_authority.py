@@ -57,6 +57,7 @@ def test_on_policy_runtime_defaults_load_from_central_json() -> None:
     assert on_policy["attempts_per_task"] >= 1
     assert on_policy["env_pool_size"] >= on_policy["task_batch_size"]
     assert on_policy["max_in_flight_tasks"] >= 1
+    assert on_policy["max_in_flight_tasks"] == on_policy["task_batch_size"]
 
 
 def test_on_policy_data_defaults_load_from_configs_data() -> None:
@@ -74,6 +75,7 @@ def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     assert settings.runtime.env_pool_size >= settings.runtime.task_batch_size
     assert settings.runtime.max_tool_calls_per_turn <= config.MAX_TOOL_CALLS_PER_TURN
     assert settings.runtime.max_in_flight_tasks >= 1
+    assert settings.runtime.max_in_flight_tasks == settings.runtime.task_batch_size
 
 
 def test_rft_runtime_defaults_load_loop_and_vllm_config() -> None:

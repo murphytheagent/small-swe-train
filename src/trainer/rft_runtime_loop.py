@@ -62,6 +62,7 @@ class RFTLoopConfig:
     vllm_extra_args: tuple[str, ...]
     trainer_overrides: tuple[str, ...]
     dry_run: bool
+    collector_max_in_flight_tasks: int | None = None
 
 
 class VLLMServerController:
@@ -139,7 +140,10 @@ class VLLMServerController:
 def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     vllm_logs = config.output_dir / "vllm_server.log"
-    collector_max_in_flight_tasks = max(1, min(config.task_batch_size, config.nproc_per_node))
+    collector_max_in_flight_tasks = config.collector_max_in_flight_tasks
+    if collector_max_in_flight_tasks is None:
+        collector_max_in_flight_tasks = config.task_batch_size
+    collector_max_in_flight_tasks = max(1, min(collector_max_in_flight_tasks, config.task_batch_size))
     runtime_manifest: dict[str, Any] = {
         "generated_utc": _utc_now(),
         "config": {
@@ -175,6 +179,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             vllm_controller.start(model_path=current_model_path)
 
         for step_index in range(config.rft_steps):
+            step_start = time.monotonic()
             step_dir = config.output_dir / f"rft_step_{step_index:05d}"
             collector_dir = step_dir / "collector_artifacts"
             parquet_path = step_dir / "accepted_trajectories.parquet"
@@ -195,10 +200,12 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 },
                 output_dir=str(collector_dir),
             )
+            collect_start = time.monotonic()
             handoff = collect_onpolicy_rft_runtime_batch(
                 request=request,
                 tokenizer=tokenizer,
             )
+            collect_duration_sec = time.monotonic() - collect_start
             selected_rows = _coerce_rows(handoff.get("selected_rows"))
             rejected_rows = _coerce_rows(handoff.get("rejected_rows"))
             selected_count_raw = len(selected_rows)
@@ -208,6 +215,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             trainer_command: list[str] | None = None
             latest_hf_checkpoint: Path | None = None
             pruned_global_step_checkpoints: list[Path] = []
+            trainer_duration_sec: float | None = None
             trainer_skipped = False
             skip_reason: str | None = None
 
@@ -249,7 +257,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
 
                 if config.manage_vllm:
                     vllm_controller.stop()
+                trainer_start = time.monotonic()
                 _run_command(trainer_command, cwd=config.project_root)
+                trainer_duration_sec = time.monotonic() - trainer_start
 
                 latest_hf_checkpoint = resolve_latest_hf_checkpoint(trainer_checkpoint_root)
                 pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
@@ -285,6 +295,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "trainer_skipped": trainer_skipped,
                 "skip_reason": skip_reason,
                 "effective_train_batch_size": effective_train_batch_size,
+                "collector_duration_sec": collect_duration_sec,
+                "trainer_duration_sec": trainer_duration_sec,
+                "step_duration_sec": time.monotonic() - step_start,
                 "train_parquet": str(parquet_path),
                 "trainer_checkpoint_root": str(trainer_checkpoint_root),
                 "latest_hf_checkpoint": str(latest_hf_checkpoint) if latest_hf_checkpoint else None,
@@ -545,6 +558,8 @@ def _print_dry_run_plan(config: RFTLoopConfig) -> None:
         f"steps={config.rft_steps}",
         f"samples_per_task={config.samples_per_task}",
         f"task_batch_size={config.task_batch_size}",
+        "collector_max_in_flight_tasks="
+        f"{config.collector_max_in_flight_tasks or config.task_batch_size}",
         f"checkpoint_keep_last={config.checkpoint_keep_last}",
     )
     if config.manage_vllm:
@@ -731,6 +746,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
     parser.add_argument("--rft-steps", type=int, required=True)
     parser.add_argument("--samples-per-task", type=int, required=True)
     parser.add_argument("--task-batch-size", type=int, required=True)
+    parser.add_argument(
+        "--collector-max-in-flight-tasks",
+        type=int,
+        default=None,
+        help=(
+            "optional override for collector task-dispatch concurrency; "
+            "defaults to task-batch-size."
+        ),
+    )
     parser.add_argument("--sft-num-epoch-per-batch", type=int, required=True)
     parser.add_argument("--checkpoint-keep-last", type=int, default=1)
     parser.add_argument("--train-batch-size", type=int, required=True)
@@ -763,6 +787,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         raise ValueError("--samples-per-task must be >= 1.")
     if args.task_batch_size < 1:
         raise ValueError("--task-batch-size must be >= 1.")
+    if args.collector_max_in_flight_tasks is not None and args.collector_max_in_flight_tasks < 1:
+        raise ValueError("--collector-max-in-flight-tasks must be >= 1 when provided.")
     if args.sft_num_epoch_per_batch < 1:
         raise ValueError("--sft-num-epoch-per-batch must be >= 1.")
     if args.checkpoint_keep_last < 1:
@@ -801,6 +827,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         vllm_extra_args=tuple(shlex.split(str(args.vllm_extra_args))),
         trainer_overrides=tuple(str(item) for item in args.trainer_override),
         dry_run=bool(args.dry_run),
+        collector_max_in_flight_tasks=(
+            int(args.collector_max_in_flight_tasks)
+            if args.collector_max_in_flight_tasks is not None
+            else None
+        ),
     )
 
 

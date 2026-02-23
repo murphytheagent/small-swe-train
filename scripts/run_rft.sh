@@ -37,6 +37,9 @@ RFT_VLLM_LAUNCH_MODULE="${RFT_VLLM_LAUNCH_MODULE:-trainer.vllm_api_server_entry}
 RFT_VLLM_READY_TIMEOUT_SEC="${RFT_VLLM_READY_TIMEOUT_SEC:-180}"
 RFT_VLLM_STOP_TIMEOUT_SEC="${RFT_VLLM_STOP_TIMEOUT_SEC:-30}"
 RFT_VLLM_EXTRA_ARGS="${RFT_VLLM_EXTRA_ARGS:-}"
+RFT_VLLM_TP_SIZE="${RFT_VLLM_TP_SIZE:-}"
+RFT_VLLM_DP_SIZE="${RFT_VLLM_DP_SIZE:-}"
+RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS:-}"
 RFT_DATA_CONFIG_NAME="${RFT_DATA_CONFIG_NAME:-on_policy_swe_smith}"
 RFT_TURN_GENERATOR_MODE="${RFT_TURN_GENERATOR_MODE:-default}"
 
@@ -109,8 +112,40 @@ RFT_BATCH_SIZE="${RFT_BATCH_SIZE:-$((SAMPLES_PER_TASK * RFT_TASK_BATCH_SIZE))}"
 RFT_TRAIN_BATCH_SIZE="${RFT_TRAIN_BATCH_SIZE:-${DEFAULT_RFT_TRAIN_BATCH_SIZE}}"
 RFT_OUTPUT_DIR="${RFT_OUTPUT_DIR:-${PROJECT_ROOT}/outputs/rft_runtime}"
 RFT_INITIAL_MODEL="${RFT_INITIAL_MODEL:-${DEFAULT_VLLM_MODEL}}"
+
+_resolve_default_vllm_parallel_sizes() {
+  local nproc="$1"
+  local default_tp=1
+  if (( nproc >= 8 )); then
+    default_tp=4
+  elif (( nproc >= 4 )); then
+    default_tp=2
+  fi
+  if (( nproc % default_tp != 0 )); then
+    default_tp=1
+  fi
+  local default_dp=$(( nproc / default_tp ))
+  if (( default_dp < 1 )); then
+    default_dp=1
+  fi
+  echo "${default_tp} ${default_dp}"
+}
+
+read -r DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE <<<"$(_resolve_default_vllm_parallel_sizes "${NPROC_PER_NODE}")"
+RFT_VLLM_TP_SIZE="${RFT_VLLM_TP_SIZE:-${DEFAULT_VLLM_TP_SIZE}}"
+if [[ -z "${RFT_VLLM_DP_SIZE}" ]]; then
+  if (( NPROC_PER_NODE % RFT_VLLM_TP_SIZE == 0 )); then
+    RFT_VLLM_DP_SIZE="$(( NPROC_PER_NODE / RFT_VLLM_TP_SIZE ))"
+  else
+    RFT_VLLM_DP_SIZE="1"
+  fi
+fi
+
 if [[ -z "${RFT_VLLM_EXTRA_ARGS}" ]]; then
-  RFT_VLLM_EXTRA_ARGS="--tensor-parallel-size ${NPROC_PER_NODE}"
+  RFT_VLLM_EXTRA_ARGS="--tensor-parallel-size ${RFT_VLLM_TP_SIZE}"
+  if (( RFT_VLLM_DP_SIZE > 1 )); then
+    RFT_VLLM_EXTRA_ARGS="${RFT_VLLM_EXTRA_ARGS} --data-parallel-size ${RFT_VLLM_DP_SIZE}"
+  fi
 fi
 
 export SMALL_SWE_VLLM_BASE_URL="${SMALL_SWE_VLLM_BASE_URL:-${DEFAULT_VLLM_BASE_URL}}"
@@ -184,6 +219,10 @@ LOOP_CMD=(
   --vllm-stop-timeout-sec "${RFT_VLLM_STOP_TIMEOUT_SEC}"
   --vllm-extra-args "${RFT_VLLM_EXTRA_ARGS}"
 )
+
+if [[ -n "${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}" ]]; then
+  LOOP_CMD+=(--collector-max-in-flight-tasks "${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}")
+fi
 
 if [[ "${RFT_MANAGE_VLLM}" == "0" ]]; then
   LOOP_CMD+=(--skip-vllm-management)

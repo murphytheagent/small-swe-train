@@ -57,7 +57,7 @@ class OnPolicyRuntimeConfig:
     container_start_timeout_sec: int
     attempt_timeout_sec: int
     max_tool_calls_per_turn: int
-    max_in_flight_tasks: int = 1
+    max_in_flight_tasks: int = 4
 
 
 @dataclass(frozen=True)
@@ -287,45 +287,55 @@ def _parse_on_policy_data_config(payload: Mapping[str, Any]) -> OnPolicyDataConf
 
 
 def _parse_on_policy_runtime_config(payload: Mapping[str, Any]) -> OnPolicyRuntimeConfig:
+    task_batch_size = _coerce_positive_int(
+        payload.get("task_batch_size"),
+        label="on_policy.task_batch_size",
+    )
+    attempts_per_task = _coerce_positive_int(
+        payload.get("attempts_per_task"),
+        label="on_policy.attempts_per_task",
+    )
+    max_turns_per_attempt = _coerce_positive_int(
+        payload.get("max_turns_per_attempt"),
+        label="on_policy.max_turns_per_attempt",
+    )
+    env_pool_size = _coerce_positive_int(
+        payload.get("env_pool_size"),
+        label="on_policy.env_pool_size",
+    )
+    tool_timeout_sec = _coerce_positive_int(
+        payload.get("tool_timeout_sec"),
+        label="on_policy.tool_timeout_sec",
+    )
+    container_start_timeout_sec = _coerce_positive_int(
+        payload.get("container_start_timeout_sec"),
+        label="on_policy.container_start_timeout_sec",
+    )
+    attempt_timeout_sec = _coerce_positive_int(
+        payload.get("attempt_timeout_sec"),
+        label="on_policy.attempt_timeout_sec",
+    )
+    max_tool_calls_per_turn = _coerce_positive_int(
+        payload.get("max_tool_calls_per_turn"),
+        label="on_policy.max_tool_calls_per_turn",
+    )
+    max_in_flight_tasks = _coerce_positive_int(
+        payload.get("max_in_flight_tasks", task_batch_size),
+        label="on_policy.max_in_flight_tasks",
+    )
+
     runtime = OnPolicyRuntimeConfig(
         enabled=_coerce_bool(payload.get("enabled"), label="on_policy.enabled"),
         rollout_only=_coerce_bool(payload.get("rollout_only"), label="on_policy.rollout_only"),
-        task_batch_size=_coerce_positive_int(
-            payload.get("task_batch_size"),
-            label="on_policy.task_batch_size",
-        ),
-        attempts_per_task=_coerce_positive_int(
-            payload.get("attempts_per_task"),
-            label="on_policy.attempts_per_task",
-        ),
-        max_turns_per_attempt=_coerce_positive_int(
-            payload.get("max_turns_per_attempt"),
-            label="on_policy.max_turns_per_attempt",
-        ),
-        env_pool_size=_coerce_positive_int(
-            payload.get("env_pool_size"),
-            label="on_policy.env_pool_size",
-        ),
-        tool_timeout_sec=_coerce_positive_int(
-            payload.get("tool_timeout_sec"),
-            label="on_policy.tool_timeout_sec",
-        ),
-        container_start_timeout_sec=_coerce_positive_int(
-            payload.get("container_start_timeout_sec"),
-            label="on_policy.container_start_timeout_sec",
-        ),
-        attempt_timeout_sec=_coerce_positive_int(
-            payload.get("attempt_timeout_sec"),
-            label="on_policy.attempt_timeout_sec",
-        ),
-        max_tool_calls_per_turn=_coerce_positive_int(
-            payload.get("max_tool_calls_per_turn"),
-            label="on_policy.max_tool_calls_per_turn",
-        ),
-        max_in_flight_tasks=_coerce_positive_int(
-            payload.get("max_in_flight_tasks", 1),
-            label="on_policy.max_in_flight_tasks",
-        ),
+        task_batch_size=task_batch_size,
+        attempts_per_task=attempts_per_task,
+        max_turns_per_attempt=max_turns_per_attempt,
+        env_pool_size=env_pool_size,
+        tool_timeout_sec=tool_timeout_sec,
+        container_start_timeout_sec=container_start_timeout_sec,
+        attempt_timeout_sec=attempt_timeout_sec,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
+        max_in_flight_tasks=max_in_flight_tasks,
     )
 
     if runtime.env_pool_size < runtime.task_batch_size:
