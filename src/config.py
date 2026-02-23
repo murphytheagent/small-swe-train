@@ -376,6 +376,11 @@ def resolve_on_policy_settings(
     runtime_payload = on_policy_runtime_defaults()
     if runtime_overrides is not None:
         runtime_payload.update(runtime_overrides)
+        if (
+            "task_batch_size" in runtime_overrides
+            and "max_in_flight_tasks" not in runtime_overrides
+        ):
+            runtime_payload["max_in_flight_tasks"] = runtime_payload["task_batch_size"]
 
     data_payload = on_policy_data_defaults(data_config_name)
     if data_overrides is not None:

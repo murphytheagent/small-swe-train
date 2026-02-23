@@ -78,6 +78,29 @@ def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     assert settings.runtime.max_in_flight_tasks == settings.runtime.task_batch_size
 
 
+def test_resolve_on_policy_settings_aligns_in_flight_with_task_batch_override() -> None:
+    settings = config.resolve_on_policy_settings(
+        runtime_overrides={
+            "task_batch_size": 8,
+            "env_pool_size": 8,
+        },
+    )
+    assert settings.runtime.task_batch_size == 8
+    assert settings.runtime.max_in_flight_tasks == 8
+
+
+def test_resolve_on_policy_settings_respects_explicit_in_flight_override() -> None:
+    settings = config.resolve_on_policy_settings(
+        runtime_overrides={
+            "task_batch_size": 8,
+            "env_pool_size": 8,
+            "max_in_flight_tasks": 3,
+        },
+    )
+    assert settings.runtime.task_batch_size == 8
+    assert settings.runtime.max_in_flight_tasks == 3
+
+
 def test_rft_runtime_defaults_load_loop_and_vllm_config() -> None:
     runtime_defaults = config.rft_runtime_defaults()
     assert runtime_defaults["loop"]["steps"] >= 1
