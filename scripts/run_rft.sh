@@ -22,6 +22,9 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
 fi
 NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 NNODES="${NNODES:-1}"
+# Grounded defaults:
+# - verl SFT trainer entrypoint: https://github.com/lasgroup/SDPO/blob/main/verl/trainer/fsdp_sft_trainer.py
+# - vLLM OpenAI server entrypoint: https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
 RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE:-verl.trainer.fsdp_sft_trainer}"
 RFT_TASK_NAME="${RFT_TASK_NAME:-small-swe-rft}"
 RFT_RUNTIME_MODE="${RFT_RUNTIME_MODE:-loop}"

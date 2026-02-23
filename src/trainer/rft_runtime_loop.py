@@ -21,6 +21,12 @@ from trainer.rft_multiturn_dataset import write_selected_rows_to_multiturn_parqu
 from trainer.rft_runtime import OnPolicyRFTRuntimeRequest, collect_onpolicy_rft_runtime_batch
 
 _GLOBAL_STEP_PATTERN = re.compile(r"^global_step_(\d+)$")
+_VERL_SFT_TRAINER_DOC = (
+    "https://github.com/lasgroup/SDPO/blob/main/verl/trainer/fsdp_sft_trainer.py"
+)
+_VLLM_OPENAI_SERVER_DOC = (
+    "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html"
+)
 
 
 @dataclass(frozen=True)
@@ -53,7 +59,12 @@ class RFTLoopConfig:
 
 
 class VLLMServerController:
-    """Manage an OpenAI-compatible vLLM server process for the RFT loop."""
+    """Manage an OpenAI-compatible vLLM server process for the RFT loop.
+
+    Grounding: vLLM serves OpenAI-compatible chat/completions via
+    `python -m vllm.entrypoints.openai.api_server` as documented in:
+    https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+    """
 
     def __init__(self, *, config: RFTLoopConfig, log_path: Path) -> None:
         self._config = config
@@ -237,6 +248,12 @@ def build_trainer_step_command(
     sft_num_epoch_per_batch: int,
     trainer_overrides: Sequence[str],
 ) -> list[str]:
+    """Build the documented verl SFT trainer launch command.
+
+    Grounding: SDPO/verl SFT entrypoint (`torchrun -m verl.trainer.fsdp_sft_trainer`)
+    in project source/docs:
+    https://github.com/lasgroup/SDPO/blob/main/verl/trainer/fsdp_sft_trainer.py
+    """
     required_overrides = [
         f"trainer.total_epochs={sft_num_epoch_per_batch}",
         f"trainer.n_gpus_per_node={nproc_per_node}",
@@ -282,6 +299,11 @@ def build_vllm_server_command(
     served_model_name: str,
     extra_args: Sequence[str],
 ) -> list[str]:
+    """Build the documented vLLM OpenAI-compatible API server launch command.
+
+    Grounding:
+    https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+    """
     parsed = urlparse(base_url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError(f"vLLM base URL must include http/https scheme, got {base_url!r}.")
@@ -449,7 +471,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
     parser.add_argument("--project-root", required=True)
     parser.add_argument("--config-dir", required=True)
     parser.add_argument("--config-name", default="rft_swe")
-    parser.add_argument("--trainer-module", default="verl.trainer.fsdp_sft_trainer")
+    parser.add_argument(
+        "--trainer-module",
+        default="verl.trainer.fsdp_sft_trainer",
+        help=f"verl trainer module (see {_VERL_SFT_TRAINER_DOC})",
+    )
     parser.add_argument("--python-bin", default=sys.executable)
     parser.add_argument("--nnodes", type=int, default=1)
     parser.add_argument("--nproc-per-node", type=int, default=1)
@@ -467,6 +493,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
     parser.add_argument(
         "--vllm-launch-module",
         default="vllm.entrypoints.openai.api_server",
+        help=f"vLLM OpenAI server module (see {_VLLM_OPENAI_SERVER_DOC})",
     )
     parser.add_argument("--vllm-ready-timeout-sec", type=int, default=180)
     parser.add_argument("--vllm-stop-timeout-sec", type=int, default=30)
