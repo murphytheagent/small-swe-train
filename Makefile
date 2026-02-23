@@ -36,7 +36,7 @@ ensure-flash-attn:
 rebuild-flash-attn:
 	@echo "Rebuilding flash-attn from source against current torch..."
 	$(UV) pip install --python $(VENV_PYTHON) "setuptools>=80.0" "wheel>=0.46.0" "packaging>=24.0" "ninja>=1.13.0"
-	$(UV) pip uninstall --python $(VENV_PYTHON) -y $(FLASH_ATTN_PACKAGE) || true
+	$(UV) pip uninstall --python $(VENV_PYTHON) $(FLASH_ATTN_PACKAGE) || true
 	MAX_JOBS=$(CORES) TORCH_CUDA_ARCH_LIST=$(FLASH_ATTN_CUDA_ARCHS) FLASH_ATTN_CUDA_ARCHS=$(FLASH_ATTN_CUDA_ARCHS) FLASH_ATTENTION_FORCE_BUILD=1 \
 	$(UV) pip install --python $(VENV_PYTHON) --no-build-isolation --no-cache --no-binary $(FLASH_ATTN_PACKAGE) --reinstall-package $(FLASH_ATTN_PACKAGE) $(FLASH_ATTN_PACKAGE)
 
