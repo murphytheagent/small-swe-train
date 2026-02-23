@@ -8,6 +8,7 @@ import pytest
 
 import trainer.rft_runtime_loop as rft_runtime_loop
 from trainer.rft_runtime_loop import (
+    RFTLoopConfig,
     _is_http_endpoint_ready,
     build_trainer_step_command,
     build_vllm_server_command,
@@ -135,6 +136,140 @@ def test_prune_old_step_checkpoints_scopes_to_current_run_step_dirs(tmp_path: Pa
 
     assert [path.parent.name for path in pruned] == ["rft_step_00000"]
     assert (output_dir / "rft_step_00050" / "trainer_checkpoints").is_dir()
+
+
+def test_run_loop_skips_checkpoint_root_prune_when_trainer_is_skipped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_state = {"collect_calls": 0, "prune_calls": 0}
+
+    def _fake_load_tokenizer(_model_path: str):
+        return object()
+
+    def _fake_collect(*, request, tokenizer):
+        del request, tokenizer
+        step = call_state["collect_calls"]
+        call_state["collect_calls"] += 1
+        if step == 0:
+            return {
+                "selected_rows": [
+                    {
+                        "task_id": "task-1",
+                        "attempt_index": 0,
+                        "step_index": 0,
+                        "turn_index": 0,
+                        "resolved": False,
+                        "format_valid": True,
+                        "final_turn_has_submit": True,
+                        "final_submit_format_valid": True,
+                        "prompt": "Fix bug",
+                        "assistant_response": "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>",
+                        "trajectory_history": [
+                            "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
+                        ],
+                    }
+                ],
+                "rejected_rows": [],
+            }
+        return {
+            "selected_rows": [],
+            "rejected_rows": [{"task_id": "task-2", "rft_rejection_reason": "non_terminal"}],
+        }
+
+    def _fake_write_selected_rows(_rows, parquet_path: Path):
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        parquet_path.write_text("stub", encoding="utf-8")
+        return 1
+
+    def _fake_build_trainer_step_command(**kwargs):
+        trainer_output_dir = Path(kwargs["trainer_output_dir"])
+        return ["fake-trainer", str(trainer_output_dir)]
+
+    def _fake_run_command(command, *, cwd: Path):
+        del cwd
+        trainer_output_dir = Path(command[1])
+        (trainer_output_dir / "global_step_1" / "huggingface").mkdir(parents=True, exist_ok=True)
+
+    def _fake_resolve_latest_hf_checkpoint(checkpoint_root: Path):
+        target = Path(checkpoint_root) / "global_step_1" / "huggingface"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def _fake_prune_old_global_step_checkpoints(*, checkpoint_root, keep_last):
+        del checkpoint_root, keep_last
+        return []
+
+    def _fake_prune_old_step_checkpoints(*, step_dirs, keep_last):
+        del step_dirs, keep_last
+        call_state["prune_calls"] += 1
+        return []
+
+    monkeypatch.setattr(rft_runtime_loop, "_load_tokenizer", _fake_load_tokenizer)
+    monkeypatch.setattr(rft_runtime_loop, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "write_selected_rows_to_multiturn_parquet",
+        _fake_write_selected_rows,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "build_trainer_step_command",
+        _fake_build_trainer_step_command,
+    )
+    monkeypatch.setattr(rft_runtime_loop, "_run_command", _fake_run_command)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "resolve_latest_hf_checkpoint",
+        _fake_resolve_latest_hf_checkpoint,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_global_step_checkpoints",
+        _fake_prune_old_global_step_checkpoints,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_step_checkpoints",
+        _fake_prune_old_step_checkpoints,
+    )
+
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=2,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=1,
+        train_batch_size=1,
+        output_dir=tmp_path / "runtime",
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=False,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+    )
+
+    rft_runtime_loop.run_rft_runtime_loop(config)
+
+    assert call_state["collect_calls"] == 2
+    assert call_state["prune_calls"] == 1
+    summary_path = config.output_dir / "rft_step_00001" / "rft_step_summary.json"
+    assert summary_path.is_file()
+    assert "trainer_skipped" in summary_path.read_text(encoding="utf-8")
 
 
 def test_prune_old_global_step_checkpoints_keeps_latest_steps(tmp_path: Path) -> None:

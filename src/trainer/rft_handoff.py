@@ -109,16 +109,13 @@ def collect_rft_sft_batch_for_steps(
         merged_rows,
         selection_policy=handoff_settings.selection,
     )
-    if not selected_rows:
-        raise ValueError(
-            "RFT handoff selected 0 attempts; all rollouts were rejected. "
-            "Inspect rejection reasons in rejected rows."
+    if selected_rows:
+        sft_batch = build_verl_sft_batch(
+            selected_rows,
+            handoff_settings=handoff_settings,
         )
-
-    sft_batch = build_verl_sft_batch(
-        selected_rows,
-        handoff_settings=handoff_settings,
-    )
+    else:
+        sft_batch = _build_empty_verl_sft_batch(handoff_settings=handoff_settings)
     dataproto_payload = build_dataproto_compatible_payload(sft_batch)
 
     result = {
@@ -342,6 +339,34 @@ def build_verl_sft_batch(
             "selected_count": len(padded_input_ids),
             "max_padded_length": max_length,
             "max_sequence_length_limit": padded_limit,
+        },
+    }
+
+
+def _build_empty_verl_sft_batch(*, handoff_settings: RFTHandoffSettings) -> dict[str, Any]:
+    return {
+        "tensors": {
+            "input_ids": [],
+            "attention_mask": [],
+            "position_ids": [],
+            "loss_mask": [],
+        },
+        "grouping_metadata": {
+            "group_id": [],
+            "task_id": [],
+            "attempt_index": [],
+            "step_index": [],
+            "turn_index": [],
+            "resolved": [],
+            "is_terminal": [],
+            "format_valid": [],
+            "token_labels": [],
+            "original_length": [],
+        },
+        "meta_info": {
+            "selected_count": 0,
+            "max_padded_length": 0,
+            "max_sequence_length_limit": int(handoff_settings.max_sequence_length),
         },
     }
 

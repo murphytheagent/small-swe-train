@@ -255,10 +255,12 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 if config.manage_vllm:
                     vllm_controller.start(model_path=current_model_path)
 
-            pruned_checkpoint_roots = prune_old_step_checkpoints(
-                step_dirs=run_step_dirs,
-                keep_last=config.checkpoint_keep_last,
-            )
+            pruned_checkpoint_roots: list[Path] = []
+            if latest_hf_checkpoint is not None:
+                pruned_checkpoint_roots = prune_old_step_checkpoints(
+                    step_dirs=run_step_dirs,
+                    keep_last=config.checkpoint_keep_last,
+                )
             pruned_step_payloads = prune_old_step_payloads(
                 step_dirs=run_step_dirs,
                 keep_last=config.checkpoint_keep_last,

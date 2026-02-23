@@ -13,8 +13,6 @@ import sys
 from collections.abc import Callable
 from importlib.machinery import ModuleSpec
 
-_ORIGINAL_IMPORT = builtins.__import__
-
 
 def _coerce_bool_env(name: str, *, default: bool) -> bool:
     value = os.environ.get(name)
@@ -44,6 +42,8 @@ def _install_flash_attn_import_guard() -> None:
     if getattr(current, "__name__", "") == "_small_swe_guarded_import":
         return
 
+    original_import = current
+
     def _small_swe_guarded_import(
         name: str,
         globals: dict[str, object] | None = None,
@@ -55,7 +55,7 @@ def _install_flash_attn_import_guard() -> None:
             raise ModuleNotFoundError(
                 "No module named 'flash_attn' (hidden by SMALL_SWE_HIDE_EXTERNAL_FLASH_ATTN)"
             )
-        return _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
+        return original_import(name, globals, locals, fromlist, level)
 
     builtins.__import__ = _small_swe_guarded_import
 

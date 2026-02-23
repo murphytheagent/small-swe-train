@@ -45,3 +45,24 @@ def test_sitecustomize_can_hide_external_flash_attn(monkeypatch) -> None:
             sys.modules.pop("flash_attn.flash_attn_interface", None)
         else:
             sys.modules["flash_attn.flash_attn_interface"] = original_child
+
+
+def test_sitecustomize_preserves_existing_import_wrapper(monkeypatch) -> None:
+    calls = {"count": 0}
+    original_import = builtins.__import__
+
+    def _wrapped_import(name, globals=None, locals=None, fromlist=(), level=0):
+        calls["count"] += 1
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setenv("SMALL_SWE_HIDE_EXTERNAL_FLASH_ATTN", "1")
+    builtins.__import__ = _wrapped_import
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+        with pytest.raises(ModuleNotFoundError):
+            builtins.__import__("flash_attn")
+        builtins.__import__("math")
+    finally:
+        builtins.__import__ = original_import
+
+    assert calls["count"] >= 1
