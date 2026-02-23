@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=80.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -17,17 +17,18 @@ dev = [
   "pytest>=8.3",
 ]
 train = [
-  "torch>=2.5.1",
-  "transformers>=4.46",
-  "flash-attn>=2.7",
-  "peft>=0.13",
+  "torch>=2.9.1",
+  "transformers>=4.57.3",
+  "flash-attn>=2.8.3",
+  "peft>=0.18",
   "vllm>=0.8.4",
-  "datasets>=3.0",
+  "datasets>=4.4.2",
   "ray>=2.40",
   "verl @ git+https://github.com/lasgroup/SDPO.git",
   "omegaconf>=2.3",
   "hydra-core>=1.3",
-  "wandb>=0.19",
+  "wandb>=0.23.1",
+  "ninja>=1.13.0", # Added to accelerate the C++ compilation
 ]
 
 [tool.setuptools]
@@ -43,3 +44,11 @@ where = ["src"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
+
+# --- New uv configuration ---
+[tool.uv]
+package = true
+
+[tool.uv.extra-build-dependencies]
+# This guarantees torch is in the isolated build environment BEFORE compiling flash-attn
+flash-attn = ["torch>=2.9.1"]
