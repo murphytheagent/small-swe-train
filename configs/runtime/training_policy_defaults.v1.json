@@ -120,6 +120,7 @@
       "steps": 100,
       "samples_per_task": 8,
       "task_batch_size": 128,
+      "train_batch_size": 1024,
       "checkpoint_keep_last": 1
     },
     "vllm": {

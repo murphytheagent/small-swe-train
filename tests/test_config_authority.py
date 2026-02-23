@@ -79,6 +79,7 @@ def test_rft_runtime_defaults_load_loop_and_vllm_config() -> None:
     assert runtime_defaults["loop"]["steps"] >= 1
     assert runtime_defaults["loop"]["samples_per_task"] >= 1
     assert runtime_defaults["loop"]["task_batch_size"] >= 1
+    assert runtime_defaults["loop"]["train_batch_size"] >= 1
     assert runtime_defaults["loop"]["checkpoint_keep_last"] >= 1
     assert runtime_defaults["vllm"]["base_url"].startswith("http://")
 

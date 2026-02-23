@@ -67,6 +67,7 @@ samples_per_task = _positive_int(loop.get("samples_per_task"), 1)
 task_batch_size = _positive_int(loop.get("task_batch_size"), 1)
 sft_num_epoch_per_batch = _positive_int(loop.get("sft_num_epoch_per_batch"), 1)
 checkpoint_keep_last = _positive_int(loop.get("checkpoint_keep_last"), 1)
+train_batch_size = _positive_int(loop.get("train_batch_size"), samples_per_task * task_batch_size)
 
 base_url = vllm.get("base_url")
 if not isinstance(base_url, str) or not base_url.strip():
@@ -85,6 +86,7 @@ print(
     task_batch_size,
     sft_num_epoch_per_batch,
     checkpoint_keep_last,
+    train_batch_size,
     base_url.strip(),
     model_name.strip(),
     request_timeout_sec,
@@ -96,7 +98,7 @@ PY
 }
 
 RFT_DEFAULTS="$(_load_rft_runtime_defaults)"
-read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P <<<"${RFT_DEFAULTS}"
+read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P <<<"${RFT_DEFAULTS}"
 
 RFT_STEPS="${RFT_STEPS:-${DEFAULT_RFT_STEPS}}"
 SAMPLES_PER_TASK="${SAMPLES_PER_TASK:-${DEFAULT_SAMPLES_PER_TASK}}"
@@ -104,7 +106,7 @@ RFT_TASK_BATCH_SIZE="${RFT_TASK_BATCH_SIZE:-${DEFAULT_RFT_TASK_BATCH_SIZE}}"
 RFT_SFT_NUM_EPOCH_PER_BATCH="${RFT_SFT_NUM_EPOCH_PER_BATCH:-${DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH}}"
 RFT_CHECKPOINT_KEEP_LAST="${RFT_CHECKPOINT_KEEP_LAST:-${DEFAULT_RFT_CHECKPOINT_KEEP_LAST}}"
 RFT_BATCH_SIZE="${RFT_BATCH_SIZE:-$((SAMPLES_PER_TASK * RFT_TASK_BATCH_SIZE))}"
-RFT_TRAIN_BATCH_SIZE="${RFT_TRAIN_BATCH_SIZE:-${RFT_BATCH_SIZE}}"
+RFT_TRAIN_BATCH_SIZE="${RFT_TRAIN_BATCH_SIZE:-${DEFAULT_RFT_TRAIN_BATCH_SIZE}}"
 RFT_OUTPUT_DIR="${RFT_OUTPUT_DIR:-${PROJECT_ROOT}/outputs/rft_runtime}"
 RFT_INITIAL_MODEL="${RFT_INITIAL_MODEL:-${DEFAULT_VLLM_MODEL}}"
 

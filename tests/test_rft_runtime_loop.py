@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
+import trainer.rft_runtime_loop as rft_runtime_loop
 from trainer.rft_runtime_loop import (
+    _is_http_endpoint_ready,
     build_trainer_step_command,
     build_vllm_server_command,
     prune_old_global_step_checkpoints,
     prune_old_step_checkpoints,
     prune_old_step_payloads,
+    reset_step_artifacts,
     resolve_effective_train_batch_size,
     resolve_latest_hf_checkpoint,
+    upsample_rows_to_min_count,
 )
 
 
@@ -70,10 +76,11 @@ def test_build_vllm_server_command_uses_host_and_port_from_base_url() -> None:
     assert command[-2:] == ["--dtype", "bfloat16"]
 
 
-def test_resolve_latest_hf_checkpoint_returns_highest_global_step(tmp_path: Path) -> None:
-    older = tmp_path / "global_step_8" / "huggingface"
-    newer = tmp_path / "global_step_12" / "huggingface"
+def test_resolve_latest_hf_checkpoint_prefers_most_recent_checkpoint(tmp_path: Path) -> None:
+    older = tmp_path / "global_step_100" / "huggingface"
+    newer = tmp_path / "global_step_3" / "huggingface"
     older.mkdir(parents=True)
+    time.sleep(0.01)
     newer.mkdir(parents=True)
 
     resolved = resolve_latest_hf_checkpoint(tmp_path)
@@ -90,11 +97,14 @@ def test_resolve_latest_hf_checkpoint_requires_huggingface_export(tmp_path: Path
 
 def test_prune_old_step_checkpoints_keeps_latest_roots(tmp_path: Path) -> None:
     output_dir = tmp_path / "rft_runtime"
+    step_dirs: list[Path] = []
     for step in range(4):
-        checkpoint_root = output_dir / f"rft_step_{step:05d}" / "trainer_checkpoints"
+        step_dir = output_dir / f"rft_step_{step:05d}"
+        checkpoint_root = step_dir / "trainer_checkpoints"
         (checkpoint_root / "global_step_1" / "huggingface").mkdir(parents=True)
+        step_dirs.append(step_dir)
 
-    pruned = prune_old_step_checkpoints(output_dir=output_dir, keep_last=2)
+    pruned = prune_old_step_checkpoints(step_dirs=step_dirs, keep_last=2)
 
     assert [path.parent.name for path in pruned] == ["rft_step_00000", "rft_step_00001"]
     assert not (output_dir / "rft_step_00000" / "trainer_checkpoints").exists()
@@ -105,20 +115,40 @@ def test_prune_old_step_checkpoints_keeps_latest_roots(tmp_path: Path) -> None:
 
 def test_prune_old_step_checkpoints_requires_positive_keep_last(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="keep_last must be >= 1"):
-        prune_old_step_checkpoints(output_dir=tmp_path, keep_last=0)
+        prune_old_step_checkpoints(step_dirs=[tmp_path], keep_last=0)
+
+
+def test_prune_old_step_checkpoints_scopes_to_current_run_step_dirs(tmp_path: Path) -> None:
+    output_dir = tmp_path / "rft_runtime"
+    stale_dir = output_dir / "rft_step_00050" / "trainer_checkpoints"
+    (stale_dir / "global_step_1" / "huggingface").mkdir(parents=True)
+
+    current_steps: list[Path] = []
+    for step in range(2):
+        step_dir = output_dir / f"rft_step_{step:05d}"
+        checkpoint_root = step_dir / "trainer_checkpoints"
+        (checkpoint_root / "global_step_1" / "huggingface").mkdir(parents=True)
+        current_steps.append(step_dir)
+
+    pruned = prune_old_step_checkpoints(step_dirs=current_steps, keep_last=1)
+
+    assert [path.parent.name for path in pruned] == ["rft_step_00000"]
+    assert (output_dir / "rft_step_00050" / "trainer_checkpoints").is_dir()
 
 
 def test_prune_old_global_step_checkpoints_keeps_latest_steps(tmp_path: Path) -> None:
     checkpoint_root = tmp_path / "trainer_checkpoints"
-    for step in (1, 3, 5):
-        (checkpoint_root / f"global_step_{step}" / "huggingface").mkdir(parents=True)
+    newest = checkpoint_root / "global_step_1" / "huggingface"
+    older = checkpoint_root / "global_step_5" / "huggingface"
+    older.mkdir(parents=True)
+    time.sleep(0.01)
+    newest.mkdir(parents=True)
 
     pruned = prune_old_global_step_checkpoints(checkpoint_root=checkpoint_root, keep_last=1)
 
-    assert [path.name for path in pruned] == ["global_step_1", "global_step_3"]
-    assert not (checkpoint_root / "global_step_1").exists()
-    assert not (checkpoint_root / "global_step_3").exists()
-    assert (checkpoint_root / "global_step_5").is_dir()
+    assert [path.name for path in pruned] == ["global_step_5"]
+    assert not (checkpoint_root / "global_step_5").exists()
+    assert (checkpoint_root / "global_step_1").is_dir()
 
 
 def test_prune_old_global_step_checkpoints_requires_positive_keep_last(tmp_path: Path) -> None:
@@ -128,6 +158,7 @@ def test_prune_old_global_step_checkpoints_requires_positive_keep_last(tmp_path:
 
 def test_prune_old_step_payloads_keeps_latest_step_payloads(tmp_path: Path) -> None:
     output_dir = tmp_path / "rft_runtime"
+    step_dirs: list[Path] = []
     for step in range(4):
         step_dir = output_dir / f"rft_step_{step:05d}"
         (step_dir / "collector_artifacts").mkdir(parents=True)
@@ -136,8 +167,9 @@ def test_prune_old_step_payloads_keeps_latest_step_payloads(tmp_path: Path) -> N
             encoding="utf-8",
         )
         (step_dir / "accepted_trajectories.parquet").write_text("stub", encoding="utf-8")
+        step_dirs.append(step_dir)
 
-    pruned = prune_old_step_payloads(output_dir=output_dir, keep_last=2)
+    pruned = prune_old_step_payloads(step_dirs=step_dirs, keep_last=2)
 
     pruned_names = {str(path.relative_to(output_dir)) for path in pruned}
     assert "rft_step_00000/collector_artifacts" in pruned_names
@@ -157,25 +189,34 @@ def test_prune_old_step_payloads_keeps_latest_step_payloads(tmp_path: Path) -> N
 
 def test_prune_old_step_payloads_requires_positive_keep_last(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="keep_last must be >= 1"):
-        prune_old_step_payloads(output_dir=tmp_path, keep_last=0)
+        prune_old_step_payloads(step_dirs=[tmp_path], keep_last=0)
 
 
-def test_resolve_effective_train_batch_size_clamps_to_selected_per_world_size() -> None:
+def test_resolve_effective_train_batch_size_clamps_to_global_selected() -> None:
     resolved = resolve_effective_train_batch_size(
         requested=1024,
         selected_count=48,
         world_size=8,
     )
-    assert resolved == 6
+    assert resolved == 48
 
 
-def test_resolve_effective_train_batch_size_minimum_one() -> None:
+def test_resolve_effective_train_batch_size_enforces_world_size_divisibility_when_possible() -> None:
+    resolved = resolve_effective_train_batch_size(
+        requested=65,
+        selected_count=500,
+        world_size=8,
+    )
+    assert resolved == 64
+
+
+def test_resolve_effective_train_batch_size_allows_tiny_global_batches() -> None:
     resolved = resolve_effective_train_batch_size(
         requested=64,
         selected_count=3,
         world_size=8,
     )
-    assert resolved == 1
+    assert resolved == 3
 
 
 def test_resolve_effective_train_batch_size_rejects_invalid_inputs() -> None:
@@ -185,3 +226,68 @@ def test_resolve_effective_train_batch_size_rejects_invalid_inputs() -> None:
         resolve_effective_train_batch_size(requested=1, selected_count=0, world_size=8)
     with pytest.raises(ValueError, match="world_size"):
         resolve_effective_train_batch_size(requested=1, selected_count=8, world_size=0)
+
+
+def test_upsample_rows_to_min_count_repeats_rows_until_target() -> None:
+    rows = [{"id": 1}, {"id": 2}]
+
+    upsampled = upsample_rows_to_min_count(rows, min_count=5)
+
+    assert len(upsampled) == 5
+    assert [row["id"] for row in upsampled] == [1, 2, 1, 2, 1]
+
+
+def test_upsample_rows_to_min_count_handles_empty_rows() -> None:
+    assert upsample_rows_to_min_count([], min_count=8) == []
+
+
+def test_upsample_rows_to_min_count_rejects_invalid_min_count() -> None:
+    with pytest.raises(ValueError, match="min_count"):
+        upsample_rows_to_min_count([{"id": 1}], min_count=0)
+
+
+def test_reset_step_artifacts_removes_mutable_outputs(tmp_path: Path) -> None:
+    step_dir = tmp_path / "rft_step_00000"
+    (step_dir / "collector_artifacts").mkdir(parents=True)
+    (step_dir / "trainer_checkpoints" / "global_step_1" / "huggingface").mkdir(parents=True)
+    (step_dir / "accepted_trajectories.parquet").write_text("stub", encoding="utf-8")
+    (step_dir / "rft_step_summary.json").write_text("{}", encoding="utf-8")
+
+    reset_step_artifacts(step_dir)
+
+    assert not (step_dir / "collector_artifacts").exists()
+    assert not (step_dir / "trainer_checkpoints").exists()
+    assert not (step_dir / "accepted_trajectories.parquet").exists()
+    assert not (step_dir / "rft_step_summary.json").exists()
+
+
+def test_http_readiness_requires_2xx(monkeypatch) -> None:
+    class _Response:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(rft_runtime_loop, "urlopen", lambda request, timeout: _Response(200))
+    assert _is_http_endpoint_ready("http://127.0.0.1:8000/v1/models") is True
+
+    monkeypatch.setattr(rft_runtime_loop, "urlopen", lambda request, timeout: _Response(404))
+    assert _is_http_endpoint_ready("http://127.0.0.1:8000/v1/models") is False
+
+
+def test_http_readiness_rejects_http_error(monkeypatch) -> None:
+    def _raise_http_error(request, timeout):
+        raise HTTPError(
+            url="http://127.0.0.1:8000/v1/models",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(rft_runtime_loop, "urlopen", _raise_http_error)
+    assert _is_http_endpoint_ready("http://127.0.0.1:8000/v1/models") is False

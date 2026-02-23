@@ -55,3 +55,35 @@ def test_main_installs_find_spec_guard_for_flash_attn(monkeypatch) -> None:
     assert importlib.util.find_spec("flash_attn") is None
     assert importlib.util.find_spec("another_mod") is marker
     assert calls == [("vllm.entrypoints.openai.api_server", "__main__")]
+
+
+def test_clear_cached_flash_attn_modules_removes_parent_and_children() -> None:
+    original_root = vllm_entry.sys.modules.get("flash_attn")
+    original_child = vllm_entry.sys.modules.get("flash_attn.flash_attn_interface")
+    original_other = vllm_entry.sys.modules.get("not_flash_attn")
+    sentinel_root = object()
+    sentinel_child = object()
+    sentinel_other = object()
+    try:
+        vllm_entry.sys.modules["flash_attn"] = sentinel_root
+        vllm_entry.sys.modules["flash_attn.flash_attn_interface"] = sentinel_child
+        vllm_entry.sys.modules["not_flash_attn"] = sentinel_other
+
+        vllm_entry._clear_cached_flash_attn_modules()
+
+        assert "flash_attn" not in vllm_entry.sys.modules
+        assert "flash_attn.flash_attn_interface" not in vllm_entry.sys.modules
+        assert vllm_entry.sys.modules["not_flash_attn"] is sentinel_other
+    finally:
+        if original_root is None:
+            vllm_entry.sys.modules.pop("flash_attn", None)
+        else:
+            vllm_entry.sys.modules["flash_attn"] = original_root
+        if original_child is None:
+            vllm_entry.sys.modules.pop("flash_attn.flash_attn_interface", None)
+        else:
+            vllm_entry.sys.modules["flash_attn.flash_attn_interface"] = original_child
+        if original_other is None:
+            vllm_entry.sys.modules.pop("not_flash_attn", None)
+        else:
+            vllm_entry.sys.modules["not_flash_attn"] = original_other

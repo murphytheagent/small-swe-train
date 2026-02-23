@@ -163,6 +163,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     tokenizer = _load_tokenizer(config.initial_model)
     current_model_path = config.initial_model
     vllm_controller = VLLMServerController(config=config, log_path=vllm_logs)
+    run_step_dirs: list[Path] = []
 
     try:
         if config.manage_vllm:
@@ -173,7 +174,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             collector_dir = step_dir / "collector_artifacts"
             parquet_path = step_dir / "accepted_trajectories.parquet"
             trainer_checkpoint_root = step_dir / "trainer_checkpoints"
+            reset_step_artifacts(step_dir)
             step_dir.mkdir(parents=True, exist_ok=True)
+            run_step_dirs.append(step_dir)
 
             request = OnPolicyRFTRuntimeRequest(
                 data_config_name=config.data_config_name,
@@ -192,58 +195,86 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             )
             selected_rows = _coerce_rows(handoff.get("selected_rows"))
             rejected_rows = _coerce_rows(handoff.get("rejected_rows"))
-            selected_count = write_selected_rows_to_multiturn_parquet(selected_rows, parquet_path)
-            effective_train_batch_size = resolve_effective_train_batch_size(
-                requested=config.train_batch_size,
-                selected_count=selected_count,
-                world_size=config.nnodes * config.nproc_per_node,
-            )
+            selected_count_raw = len(selected_rows)
+            selected_count_for_train = 0
+            selected_rows_upsampled = 0
+            effective_train_batch_size: int | None = None
+            trainer_command: list[str] | None = None
+            latest_hf_checkpoint: Path | None = None
+            pruned_global_step_checkpoints: list[Path] = []
+            trainer_skipped = False
+            skip_reason: str | None = None
 
-            trainer_command = build_trainer_step_command(
-                nnodes=config.nnodes,
-                nproc_per_node=config.nproc_per_node,
-                trainer_module=config.trainer_module,
-                config_name=config.config_name,
-                config_dir=config.config_dir,
-                model_path=current_model_path,
-                train_parquet_path=parquet_path,
-                val_parquet_path=parquet_path,
-                trainer_output_dir=trainer_checkpoint_root,
-                train_batch_size=effective_train_batch_size,
-                sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
-                trainer_overrides=config.trainer_overrides,
-            )
+            if selected_count_raw < 1:
+                trainer_skipped = True
+                skip_reason = "no_selected_rows"
+            else:
+                world_size = config.nnodes * config.nproc_per_node
+                selected_rows_for_train = upsample_rows_to_min_count(
+                    selected_rows,
+                    min_count=world_size,
+                )
+                selected_count_for_train = write_selected_rows_to_multiturn_parquet(
+                    selected_rows_for_train,
+                    parquet_path,
+                )
+                selected_rows_upsampled = selected_count_for_train - selected_count_raw
+                effective_train_batch_size = resolve_effective_train_batch_size(
+                    requested=config.train_batch_size,
+                    selected_count=selected_count_for_train,
+                    world_size=world_size,
+                )
 
-            if config.manage_vllm:
-                vllm_controller.stop()
-            _run_command(trainer_command, cwd=config.project_root)
+                trainer_command = build_trainer_step_command(
+                    nnodes=config.nnodes,
+                    nproc_per_node=config.nproc_per_node,
+                    trainer_module=config.trainer_module,
+                    config_name=config.config_name,
+                    config_dir=config.config_dir,
+                    model_path=current_model_path,
+                    train_parquet_path=parquet_path,
+                    val_parquet_path=parquet_path,
+                    trainer_output_dir=trainer_checkpoint_root,
+                    train_batch_size=effective_train_batch_size,
+                    sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
+                    trainer_overrides=config.trainer_overrides,
+                )
 
-            latest_hf_checkpoint = resolve_latest_hf_checkpoint(trainer_checkpoint_root)
-            pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
-                checkpoint_root=trainer_checkpoint_root,
-                keep_last=config.checkpoint_keep_last,
-            )
-            current_model_path = str(latest_hf_checkpoint)
+                if config.manage_vllm:
+                    vllm_controller.stop()
+                _run_command(trainer_command, cwd=config.project_root)
 
-            if config.manage_vllm:
-                vllm_controller.start(model_path=current_model_path)
+                latest_hf_checkpoint = resolve_latest_hf_checkpoint(trainer_checkpoint_root)
+                pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
+                    checkpoint_root=trainer_checkpoint_root,
+                    keep_last=config.checkpoint_keep_last,
+                )
+                current_model_path = str(latest_hf_checkpoint)
+
+                if config.manage_vllm:
+                    vllm_controller.start(model_path=current_model_path)
 
             pruned_checkpoint_roots = prune_old_step_checkpoints(
-                output_dir=config.output_dir,
+                step_dirs=run_step_dirs,
                 keep_last=config.checkpoint_keep_last,
             )
             pruned_step_payloads = prune_old_step_payloads(
-                output_dir=config.output_dir,
+                step_dirs=run_step_dirs,
                 keep_last=config.checkpoint_keep_last,
             )
             step_summary = {
                 "step_index": step_index,
-                "selected_count": selected_count,
+                "selected_count": selected_count_raw,
+                "selected_count_raw": selected_count_raw,
+                "selected_count_for_train": selected_count_for_train,
+                "selected_rows_upsampled": selected_rows_upsampled,
                 "rejected_count": len(rejected_rows),
+                "trainer_skipped": trainer_skipped,
+                "skip_reason": skip_reason,
                 "effective_train_batch_size": effective_train_batch_size,
                 "train_parquet": str(parquet_path),
                 "trainer_checkpoint_root": str(trainer_checkpoint_root),
-                "latest_hf_checkpoint": str(latest_hf_checkpoint),
+                "latest_hf_checkpoint": str(latest_hf_checkpoint) if latest_hf_checkpoint else None,
                 "trainer_command": trainer_command,
                 "pruned_global_step_checkpoints": [
                     str(path) for path in pruned_global_step_checkpoints
@@ -361,20 +392,12 @@ def resolve_latest_hf_checkpoint(checkpoint_root: str | Path) -> Path:
     if not root.exists():
         raise FileNotFoundError(f"Trainer checkpoint root does not exist: {root}")
 
-    candidates: list[tuple[int, Path]] = []
-    for path in root.iterdir():
-        if not path.is_dir():
-            continue
-        match = _GLOBAL_STEP_PATTERN.match(path.name)
-        if match is None:
-            continue
-        candidates.append((int(match.group(1)), path))
-
+    candidates = list(_iter_global_step_dirs(root))
     if not candidates:
         raise FileNotFoundError(f"No global_step_* checkpoint directories found in {root}")
 
-    candidates.sort(key=lambda item: item[0])
-    _, latest_step_dir = candidates[-1]
+    candidates.sort(key=lambda item: (item[1], item[0]))
+    _, _, latest_step_dir = candidates[-1]
     huggingface_dir = latest_step_dir / "huggingface"
     if not huggingface_dir.is_dir():
         raise FileNotFoundError(
@@ -383,37 +406,22 @@ def resolve_latest_hf_checkpoint(checkpoint_root: str | Path) -> Path:
     return huggingface_dir
 
 
-def prune_old_step_checkpoints(*, output_dir: str | Path, keep_last: int) -> list[Path]:
+def prune_old_step_checkpoints(*, step_dirs: Sequence[str | Path], keep_last: int) -> list[Path]:
     """Delete old per-step trainer checkpoint trees beyond the keep-last window."""
     if keep_last < 1:
         raise ValueError("keep_last must be >= 1 to preserve the current model checkpoint.")
 
-    resolved_output = Path(output_dir)
-    if not resolved_output.exists():
+    ordered_step_dirs = _coerce_step_dirs_in_order(step_dirs)
+    if len(ordered_step_dirs) <= keep_last:
         return []
 
-    checkpoint_roots: list[tuple[int, Path]] = []
-    for step_dir in resolved_output.iterdir():
-        if not step_dir.is_dir():
-            continue
-        if not step_dir.name.startswith("rft_step_"):
-            continue
-        suffix = step_dir.name.removeprefix("rft_step_")
-        if not suffix.isdigit():
-            continue
+    to_prune = ordered_step_dirs[: len(ordered_step_dirs) - keep_last]
+    pruned: list[Path] = []
+    for step_dir in to_prune:
         checkpoint_root = step_dir / "trainer_checkpoints"
         if checkpoint_root.is_dir():
-            checkpoint_roots.append((int(suffix), checkpoint_root))
-
-    checkpoint_roots.sort(key=lambda item: item[0])
-    if len(checkpoint_roots) <= keep_last:
-        return []
-
-    to_prune = checkpoint_roots[: len(checkpoint_roots) - keep_last]
-    pruned: list[Path] = []
-    for _, checkpoint_root in to_prune:
-        shutil.rmtree(checkpoint_root)
-        pruned.append(checkpoint_root)
+            shutil.rmtree(checkpoint_root)
+            pruned.append(checkpoint_root)
     return pruned
 
 
@@ -426,28 +434,21 @@ def prune_old_global_step_checkpoints(*, checkpoint_root: str | Path, keep_last:
     if not resolved_root.exists():
         return []
 
-    global_step_dirs: list[tuple[int, Path]] = []
-    for path in resolved_root.iterdir():
-        if not path.is_dir():
-            continue
-        match = _GLOBAL_STEP_PATTERN.match(path.name)
-        if match is None:
-            continue
-        global_step_dirs.append((int(match.group(1)), path))
-
-    global_step_dirs.sort(key=lambda item: item[0])
+    global_step_dirs = list(_iter_global_step_dirs(resolved_root))
     if len(global_step_dirs) <= keep_last:
         return []
 
+    global_step_dirs.sort(key=lambda item: (item[1], item[0]))
     to_prune = global_step_dirs[: len(global_step_dirs) - keep_last]
     pruned: list[Path] = []
-    for _, path in to_prune:
-        shutil.rmtree(path)
-        pruned.append(path)
+    for _, _, path in to_prune:
+        if path.exists():
+            shutil.rmtree(path)
+            pruned.append(path)
     return pruned
 
 
-def prune_old_step_payloads(*, output_dir: str | Path, keep_last: int) -> list[Path]:
+def prune_old_step_payloads(*, step_dirs: Sequence[str | Path], keep_last: int) -> list[Path]:
     """Delete old per-step rollout payloads beyond the keep-last window.
 
     Retained summaries (`rft_step_summary.json`) remain in each step directory for
@@ -456,28 +457,13 @@ def prune_old_step_payloads(*, output_dir: str | Path, keep_last: int) -> list[P
     if keep_last < 1:
         raise ValueError("keep_last must be >= 1 to preserve current step payload artifacts.")
 
-    resolved_output = Path(output_dir)
-    if not resolved_output.exists():
+    ordered_step_dirs = _coerce_step_dirs_in_order(step_dirs)
+    if len(ordered_step_dirs) <= keep_last:
         return []
 
-    step_dirs: list[tuple[int, Path]] = []
-    for step_dir in resolved_output.iterdir():
-        if not step_dir.is_dir():
-            continue
-        if not step_dir.name.startswith("rft_step_"):
-            continue
-        suffix = step_dir.name.removeprefix("rft_step_")
-        if not suffix.isdigit():
-            continue
-        step_dirs.append((int(suffix), step_dir))
-
-    step_dirs.sort(key=lambda item: item[0])
-    if len(step_dirs) <= keep_last:
-        return []
-
-    to_prune = step_dirs[: len(step_dirs) - keep_last]
+    to_prune = ordered_step_dirs[: len(ordered_step_dirs) - keep_last]
     pruned: list[Path] = []
-    for _, step_dir in to_prune:
+    for step_dir in to_prune:
         for relative in ("collector_artifacts", "accepted_trajectories.parquet"):
             target = step_dir / relative
             if target.is_dir():
@@ -487,6 +473,51 @@ def prune_old_step_payloads(*, output_dir: str | Path, keep_last: int) -> list[P
                 target.unlink()
                 pruned.append(target)
     return pruned
+
+
+def reset_step_artifacts(step_dir: str | Path) -> None:
+    """Clear mutable per-step outputs so reruns do not mix stale artifacts."""
+    resolved_step = Path(step_dir)
+    for relative in (
+        "collector_artifacts",
+        "trainer_checkpoints",
+        "accepted_trajectories.parquet",
+        "rft_step_summary.json",
+    ):
+        target = resolved_step / relative
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+
+
+def _coerce_step_dirs_in_order(step_dirs: Sequence[str | Path]) -> list[Path]:
+    ordered: list[Path] = []
+    seen: set[Path] = set()
+    for item in step_dirs:
+        path = Path(item)
+        if path in seen:
+            continue
+        ordered.append(path)
+        seen.add(path)
+    return ordered
+
+
+def _iter_global_step_dirs(root: Path) -> Sequence[tuple[int, int, Path]]:
+    rows: list[tuple[int, int, Path]] = []
+    for path in root.iterdir():
+        if not path.is_dir():
+            continue
+        match = _GLOBAL_STEP_PATTERN.match(path.name)
+        if match is None:
+            continue
+        step_num = int(match.group(1))
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except FileNotFoundError:
+            continue
+        rows.append((step_num, mtime_ns, path))
+    return rows
 
 
 def _print_dry_run_plan(config: RFTLoopConfig) -> None:
@@ -572,9 +603,9 @@ def _is_http_endpoint_ready(url: str) -> bool:
     request = Request(url, method="GET")
     try:
         with urlopen(request, timeout=2.0) as response:
-            return 200 <= int(response.status) < 500
-    except HTTPError as exc:
-        return 200 <= int(exc.code) < 500
+            return 200 <= int(response.status) < 300
+    except HTTPError:
+        return False
     except (URLError, TimeoutError, OSError):
         return False
 
@@ -596,13 +627,33 @@ def _coerce_rows(value: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def upsample_rows_to_min_count(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    min_count: int,
+) -> list[dict[str, Any]]:
+    """Repeat selected rows to satisfy minimum global batch constraints."""
+    if min_count < 1:
+        raise ValueError("min_count must be >= 1.")
+    if not rows:
+        return []
+
+    result = [dict(row) for row in rows]
+    source_rows = list(rows)
+    index = 0
+    while len(result) < min_count:
+        result.append(dict(source_rows[index % len(source_rows)]))
+        index += 1
+    return result
+
+
 def resolve_effective_train_batch_size(
     *,
     requested: int,
     selected_count: int,
     world_size: int,
 ) -> int:
-    """Clamp trainer batch size so tiny selected sets still yield >=1 train step."""
+    """Clamp global train batch size to selected rows and DP divisibility constraints."""
     if requested < 1:
         raise ValueError("requested train batch size must be >= 1.")
     if selected_count < 1:
@@ -610,8 +661,16 @@ def resolve_effective_train_batch_size(
     if world_size < 1:
         raise ValueError("world_size must be >= 1.")
 
-    max_per_rank = max(1, selected_count // world_size)
-    return max(1, min(requested, max_per_rank))
+    max_global = min(requested, selected_count)
+    if max_global < world_size:
+        return max_global
+
+    divisible = (max_global // world_size) * world_size
+    if divisible < 1:
+        raise ValueError(
+            "Unable to derive a valid global train batch size from selected_count/world_size."
+        )
+    return divisible
 
 
 def _utc_now() -> str:
