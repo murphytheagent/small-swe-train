@@ -8,12 +8,9 @@ Grounding:
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import runpy
 import sys
-from collections.abc import Callable
-from importlib.machinery import ModuleSpec
 
 
 def _coerce_bool_env(name: str, *, default: bool) -> bool:
@@ -43,22 +40,14 @@ def _should_hide_external_flash_attn() -> tuple[bool, str]:
     return True, reason
 
 
-def _install_flash_attn_find_spec_guard() -> None:
-    original_find_spec: Callable[[str, str | None], ModuleSpec | None] = importlib.util.find_spec
-
-    def _guarded_find_spec(name: str, package: str | None = None) -> ModuleSpec | None:
-        if name == "flash_attn" or name.startswith("flash_attn."):
-            return None
-        return original_find_spec(name, package)
-
-    importlib.util.find_spec = _guarded_find_spec
-
-
 def _configure_flash_attn_guard_if_needed() -> None:
     hide_external, reason = _should_hide_external_flash_attn()
     if not hide_external:
         return
-    _install_flash_attn_find_spec_guard()
+    os.environ["SMALL_SWE_HIDE_EXTERNAL_FLASH_ATTN"] = "1"
+    from sitecustomize import apply_small_swe_runtime_patches
+
+    apply_small_swe_runtime_patches()
     print(
         "[small-swe] external flash-attn hidden for vLLM server launch "
         f"(reason: {reason})",
