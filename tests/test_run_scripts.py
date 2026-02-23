@@ -37,6 +37,28 @@ def test_run_rft_script_dry_run_prints_verl_command() -> None:
     assert "trainer.total_training_steps=1" in result.stdout
 
 
+def test_run_rft_script_dry_run_defaults_vllm_tensor_parallel_to_nproc() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+        env_overrides={"NPROC_PER_NODE": "8"},
+    )
+    assert "--tensor-parallel-size 8" in result.stdout
+
+
+def test_run_rft_script_dry_run_respects_explicit_vllm_extra_args() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+        env_overrides={
+            "NPROC_PER_NODE": "8",
+            "RFT_VLLM_EXTRA_ARGS": "--tensor-parallel-size 2 --max-num-seqs 16",
+        },
+    )
+    assert "--tensor-parallel-size 2" in result.stdout
+    assert "--max-num-seqs 16" in result.stdout
+
+
 def test_run_sdft_script_dry_run_includes_loss_mode_override() -> None:
     result = _run_script("run_sdft.sh")
     assert "--config-name sdpo_swe" in result.stdout
