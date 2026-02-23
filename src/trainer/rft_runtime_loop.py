@@ -28,6 +28,9 @@ _VERL_SFT_TRAINER_DOC = (
 _VLLM_OPENAI_SERVER_DOC = (
     "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html"
 )
+_VLLM_OPENAI_SERVER_SOURCE = (
+    "https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/api_server.py"
+)
 
 
 @dataclass(frozen=True)
@@ -536,8 +539,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
     parser.add_argument("--vllm-served-model", required=True)
     parser.add_argument(
         "--vllm-launch-module",
-        default="vllm.entrypoints.openai.api_server",
-        help=f"vLLM OpenAI server module (see {_VLLM_OPENAI_SERVER_DOC})",
+        default="trainer.vllm_api_server_entry",
+        help=(
+            "vLLM OpenAI server module "
+            f"(see {_VLLM_OPENAI_SERVER_DOC}, source: {_VLLM_OPENAI_SERVER_SOURCE})"
+        ),
     )
     parser.add_argument("--vllm-ready-timeout-sec", type=int, default=180)
     parser.add_argument("--vllm-stop-timeout-sec", type=int, default=30)

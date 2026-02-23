@@ -23,6 +23,7 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
   - write selected trajectories to `MultiTurnSFTDataset`-compatible parquet shards,
   - train `verl.trainer.fsdp_sft_trainer` with per-step `data.train_files=<accepted_step.parquet>`,
   - detect the latest trainer checkpoint and restart vLLM on that snapshot for the next RFT step.
+- vLLM launch defaults to `trainer.vllm_api_server_entry`, which delegates to the documented OpenAI server entrypoint and guards against broken external `flash_attn` wheels.
 - `scripts/run_rft.sh` preserves a `RFT_RUNTIME_MODE=direct` path for proof/legacy one-shot launcher behavior.
 - `src/verl_integration/` keeps thin compatibility wrappers for trainer-owned runtime/handoff modules.
 

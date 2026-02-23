@@ -25,11 +25,13 @@ NNODES="${NNODES:-1}"
 # Grounded defaults:
 # - verl SFT trainer entrypoint: https://github.com/lasgroup/SDPO/blob/main/verl/trainer/fsdp_sft_trainer.py
 # - vLLM OpenAI server entrypoint: https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+# - Wrapper module delegates to vLLM entrypoint with flash-attn ABI guard:
+#   src/trainer/vllm_api_server_entry.py
 RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE:-verl.trainer.fsdp_sft_trainer}"
 RFT_TASK_NAME="${RFT_TASK_NAME:-small-swe-rft}"
 RFT_RUNTIME_MODE="${RFT_RUNTIME_MODE:-loop}"
 RFT_MANAGE_VLLM="${RFT_MANAGE_VLLM:-1}"
-RFT_VLLM_LAUNCH_MODULE="${RFT_VLLM_LAUNCH_MODULE:-vllm.entrypoints.openai.api_server}"
+RFT_VLLM_LAUNCH_MODULE="${RFT_VLLM_LAUNCH_MODULE:-trainer.vllm_api_server_entry}"
 RFT_VLLM_READY_TIMEOUT_SEC="${RFT_VLLM_READY_TIMEOUT_SEC:-180}"
 RFT_VLLM_STOP_TIMEOUT_SEC="${RFT_VLLM_STOP_TIMEOUT_SEC:-30}"
 RFT_VLLM_EXTRA_ARGS="${RFT_VLLM_EXTRA_ARGS:-}"
