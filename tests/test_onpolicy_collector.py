@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import threading
+import time
 
 from config import (
     OnPolicyDataConfig,
@@ -350,6 +352,92 @@ def test_onpolicy_collector_acquires_full_task_batch_once_per_attempt() -> None:
     assert pool.acquire_inputs == [["task-a", "task-b"], ["task-a", "task-b"]]
     assert pool.release_calls == 2
     assert all(row["batch_container_count"] == 2 for row in rows)
+
+
+def test_onpolicy_collector_runs_task_attempts_concurrently_when_enabled(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    settings = OnPolicySettings(
+        data=settings.data,
+        runtime=replace(
+            settings.runtime,
+            task_batch_size=4,
+            attempts_per_task=1,
+            env_pool_size=4,
+            max_in_flight_tasks=4,
+        ),
+    )
+    pool = _BatchTrackingPool()
+    executor = _FakeExecutor()
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    collector = OnPolicyRolloutCollector(
+        settings=settings,
+        turn_generator=lambda **_kwargs: (
+            '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+        ),
+        dataset_loader=lambda _dataset_id, _split: [
+            {
+                "task_id": "task-a",
+                "image_name": "img:1",
+                "problem_statement": "Fix A",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": [],
+            },
+            {
+                "task_id": "task-b",
+                "image_name": "img:2",
+                "problem_statement": "Fix B",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": [],
+            },
+            {
+                "task_id": "task-c",
+                "image_name": "img:3",
+                "problem_statement": "Fix C",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": [],
+            },
+            {
+                "task_id": "task-d",
+                "image_name": "img:4",
+                "problem_statement": "Fix D",
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": [],
+            },
+        ],
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+    )
+
+    def _fake_collect_attempt(**kwargs):
+        nonlocal active, max_active
+        task_position = int(kwargs["task_position"])
+        task = kwargs["task"]
+        with lock:
+            active += 1
+            if active > max_active:
+                max_active = active
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return {
+            "task_id": task.task_id,
+            "resolved": True,
+            "task_position": task_position,
+        }
+
+    monkeypatch.setattr(collector, "_collect_attempt", _fake_collect_attempt)
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 4
+    assert max_active >= 2
+    assert [row["task_position"] for row in rows] == [0, 1, 2, 3]
+    assert pool.release_calls == 1
 
 
 def test_onpolicy_collector_applies_task_patch_before_rollout_turns() -> None:

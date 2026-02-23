@@ -139,12 +139,14 @@ class VLLMServerController:
 def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     vllm_logs = config.output_dir / "vllm_server.log"
+    collector_max_in_flight_tasks = max(1, min(config.task_batch_size, config.nproc_per_node))
     runtime_manifest: dict[str, Any] = {
         "generated_utc": _utc_now(),
         "config": {
             "rft_steps": config.rft_steps,
             "samples_per_task": config.samples_per_task,
             "task_batch_size": config.task_batch_size,
+            "collector_max_in_flight_tasks": collector_max_in_flight_tasks,
             "sft_num_epoch_per_batch": config.sft_num_epoch_per_batch,
             "checkpoint_keep_last": config.checkpoint_keep_last,
             "train_batch_size": config.train_batch_size,
@@ -189,6 +191,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                     "task_batch_size": config.task_batch_size,
                     "attempts_per_task": config.samples_per_task,
                     "env_pool_size": config.task_batch_size,
+                    "max_in_flight_tasks": collector_max_in_flight_tasks,
                 },
                 output_dir=str(collector_dir),
             )

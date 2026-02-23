@@ -94,7 +94,8 @@
     "tool_timeout_sec": 30,
     "container_start_timeout_sec": 120,
     "attempt_timeout_sec": 300,
-    "max_tool_calls_per_turn": 3
+    "max_tool_calls_per_turn": 3,
+    "max_in_flight_tasks": 1
   },
   "rft_handoff": {
     "max_sequence_length": 12288,

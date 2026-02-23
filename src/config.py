@@ -57,6 +57,7 @@ class OnPolicyRuntimeConfig:
     container_start_timeout_sec: int
     attempt_timeout_sec: int
     max_tool_calls_per_turn: int
+    max_in_flight_tasks: int = 1
 
 
 @dataclass(frozen=True)
@@ -320,6 +321,10 @@ def _parse_on_policy_runtime_config(payload: Mapping[str, Any]) -> OnPolicyRunti
         max_tool_calls_per_turn=_coerce_positive_int(
             payload.get("max_tool_calls_per_turn"),
             label="on_policy.max_tool_calls_per_turn",
+        ),
+        max_in_flight_tasks=_coerce_positive_int(
+            payload.get("max_in_flight_tasks", 1),
+            label="on_policy.max_in_flight_tasks",
         ),
     )
 

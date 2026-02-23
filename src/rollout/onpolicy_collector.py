@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from typing import Callable, Protocol, Sequence
 
@@ -128,20 +129,47 @@ class OnPolicyRolloutCollector:
                     raise RuntimeError(
                         "Container pool must provide exactly one handle per task in the batch."
                     )
+                task_items = list(enumerate(zip(tasks, handles)))
+                max_workers = min(runtime.max_in_flight_tasks, len(task_items))
 
-                for task_position, (task, handle) in enumerate(zip(tasks, handles)):
-                    executor = self._executor_factory(handle, runtime)
-                    row = self._collect_attempt(
-                        step_index=step_index,
-                        task_position=task_position,
-                        batch_container_count=len(handles),
-                        task=task,
-                        handle=handle,
-                        attempt_index=attempt_index,
-                        runtime=runtime,
-                        executor=executor,
-                    )
-                    rows.append(row)
+                if max_workers <= 1:
+                    for task_position, (task, handle) in task_items:
+                        executor = self._executor_factory(handle, runtime)
+                        row = self._collect_attempt(
+                            step_index=step_index,
+                            task_position=task_position,
+                            batch_container_count=len(handles),
+                            task=task,
+                            handle=handle,
+                            attempt_index=attempt_index,
+                            runtime=runtime,
+                            executor=executor,
+                        )
+                        rows.append(row)
+                else:
+                    ordered_rows: list[RolloutRow | None] = [None] * len(task_items)
+                    future_to_position = {}
+                    with ThreadPoolExecutor(max_workers=max_workers) as pool_executor:
+                        for task_position, (task, handle) in task_items:
+                            executor = self._executor_factory(handle, runtime)
+                            future = pool_executor.submit(
+                                self._collect_attempt,
+                                step_index=step_index,
+                                task_position=task_position,
+                                batch_container_count=len(handles),
+                                task=task,
+                                handle=handle,
+                                attempt_index=attempt_index,
+                                runtime=runtime,
+                                executor=executor,
+                            )
+                            future_to_position[future] = task_position
+
+                        for future in as_completed(future_to_position):
+                            task_position = future_to_position[future]
+                            ordered_rows[task_position] = future.result()
+
+                    rows.extend(row for row in ordered_rows if row is not None)
             finally:
                 pool.release_all()
 
