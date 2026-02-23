@@ -30,9 +30,9 @@ def test_patched_from_pretrained_uses_sdpa_fallback_when_flash_attn_disabled(
     payload = entry._patched_from_pretrained("Qwen/Qwen3-4B-Instruct-2507")
 
     assert payload["attn_implementation"] == "sdpa"
-    assert payload["use_flash_attention_2"] is False
     assert captured["attn_implementation"] == "sdpa"
-    assert captured["use_flash_attention_2"] is False
+    assert "use_flash_attention_2" not in payload
+    assert "use_flash_attention_2" not in captured
 
 
 def test_patched_from_pretrained_honors_explicit_attn_impl_override(monkeypatch) -> None:
@@ -77,5 +77,6 @@ def test_patched_from_pretrained_replaces_flash_attn_impl_when_disabled(monkeypa
     )
 
     assert payload["attn_implementation"] == "sdpa"
-    assert payload["use_flash_attention_2"] is False
     assert captured["attn_implementation"] == "sdpa"
+    assert "use_flash_attention_2" not in payload
+    assert "use_flash_attention_2" not in captured

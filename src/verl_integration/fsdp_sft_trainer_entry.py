@@ -79,8 +79,6 @@ def _patched_from_pretrained(*args: Any, **kwargs: Any):
             attn_implementation = fallback
     if attn_implementation is not None:
         kwargs["attn_implementation"] = attn_implementation
-        if str(kwargs["attn_implementation"]).strip().lower() != "flash_attention_2":
-            kwargs.setdefault("use_flash_attention_2", False)
     return _ORIGINAL_FROM_PRETRAINED(*args, **kwargs)
 
 
