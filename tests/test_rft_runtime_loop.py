@@ -45,7 +45,8 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
     assert "python3 -m torch.distributed.run" in command_text
     assert "-m verl.trainer.fsdp_sft_trainer" in command_text
     assert "trainer.total_training_steps=1" in command_text
-    assert "trainer.checkpoint.save_contents=[model,hf_model,extra]" in command_text
+    assert "trainer.checkpoint.save_contents=[hf_model]" in command_text
+    assert "trainer.checkpoint.load_contents=[hf_model]" in command_text
     assert "data.multiturn.enable=true" in command_text
     assert "data.custom_cls.path=null" in command_text
     assert f"data.train_files={tmp_path / 'accepted.parquet'}" in command_text

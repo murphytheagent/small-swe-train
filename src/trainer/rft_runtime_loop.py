@@ -327,8 +327,10 @@ def build_trainer_step_command(
         f"trainer.n_gpus_per_node={nproc_per_node}",
         "trainer.resume_mode=disable",
         f"trainer.default_local_dir={trainer_output_dir}",
-        "trainer.checkpoint.save_contents=[model,hf_model,extra]",
-        "trainer.checkpoint.load_contents=[model,hf_model,extra]",
+        # Runtime loop only consumes HuggingFace exports for vLLM restarts; keeping
+        # checkpoint payloads hf_model-only avoids redundant dense/FSDP artifacts.
+        "trainer.checkpoint.save_contents=[hf_model]",
+        "trainer.checkpoint.load_contents=[hf_model]",
         f"data.train_batch_size={train_batch_size}",
         "data.on_policy.enabled=false",
         "data.multiturn.enable=true",
