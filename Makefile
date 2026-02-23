@@ -3,6 +3,8 @@
 # Number of cores to use for compilation
 # Default for dedicated Blackwell build nodes; override when needed.
 CORES ?= 8
+# Keep train-env builds on an ABI with available torch/ray wheels on GPU nodes.
+PYTHON_VERSION ?= 3.13
 UV ?= uv
 VENV_PYTHON ?= .venv/bin/python
 FLASH_ATTN_PACKAGE ?= flash-attn
@@ -11,20 +13,20 @@ FLASH_ATTN_CUDA_ARCHS ?= 120
 
 # Syncs only the base dependencies
 setup:
-	$(UV) sync
+	$(UV) sync --python $(PYTHON_VERSION)
 
 # Syncs the training environment (compiles flash-attn)
 build-train:
-	MAX_JOBS=$(CORES) $(UV) sync --extra train
+	MAX_JOBS=$(CORES) $(UV) sync --python $(PYTHON_VERSION) --extra train
 	$(MAKE) ensure-flash-attn
 
 # Syncs dev dependencies
 build-dev:
-	$(UV) sync --extra dev
+	$(UV) sync --python $(PYTHON_VERSION) --extra dev
 
 # Syncs absolutely everything
 build-all:
-	MAX_JOBS=$(CORES) $(UV) sync --all-extras
+	MAX_JOBS=$(CORES) $(UV) sync --python $(PYTHON_VERSION) --all-extras
 	$(MAKE) ensure-flash-attn
 
 # Ensures flash-attn is import-compatible with the current torch/cuda stack.
@@ -50,4 +52,4 @@ submit-flash-attn-rebuild:
 # Wipes the environment clean so you can start fresh
 clean-venv:
 	rm -rf .venv
-	$(UV) venv
+	$(UV) venv --python $(PYTHON_VERSION)
