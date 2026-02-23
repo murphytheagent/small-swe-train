@@ -10,6 +10,7 @@ from trainer.rft_runtime_loop import (
     prune_old_global_step_checkpoints,
     prune_old_step_checkpoints,
     prune_old_step_payloads,
+    resolve_effective_train_batch_size,
     resolve_latest_hf_checkpoint,
 )
 
@@ -157,3 +158,30 @@ def test_prune_old_step_payloads_keeps_latest_step_payloads(tmp_path: Path) -> N
 def test_prune_old_step_payloads_requires_positive_keep_last(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="keep_last must be >= 1"):
         prune_old_step_payloads(output_dir=tmp_path, keep_last=0)
+
+
+def test_resolve_effective_train_batch_size_clamps_to_selected_per_world_size() -> None:
+    resolved = resolve_effective_train_batch_size(
+        requested=1024,
+        selected_count=48,
+        world_size=8,
+    )
+    assert resolved == 6
+
+
+def test_resolve_effective_train_batch_size_minimum_one() -> None:
+    resolved = resolve_effective_train_batch_size(
+        requested=64,
+        selected_count=3,
+        world_size=8,
+    )
+    assert resolved == 1
+
+
+def test_resolve_effective_train_batch_size_rejects_invalid_inputs() -> None:
+    with pytest.raises(ValueError, match="requested"):
+        resolve_effective_train_batch_size(requested=0, selected_count=8, world_size=8)
+    with pytest.raises(ValueError, match="selected_count"):
+        resolve_effective_train_batch_size(requested=1, selected_count=0, world_size=8)
+    with pytest.raises(ValueError, match="world_size"):
+        resolve_effective_train_batch_size(requested=1, selected_count=8, world_size=0)

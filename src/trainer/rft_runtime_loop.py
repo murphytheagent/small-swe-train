@@ -193,6 +193,11 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             selected_rows = _coerce_rows(handoff.get("selected_rows"))
             rejected_rows = _coerce_rows(handoff.get("rejected_rows"))
             selected_count = write_selected_rows_to_multiturn_parquet(selected_rows, parquet_path)
+            effective_train_batch_size = resolve_effective_train_batch_size(
+                requested=config.train_batch_size,
+                selected_count=selected_count,
+                world_size=config.nnodes * config.nproc_per_node,
+            )
 
             trainer_command = build_trainer_step_command(
                 nnodes=config.nnodes,
@@ -204,7 +209,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 train_parquet_path=parquet_path,
                 val_parquet_path=parquet_path,
                 trainer_output_dir=trainer_checkpoint_root,
-                train_batch_size=config.train_batch_size,
+                train_batch_size=effective_train_batch_size,
                 sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
                 trainer_overrides=config.trainer_overrides,
             )
@@ -235,6 +240,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "step_index": step_index,
                 "selected_count": selected_count,
                 "rejected_count": len(rejected_rows),
+                "effective_train_batch_size": effective_train_batch_size,
                 "train_parquet": str(parquet_path),
                 "trainer_checkpoint_root": str(trainer_checkpoint_root),
                 "latest_hf_checkpoint": str(latest_hf_checkpoint),
@@ -588,6 +594,24 @@ def _coerce_rows(value: Any) -> list[dict[str, Any]]:
         if isinstance(item, Mapping):
             rows.append(dict(item))
     return rows
+
+
+def resolve_effective_train_batch_size(
+    *,
+    requested: int,
+    selected_count: int,
+    world_size: int,
+) -> int:
+    """Clamp trainer batch size so tiny selected sets still yield >=1 train step."""
+    if requested < 1:
+        raise ValueError("requested train batch size must be >= 1.")
+    if selected_count < 1:
+        raise ValueError("selected_count must be >= 1.")
+    if world_size < 1:
+        raise ValueError("world_size must be >= 1.")
+
+    max_per_rank = max(1, selected_count // world_size)
+    return max(1, min(requested, max_per_rank))
 
 
 def _utc_now() -> str:
