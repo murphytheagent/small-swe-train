@@ -7,6 +7,7 @@ import pytest
 from trainer.rft_runtime_loop import (
     build_trainer_step_command,
     build_vllm_server_command,
+    prune_old_step_checkpoints,
     resolve_latest_hf_checkpoint,
 )
 
@@ -82,3 +83,23 @@ def test_resolve_latest_hf_checkpoint_requires_huggingface_export(tmp_path: Path
 
     with pytest.raises(FileNotFoundError, match="huggingface"):
         resolve_latest_hf_checkpoint(tmp_path)
+
+
+def test_prune_old_step_checkpoints_keeps_latest_roots(tmp_path: Path) -> None:
+    output_dir = tmp_path / "rft_runtime"
+    for step in range(4):
+        checkpoint_root = output_dir / f"rft_step_{step:05d}" / "trainer_checkpoints"
+        (checkpoint_root / "global_step_1" / "huggingface").mkdir(parents=True)
+
+    pruned = prune_old_step_checkpoints(output_dir=output_dir, keep_last=2)
+
+    assert [path.parent.name for path in pruned] == ["rft_step_00000", "rft_step_00001"]
+    assert not (output_dir / "rft_step_00000" / "trainer_checkpoints").exists()
+    assert not (output_dir / "rft_step_00001" / "trainer_checkpoints").exists()
+    assert (output_dir / "rft_step_00002" / "trainer_checkpoints").is_dir()
+    assert (output_dir / "rft_step_00003" / "trainer_checkpoints").is_dir()
+
+
+def test_prune_old_step_checkpoints_requires_positive_keep_last(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="keep_last must be >= 1"):
+        prune_old_step_checkpoints(output_dir=tmp_path, keep_last=0)

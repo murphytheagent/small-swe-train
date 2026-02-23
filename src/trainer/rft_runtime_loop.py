@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -42,6 +43,7 @@ class RFTLoopConfig:
     samples_per_task: int
     task_batch_size: int
     sft_num_epoch_per_batch: int
+    checkpoint_keep_last: int
     train_batch_size: int
     output_dir: Path
     data_config_name: str
@@ -139,6 +141,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             "samples_per_task": config.samples_per_task,
             "task_batch_size": config.task_batch_size,
             "sft_num_epoch_per_batch": config.sft_num_epoch_per_batch,
+            "checkpoint_keep_last": config.checkpoint_keep_last,
             "train_batch_size": config.train_batch_size,
             "data_config_name": config.data_config_name,
             "turn_generator_mode": config.turn_generator_mode,
@@ -213,6 +216,10 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             if config.manage_vllm:
                 vllm_controller.start(model_path=current_model_path)
 
+            pruned_checkpoint_roots = prune_old_step_checkpoints(
+                output_dir=config.output_dir,
+                keep_last=config.checkpoint_keep_last,
+            )
             step_summary = {
                 "step_index": step_index,
                 "selected_count": selected_count,
@@ -221,6 +228,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "trainer_checkpoint_root": str(trainer_checkpoint_root),
                 "latest_hf_checkpoint": str(latest_hf_checkpoint),
                 "trainer_command": trainer_command,
+                "pruned_checkpoint_roots": [str(path) for path in pruned_checkpoint_roots],
             }
             runtime_manifest["steps"].append(step_summary)
             _write_json(step_dir / "rft_step_summary.json", step_summary)
@@ -354,6 +362,40 @@ def resolve_latest_hf_checkpoint(checkpoint_root: str | Path) -> Path:
     return huggingface_dir
 
 
+def prune_old_step_checkpoints(*, output_dir: str | Path, keep_last: int) -> list[Path]:
+    """Delete old per-step trainer checkpoint trees beyond the keep-last window."""
+    if keep_last < 1:
+        raise ValueError("keep_last must be >= 1 to preserve the current model checkpoint.")
+
+    resolved_output = Path(output_dir)
+    if not resolved_output.exists():
+        return []
+
+    checkpoint_roots: list[tuple[int, Path]] = []
+    for step_dir in resolved_output.iterdir():
+        if not step_dir.is_dir():
+            continue
+        if not step_dir.name.startswith("rft_step_"):
+            continue
+        suffix = step_dir.name.removeprefix("rft_step_")
+        if not suffix.isdigit():
+            continue
+        checkpoint_root = step_dir / "trainer_checkpoints"
+        if checkpoint_root.is_dir():
+            checkpoint_roots.append((int(suffix), checkpoint_root))
+
+    checkpoint_roots.sort(key=lambda item: item[0])
+    if len(checkpoint_roots) <= keep_last:
+        return []
+
+    to_prune = checkpoint_roots[: len(checkpoint_roots) - keep_last]
+    pruned: list[Path] = []
+    for _, checkpoint_root in to_prune:
+        shutil.rmtree(checkpoint_root)
+        pruned.append(checkpoint_root)
+    return pruned
+
+
 def _print_dry_run_plan(config: RFTLoopConfig) -> None:
     preview_steps = min(config.rft_steps, 2)
     print(
@@ -361,6 +403,7 @@ def _print_dry_run_plan(config: RFTLoopConfig) -> None:
         f"steps={config.rft_steps}",
         f"samples_per_task={config.samples_per_task}",
         f"task_batch_size={config.task_batch_size}",
+        f"checkpoint_keep_last={config.checkpoint_keep_last}",
     )
     if config.manage_vllm:
         initial_vllm = build_vllm_server_command(
@@ -483,6 +526,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
     parser.add_argument("--samples-per-task", type=int, required=True)
     parser.add_argument("--task-batch-size", type=int, required=True)
     parser.add_argument("--sft-num-epoch-per-batch", type=int, required=True)
+    parser.add_argument("--checkpoint-keep-last", type=int, default=1)
     parser.add_argument("--train-batch-size", type=int, required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--data-config-name", default="on_policy_swe_smith")
@@ -512,6 +556,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         raise ValueError("--task-batch-size must be >= 1.")
     if args.sft_num_epoch_per_batch < 1:
         raise ValueError("--sft-num-epoch-per-batch must be >= 1.")
+    if args.checkpoint_keep_last < 1:
+        raise ValueError("--checkpoint-keep-last must be >= 1.")
     if args.train_batch_size < 1:
         raise ValueError("--train-batch-size must be >= 1.")
     if args.nnodes < 1:
@@ -531,6 +577,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         samples_per_task=int(args.samples_per_task),
         task_batch_size=int(args.task_batch_size),
         sft_num_epoch_per_batch=int(args.sft_num_epoch_per_batch),
+        checkpoint_keep_last=int(args.checkpoint_keep_last),
         train_batch_size=int(args.train_batch_size),
         output_dir=Path(args.output_dir).resolve(),
         data_config_name=str(args.data_config_name),

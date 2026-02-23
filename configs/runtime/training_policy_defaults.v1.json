@@ -119,7 +119,8 @@
       "sft_num_epoch_per_batch": 1,
       "steps": 100,
       "samples_per_task": 8,
-      "task_batch_size": 128
+      "task_batch_size": 128,
+      "checkpoint_keep_last": 1
     },
     "vllm": {
       "base_url": "http://127.0.0.1:8000/v1",
