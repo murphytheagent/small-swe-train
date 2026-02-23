@@ -87,8 +87,14 @@ def _build_runtime_manifest_payload(
     for row in rejected_rows:
         reason_text = str(row.get("rft_rejection_reason", "")).strip()
         if not reason_text:
-            reason_text = "unknown"
-        rejection_reason_counts[reason_text] = rejection_reason_counts.get(reason_text, 0) + 1
+            parsed_reasons = ["unknown"]
+        else:
+            parsed_reasons = [item.strip() for item in reason_text.split(",") if item.strip()]
+            if not parsed_reasons:
+                parsed_reasons = ["unknown"]
+
+        for reason in parsed_reasons:
+            rejection_reason_counts[reason] = rejection_reason_counts.get(reason, 0) + 1
 
     return {
         "data_config_name": request.data_config_name,

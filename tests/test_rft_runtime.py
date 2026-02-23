@@ -39,7 +39,7 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
         return {
             "rollout_rows": [{"task_id": "task-1"}, {"task_id": "task-2"}],
             "selected_rows": [{"task_id": "task-1"}],
-            "rejected_rows": [{"task_id": "task-2", "rft_rejection_reason": "unresolved"}],
+            "rejected_rows": [{"task_id": "task-2", "rft_rejection_reason": "non_terminal,unresolved"}],
             "sft_batch": {"meta_info": {"selected_count": 1}},
             "dataproto_payload": {"meta_info": {"max_padded_length": 16}},
         }
@@ -87,7 +87,7 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
     assert manifest_payload["rollout_count"] == 2
     assert manifest_payload["selected_count"] == 1
     assert manifest_payload["rejected_count"] == 1
-    assert manifest_payload["rejection_reason_counts"] == {"unresolved": 1}
+    assert manifest_payload["rejection_reason_counts"] == {"non_terminal": 1, "unresolved": 1}
     assert manifest_payload["dataproto_meta_info"] == {"max_padded_length": 16}
 
 
