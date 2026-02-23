@@ -135,6 +135,7 @@ def test_run_flash_attn_rebuild_script_dry_run_uses_safe_defaults() -> None:
     assert "rebuild-flash-attn" in result.stdout
     assert "CORES=8" in result.stdout
     assert "FLASH_ATTN_CUDA_ARCHS=120" in result.stdout
+    assert "pipefail" not in result.stdout
 
 
 def test_run_flash_attn_rebuild_script_dry_run_has_no_log_dir_side_effect(tmp_path: Path) -> None:

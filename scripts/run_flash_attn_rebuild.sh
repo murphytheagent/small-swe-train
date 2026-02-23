@@ -24,7 +24,7 @@ RUN_LABEL="${FLASH_ATTN_BUILD_RUN_LABEL:-$(date -u +%Y%m%dT%H%M%SZ)_flash_attn_r
 LOG_DIR="${FLASH_ATTN_BUILD_LOG_DIR:-${PROJECT_ROOT}/outputs/flash_attn_rebuild/${RUN_LABEL}}"
 
 WRAP_CMD=(
-  "set -euo pipefail"
+  "set -eu"
   "cd ${PROJECT_ROOT}"
   "make rebuild-flash-attn CORES=${MAX_JOBS} UV=${UV_BIN} VENV_PYTHON=${VENV_PYTHON} FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARCHS} FLASH_ATTN_PACKAGE=${FLASH_ATTN_PACKAGE}"
 )
