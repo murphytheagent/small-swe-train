@@ -603,8 +603,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
     parser.add_argument("--config-name", default="rft_swe")
     parser.add_argument(
         "--trainer-module",
-        default="verl.trainer.fsdp_sft_trainer",
-        help=f"verl trainer module (see {_VERL_SFT_TRAINER_DOC})",
+        default="verl_integration.fsdp_sft_trainer_entry",
+        help=(
+            "trainer module (project wrapper around verl entrypoint; "
+            f"upstream source: {_VERL_SFT_TRAINER_DOC})"
+        ),
     )
     parser.add_argument("--python-bin", default=sys.executable)
     parser.add_argument("--nnodes", type=int, default=1)

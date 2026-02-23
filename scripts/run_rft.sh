@@ -24,10 +24,12 @@ NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 NNODES="${NNODES:-1}"
 # Grounded defaults:
 # - verl SFT trainer entrypoint: https://github.com/lasgroup/SDPO/blob/main/verl/trainer/fsdp_sft_trainer.py
+# - local wrapper keeps verl behavior but guards flash-attn portability:
+#   src/verl_integration/fsdp_sft_trainer_entry.py
 # - vLLM OpenAI server entrypoint: https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
 # - Wrapper module delegates to vLLM entrypoint with flash-attn ABI guard:
 #   src/trainer/vllm_api_server_entry.py
-RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE:-verl.trainer.fsdp_sft_trainer}"
+RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE:-verl_integration.fsdp_sft_trainer_entry}"
 RFT_TASK_NAME="${RFT_TASK_NAME:-small-swe-rft}"
 RFT_RUNTIME_MODE="${RFT_RUNTIME_MODE:-loop}"
 RFT_MANAGE_VLLM="${RFT_MANAGE_VLLM:-1}"
