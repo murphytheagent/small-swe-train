@@ -29,6 +29,22 @@ def _run_script(
     )
 
 
+def _write_python_defaults_stub(tmp_path: Path, defaults_line: str) -> Path:
+    stub_path = tmp_path / "python-defaults-stub.sh"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1:-}\" == \"-\" ]]; then\n"
+        "  cat >/dev/null\n"
+        f"  printf '%s\\n' '{defaults_line}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exec python3 \"$@\"\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
 def test_run_rft_script_dry_run_prints_verl_command() -> None:
     result = _run_script("run_rft.sh", "trainer.total_training_steps=1")
     assert "-m torch.distributed.run" in result.stdout
@@ -45,6 +61,29 @@ def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
     )
     assert "--tensor-parallel-size 2" in result.stdout
     assert "--data-parallel-size 4" in result.stdout
+
+
+def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topology(
+    tmp_path: Path,
+) -> None:
+    fake_python = _write_python_defaults_stub(
+        tmp_path,
+        (
+            "100 8 64 32 1 1 512 2 2 "
+            "http://127.0.0.1:8000/v1 "
+            "Qwen/Qwen3-4B-Instruct-2507 90 1024 0.0 1.0"
+        ),
+    )
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+        env_overrides={
+            "NPROC_PER_NODE": "8",
+            "PYTHON_BIN": str(fake_python),
+        },
+    )
+    assert "--tensor-parallel-size 2" in result.stdout
+    assert "--data-parallel-size 2" in result.stdout
 
 
 def test_run_rft_script_dry_run_uses_centralized_collector_in_flight_default() -> None:
