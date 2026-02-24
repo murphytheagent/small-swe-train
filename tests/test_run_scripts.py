@@ -149,3 +149,49 @@ def test_run_rft_onpolicy_rollout_proof_script_honors_explicit_batch_overrides()
     )
     assert "data.train_batch_size=16" in result.stdout
     assert "data.micro_batch_size_per_gpu=2" in result.stdout
+
+
+def test_run_flash_attn_rebuild_script_dry_run_uses_safe_defaults() -> None:
+    result = _run_script("run_flash_attn_rebuild.sh")
+    assert "--partition gpu" in result.stdout
+    assert "--gres gpu:1" in result.stdout
+    assert "--cpus-per-task 8" in result.stdout
+    assert "--mem 128G" in result.stdout
+    assert "rebuild-flash-attn" in result.stdout
+    assert "CORES=8" in result.stdout
+    assert "FLASH_ATTN_CUDA_ARCHS=120" in result.stdout
+    assert "pipefail" not in result.stdout
+
+
+def test_run_flash_attn_rebuild_script_dry_run_has_no_log_dir_side_effect(tmp_path: Path) -> None:
+    log_dir = tmp_path / "flash-attn-rebuild-logs"
+    result = _run_script(
+        "run_flash_attn_rebuild.sh",
+        env_overrides={"FLASH_ATTN_BUILD_LOG_DIR": str(log_dir)},
+    )
+    assert str(log_dir / "slurm-%j.out") in result.stdout
+    assert str(log_dir / "slurm-%j.err") in result.stdout
+    assert not log_dir.exists()
+
+
+def test_run_flash_attn_rebuild_script_honors_env_overrides() -> None:
+    result = _run_script(
+        "run_flash_attn_rebuild.sh",
+        env_overrides={
+            "FLASH_ATTN_BUILD_PARTITION": "gpu",
+            "FLASH_ATTN_BUILD_GRES": "gpu:2",
+            "FLASH_ATTN_BUILD_CPUS_PER_TASK": "12",
+            "FLASH_ATTN_BUILD_MEM": "96G",
+            "FLASH_ATTN_BUILD_TIME": "02:30:00",
+            "FLASH_ATTN_BUILD_MAX_JOBS": "4",
+            "FLASH_ATTN_CUDA_ARCHS": "90",
+        },
+    )
+    assert "--partition gpu" in result.stdout
+    assert "--gres gpu:2" in result.stdout
+    assert "--cpus-per-task 12" in result.stdout
+    assert "--mem 96G" in result.stdout
+    assert "--time 02:30:00" in result.stdout
+    assert "rebuild-flash-attn" in result.stdout
+    assert "CORES=4" in result.stdout
+    assert "FLASH_ATTN_CUDA_ARCHS=90" in result.stdout
