@@ -4,6 +4,7 @@ import pytest
 
 from verl_integration.swe_bridge_agent_loop import (
     append_response_tokens,
+    build_agent_loop_messages,
     build_bridge_task_context,
     build_tool_response_messages,
 )
@@ -45,6 +46,39 @@ def test_build_tool_response_messages_keeps_non_empty_blocks() -> None:
         ]
     )
     assert messages == [{"role": "user", "content": "<tool_response>{\"stdout\":\"ok\"}</tool_response>"}]
+
+
+def test_build_agent_loop_messages_adds_system_prompt_and_trailing_user_nudge() -> None:
+    messages = build_agent_loop_messages(
+        {
+            "raw_prompt": [
+                {"role": "user", "content": "Investigate the failing test."},
+                {"role": "assistant", "content": "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"test\"}}</tool_call>"},
+            ]
+        }
+    )
+
+    assert messages[0]["role"] == "system"
+    assert "Assistant output contract" in messages[0]["content"]
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"].startswith("Return the next assistant turn now.")
+
+
+def test_build_agent_loop_messages_prepends_contract_to_existing_system_message() -> None:
+    messages = build_agent_loop_messages(
+        {
+            "raw_prompt": [
+                {"role": "system", "content": "Existing system guidance."},
+                {"role": "user", "content": "Fix bug."},
+            ]
+        }
+    )
+
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"].endswith("Existing system guidance.")
+    assert "Assistant output contract" in messages[0]["content"]
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"] == "Fix bug."
 
 
 def test_append_response_tokens_preserves_generated_vs_tool_masks() -> None:

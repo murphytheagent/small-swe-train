@@ -16,11 +16,22 @@ from env.container_pool import BatchContainerPool, ContainerHandle
 from env.docker_executor import DockerToolExecutor
 from env.runtime_protocol import EnvironmentStep, ToolRequest
 from env.task_dataset import TaskSample
+from prompts.chat_contract import build_assistant_contract_prompt
 from rollout.onpolicy_collector import _build_patch_apply_command
 from verl_integration.env_bridge import run_env_bridge_step
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+_SYSTEM_PROMPT_PREFIX = (
+    "You are an autonomous software engineering agent working in a real repository.\n"
+    "Investigate the codebase, run tools, apply targeted edits, and verify fixes with tests.\n"
+    "Return exactly one assistant turn each time and follow the tool-output contract exactly.\n"
+)
+_ROLLOUT_NUDGE = (
+    "Return the next assistant turn now. Use bash/search/edit while still working. "
+    "If solved, return one submit tool call with a concise final_response."
+)
 
 try:  # pragma: no cover - exercised in train runtime
     from verl.experimental.agent_loop.agent_loop import (
@@ -109,6 +120,42 @@ def build_bridge_task_context(kwargs: Mapping[str, Any]) -> BridgeLoopTaskContex
         prompt_text=prompt_text,
         patch=patch,
     )
+
+
+def build_agent_loop_messages(kwargs: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Normalize prompt messages and enforce a tool-contract-guided generation state."""
+    parsed_messages: list[dict[str, str]] = []
+    raw_prompt = kwargs.get("raw_prompt")
+    if isinstance(raw_prompt, Sequence) and not isinstance(raw_prompt, (str, bytes)):
+        for item in raw_prompt:
+            if not isinstance(item, Mapping):
+                continue
+            role = _as_role_text(item.get("role"))
+            content = _as_content_text(item.get("content"))
+            if role and content:
+                parsed_messages.append({"role": role, "content": content})
+
+    if not parsed_messages:
+        fallback_prompt = _extract_prompt_text(kwargs).strip()
+        if fallback_prompt:
+            parsed_messages.append({"role": "user", "content": fallback_prompt})
+
+    if not parsed_messages:
+        raise ValueError("swe_bridge_agent requires at least one prompt message.")
+
+    system_contract = _SYSTEM_PROMPT_PREFIX + build_assistant_contract_prompt()
+    if parsed_messages[0]["role"] == "system":
+        parsed_messages[0] = {
+            "role": "system",
+            "content": f"{system_contract}\n\n{parsed_messages[0]['content']}",
+        }
+    else:
+        parsed_messages.insert(0, {"role": "system", "content": system_contract})
+
+    if parsed_messages[-1]["role"] != "user":
+        parsed_messages.append({"role": "user", "content": _ROLLOUT_NUDGE})
+
+    return parsed_messages
 
 
 def build_tool_response_messages(tool_response_blocks: Sequence[str]) -> list[dict[str, str]]:
@@ -206,7 +253,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         )
 
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
-        messages = list(kwargs["raw_prompt"])
+        messages = build_agent_loop_messages(kwargs)
         multi_modal_data = await self.process_vision_info(messages)
         images = multi_modal_data.get("images")
         videos = multi_modal_data.get("videos")
@@ -327,6 +374,13 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 except Exception as exc:
                     bridge_error = f"swe_bridge_agent bridge failure: {exc}"
                     loop_exit_reason = "bridge_failure"
+                    logger.warning(
+                        "swe_bridge_agent bridge failure task_id=%s assistant_turn=%d error=%s assistant_excerpt=%s",
+                        task_context.task_id,
+                        assistant_turns,
+                        exc,
+                        _truncate_text(assistant_text, limit=240),
+                    )
                     break
                 metrics["tool_calls"] += time.monotonic() - bridge_started
 
@@ -459,6 +513,43 @@ def _require_non_empty_text(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"swe_bridge_agent requires non-empty `{label}` metadata.")
     return value.strip()
+
+
+def _as_role_text(value: Any) -> str:
+    role = _as_content_text(value).strip().lower()
+    if role not in {"system", "user", "assistant"}:
+        return ""
+    return role
+
+
+def _as_content_text(value: Any) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+        return ""
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        chunks: list[str] = []
+        for item in value:
+            if isinstance(item, Mapping):
+                text_piece = item.get("text")
+                if isinstance(text_piece, str) and text_piece.strip():
+                    chunks.append(text_piece.strip())
+            elif isinstance(item, str) and item.strip():
+                chunks.append(item.strip())
+        return "\n".join(chunks).strip()
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return text
+
+
+def _truncate_text(value: str, *, limit: int) -> str:
+    if limit < 4:
+        return value[:limit]
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
 
 
 def _coerce_positive_int(value: Any, *, fallback: int) -> int:
