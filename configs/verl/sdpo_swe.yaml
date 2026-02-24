@@ -140,6 +140,14 @@ actor_rollout_ref:
       vllm:
         data_parallel_size: 4
       sglang: {}
+    multi_turn:
+      enable: true
+      max_assistant_turns: 8
+      max_user_turns: 8
+    agent:
+      default_agent_loop: tool_agent
+      # This stays empty in the baseline stage; bridge-loop integration sets it.
+      agent_loop_config_path: ""
     val_kwargs:
       top_k: -1
       top_p: 1.0

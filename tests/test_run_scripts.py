@@ -219,8 +219,17 @@ def test_run_sdft_script_dry_run_includes_loss_mode_override() -> None:
 
 def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     result = _run_script("run_sdpo.sh", "data.train_batch_size=4")
+    assert "-m verl_integration.main_ppo_entry" in result.stdout
     assert "--config-name sdpo_swe" in result.stdout
     assert "data.train_batch_size=4" in result.stdout
+
+
+def test_run_sdpo_script_dry_run_allows_entrypoint_override() -> None:
+    result = _run_script(
+        "run_sdpo.sh",
+        env_overrides={"SDPO_TRAINER_MODULE": "verl.trainer.main_ppo"},
+    )
+    assert "-m verl.trainer.main_ppo" in result.stdout
 
 
 def test_run_rft_onpolicy_rollout_proof_script_sets_onpolicy_overrides() -> None:
