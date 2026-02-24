@@ -99,7 +99,7 @@ def _tool_schema_line(tool_name: str, schema: Mapping[str, Any]) -> str:
 
 
 def _build_tool_schema_prompt() -> str:
-    lines = ["7) Tool arg schema (from TOOL_SCHEMAS):"]
+    lines = ["8) Tool arg schema (from TOOL_SCHEMAS):"]
     for tool_name in ALLOWED_TOOLS:
         schema = TOOL_SCHEMAS.get(tool_name)
         if isinstance(schema, Mapping):
@@ -118,13 +118,14 @@ def build_assistant_contract_prompt(
     allowed_tools_text = ", ".join(ALLOWED_TOOLS)
     return (
         "Assistant output contract:\n"
-        f"1) Optional reasoning span: {d.think_start}...{d.think_end}\n"
-        f"2) 1..{max_tool_calls} ordered tool calls: "
+        "1) Output only contract blocks; no plain prose outside delimiters.\n"
+        f"2) Optional reasoning span: {d.think_start}...{d.think_end}\n"
+        f"3) 1..{max_tool_calls} ordered tool calls: "
         f"{d.tool_call_start}{{\"tool\":\"...\",\"args\":{{...}}}}{d.tool_call_end}\n"
-        f"3) Allowed tools are exactly: {allowed_tools_text}.\n"
-        "4) Required args by tool: "
+        f"4) Allowed tools are exactly: {allowed_tools_text}.\n"
+        "5) Required args by tool: "
         "bash.command, search.query, edit.path+edit.patch, submit.final_response.\n"
-        "5) Do not invent tool names or wrapper labels.\n"
-        f"6) Terminal tool is '{terminal_tool}', and if present it must be the only tool call.\n"
+        "6) Do not invent tool names or wrapper labels.\n"
+        f"7) Terminal tool is '{terminal_tool}', and if present it must be the only tool call.\n"
         f"{_build_tool_schema_prompt()}"
     )

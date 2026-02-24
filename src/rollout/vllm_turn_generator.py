@@ -15,8 +15,9 @@ from prompts.chat_contract import build_assistant_contract_prompt
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _DEFAULT_SYSTEM_PROMPT = (
-    "You are an on-policy SWE rollout assistant.\n"
-    "Return exactly one assistant turn with no extra prose.\n"
+    "You are a software engineering agent working in a real repository.\n"
+    "Inspect code, run tools, apply targeted edits, and validate behavior with tests.\n"
+    "Return one assistant turn at a time and follow the tool-output contract exactly.\n"
 )
 
 
@@ -166,9 +167,6 @@ def _build_messages(
 ) -> list[dict[str, str]]:
     initial_user_message = _build_initial_user_message(
         task=task,
-        attempt_index=attempt_index,
-        turn_index=turn_index,
-        step_index=step_index,
     )
 
     messages: list[dict[str, str]] = [
@@ -194,8 +192,9 @@ def _build_messages(
             "role": "user",
             "content": (
                 "Return the next assistant turn now. "
-                "Output exactly one tool_call block with no extra prose. "
-                "If the task is solved, return a submit tool call."
+                "Follow the assistant output contract strictly and avoid free-form prose. "
+                "If work remains, emit bash/search/edit tool calls. "
+                "If solved, emit one submit tool call."
             ),
         }
     )
@@ -205,29 +204,21 @@ def _build_messages(
 def _build_initial_user_message(
     *,
     task: TaskSample,
-    attempt_index: int,
-    turn_index: int,
-    step_index: int,
 ) -> str:
     fail_to_pass = _stable_json(task.fail_to_pass)
     pass_to_pass = _stable_json(task.pass_to_pass)
     return (
-        f"Task ID: {task.task_id}\n"
-        f"Step Index: {step_index}\n"
-        f"Attempt Index: {attempt_index}\n"
-        f"Turn Index: {turn_index}\n"
-        "Field meanings:\n"
-        f"- task_id: {task.task_id}\n"
-        f"- image_name: {task.image_name}\n"
-        f"- step_index: {step_index}\n"
-        f"- attempt_index: {attempt_index}\n"
-        f"- turn_index: {turn_index}\n"
-        "Problem Statement:\n"
+        "You are solving one software engineering task.\n"
+        "Task objective:\n"
         f"{task.problem_statement}\n\n"
-        "FAIL_TO_PASS:\n"
+        "Test targets:\n"
+        "- FAIL_TO_PASS: tests currently failing that should pass after your fix.\n"
         f"{fail_to_pass}\n\n"
-        "PASS_TO_PASS:\n"
-        f"{pass_to_pass}"
+        "- PASS_TO_PASS: tests currently passing that must keep passing (regression guard).\n"
+        f"{pass_to_pass}\n\n"
+        "Execution guidance:\n"
+        "- Use tool calls to inspect code, edit files, and run validation commands.\n"
+        "- Submit only when you are ready to end the attempt."
     )
 
 

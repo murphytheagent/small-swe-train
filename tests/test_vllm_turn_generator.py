@@ -115,9 +115,11 @@ def test_build_vllm_turn_generator_calls_chat_completion(monkeypatch) -> None:
     first_user = messages[1]
     assert isinstance(first_user, dict)
     first_user_content = str(first_user.get("content", ""))
-    assert "Field meanings" in first_user_content
-    assert "- task_id: task-1" in first_user_content
-    assert "- image_name: img:1" in first_user_content
+    assert "Task objective" in first_user_content
+    assert "FAIL_TO_PASS: tests currently failing" in first_user_content
+    assert "PASS_TO_PASS: tests currently passing" in first_user_content
+    assert "Task ID:" not in first_user_content
+    assert "Step Index:" not in first_user_content
     assert "FAIL_TO_PASS" in first_user_content
     assert "PASS_TO_PASS" in first_user_content
 
