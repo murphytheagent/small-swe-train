@@ -145,9 +145,8 @@ actor_rollout_ref:
       max_assistant_turns: 8
       max_user_turns: 8
     agent:
-      default_agent_loop: tool_agent
-      # This stays empty in the baseline stage; bridge-loop integration sets it.
-      agent_loop_config_path: ""
+      default_agent_loop: swe_bridge_agent
+      agent_loop_config_path: configs/verl/agent_loops/swe_bridge_agent.yaml
     val_kwargs:
       top_k: -1
       top_p: 1.0

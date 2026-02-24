@@ -15,6 +15,8 @@ def _apply_local_runtime_bootstrap() -> None:
 
 _apply_local_runtime_bootstrap()
 
+# Register local SDPO agent-loop integrations before trainer startup.
+from verl_integration import swe_bridge_agent_loop  # noqa: F401,E402
 from verl.trainer.main_ppo import main  # noqa: E402
 
 
