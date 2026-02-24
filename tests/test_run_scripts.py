@@ -37,13 +37,57 @@ def test_run_rft_script_dry_run_prints_verl_command() -> None:
     assert "trainer.total_training_steps=1" in result.stdout
 
 
-def test_run_rft_script_dry_run_defaults_vllm_tensor_parallel_to_nproc() -> None:
+def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
     result = _run_script(
         "run_rft.sh",
         "trainer.total_training_steps=1",
         env_overrides={"NPROC_PER_NODE": "8"},
     )
+    assert "--tensor-parallel-size 2" in result.stdout
+    assert "--data-parallel-size 4" in result.stdout
+
+
+def test_run_rft_script_dry_run_uses_centralized_collector_in_flight_default() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+    )
+    assert "collector_max_in_flight_tasks=32" in result.stdout
+
+
+def test_run_rft_script_dry_run_allows_explicit_tp_override() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+        env_overrides={
+            "NPROC_PER_NODE": "8",
+            "RFT_VLLM_TP_SIZE": "8",
+        },
+    )
     assert "--tensor-parallel-size 8" in result.stdout
+    assert "--data-parallel-size" not in result.stdout
+
+
+def test_run_rft_script_dry_run_propagates_collector_in_flight_override() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+        env_overrides={
+            "RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS": "6",
+        },
+    )
+    assert "collector_max_in_flight_tasks=6" in result.stdout
+
+
+def test_run_rft_script_dry_run_propagates_collector_max_turns_override() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+        env_overrides={
+            "RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT": "16",
+        },
+    )
+    assert "collector_max_turns_per_attempt=16" in result.stdout
 
 
 def test_run_rft_script_dry_run_respects_explicit_vllm_extra_args() -> None:

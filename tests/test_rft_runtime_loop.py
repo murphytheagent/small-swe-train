@@ -149,9 +149,10 @@ def test_run_loop_skips_checkpoint_root_prune_when_trainer_is_skipped(
         return object()
 
     def _fake_collect(*, request, tokenizer):
-        del request, tokenizer
+        del tokenizer
         step = call_state["collect_calls"]
         call_state["collect_calls"] += 1
+        assert request.start_step_index == step
         if step == 0:
             return {
                 "selected_rows": [
@@ -300,9 +301,10 @@ def test_run_loop_checkpoint_pruning_tracks_only_checkpoint_steps(
         }
 
     def _fake_collect(*, request, tokenizer):
-        del request, tokenizer
+        del tokenizer
         step = call_state["collect_calls"]
         call_state["collect_calls"] += 1
+        assert request.start_step_index == step
         if step in {0, 2}:
             return {"selected_rows": [_selected_row(step)], "rejected_rows": []}
         return {
@@ -434,7 +436,8 @@ def test_run_loop_does_not_restart_vllm_after_final_step(
         return object()
 
     def _fake_collect(*, request, tokenizer):
-        del request, tokenizer
+        del tokenizer
+        assert request.start_step_index == 0
         return {
             "selected_rows": [
                 {

@@ -37,12 +37,23 @@ RFT_VLLM_LAUNCH_MODULE="${RFT_VLLM_LAUNCH_MODULE:-trainer.vllm_api_server_entry}
 RFT_VLLM_READY_TIMEOUT_SEC="${RFT_VLLM_READY_TIMEOUT_SEC:-180}"
 RFT_VLLM_STOP_TIMEOUT_SEC="${RFT_VLLM_STOP_TIMEOUT_SEC:-30}"
 RFT_VLLM_EXTRA_ARGS="${RFT_VLLM_EXTRA_ARGS:-}"
+RFT_VLLM_TP_SIZE="${RFT_VLLM_TP_SIZE:-}"
+RFT_VLLM_DP_SIZE="${RFT_VLLM_DP_SIZE:-}"
+RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS:-}"
+RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT="${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT:-}"
 RFT_DATA_CONFIG_NAME="${RFT_DATA_CONFIG_NAME:-on_policy_swe_smith}"
 RFT_TURN_GENERATOR_MODE="${RFT_TURN_GENERATOR_MODE:-default}"
 
 _load_rft_runtime_defaults() {
   "${PYTHON_BIN}" - <<'PY'
-from config import DEFAULT_TRAINING_MODEL_NAME, rft_runtime_defaults
+import os
+
+from config import (
+    DEFAULT_TRAINING_MODEL_NAME,
+    resolve_rft_collector_max_in_flight_default,
+    resolve_rft_vllm_parallel_defaults,
+    rft_runtime_defaults,
+)
 
 runtime = rft_runtime_defaults()
 loop = runtime.get("loop", {})
@@ -62,12 +73,26 @@ def _finite_float(value, fallback):
         return float(value)
     return fallback
 
+
+def _parse_positive_int(value, fallback):
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed >= 1 else fallback
+
+
 steps = _positive_int(loop.get("steps"), 1)
 samples_per_task = _positive_int(loop.get("samples_per_task"), 1)
 task_batch_size = _positive_int(loop.get("task_batch_size"), 1)
+collector_max_in_flight_tasks = resolve_rft_collector_max_in_flight_default(
+    task_batch_size=task_batch_size
+)
 sft_num_epoch_per_batch = _positive_int(loop.get("sft_num_epoch_per_batch"), 1)
 checkpoint_keep_last = _positive_int(loop.get("checkpoint_keep_last"), 1)
 train_batch_size = _positive_int(loop.get("train_batch_size"), samples_per_task * task_batch_size)
+nproc_per_node = _parse_positive_int(os.environ.get("NPROC_PER_NODE"), 1)
+default_tp, default_dp = resolve_rft_vllm_parallel_defaults(nproc_per_node=nproc_per_node)
 
 base_url = vllm.get("base_url")
 if not isinstance(base_url, str) or not base_url.strip():
@@ -84,9 +109,12 @@ print(
     steps,
     samples_per_task,
     task_batch_size,
+    collector_max_in_flight_tasks,
     sft_num_epoch_per_batch,
     checkpoint_keep_last,
     train_batch_size,
+    default_tp,
+    default_dp,
     base_url.strip(),
     model_name.strip(),
     request_timeout_sec,
@@ -98,19 +126,33 @@ PY
 }
 
 RFT_DEFAULTS="$(_load_rft_runtime_defaults)"
-read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P <<<"${RFT_DEFAULTS}"
+read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P <<<"${RFT_DEFAULTS}"
 
 RFT_STEPS="${RFT_STEPS:-${DEFAULT_RFT_STEPS}}"
 SAMPLES_PER_TASK="${SAMPLES_PER_TASK:-${DEFAULT_SAMPLES_PER_TASK}}"
 RFT_TASK_BATCH_SIZE="${RFT_TASK_BATCH_SIZE:-${DEFAULT_RFT_TASK_BATCH_SIZE}}"
+RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS:-${DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}}"
 RFT_SFT_NUM_EPOCH_PER_BATCH="${RFT_SFT_NUM_EPOCH_PER_BATCH:-${DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH}}"
 RFT_CHECKPOINT_KEEP_LAST="${RFT_CHECKPOINT_KEEP_LAST:-${DEFAULT_RFT_CHECKPOINT_KEEP_LAST}}"
 RFT_BATCH_SIZE="${RFT_BATCH_SIZE:-$((SAMPLES_PER_TASK * RFT_TASK_BATCH_SIZE))}"
 RFT_TRAIN_BATCH_SIZE="${RFT_TRAIN_BATCH_SIZE:-${DEFAULT_RFT_TRAIN_BATCH_SIZE}}"
 RFT_OUTPUT_DIR="${RFT_OUTPUT_DIR:-${PROJECT_ROOT}/outputs/rft_runtime}"
 RFT_INITIAL_MODEL="${RFT_INITIAL_MODEL:-${DEFAULT_VLLM_MODEL}}"
+
+RFT_VLLM_TP_SIZE="${RFT_VLLM_TP_SIZE:-${DEFAULT_VLLM_TP_SIZE}}"
+if [[ -z "${RFT_VLLM_DP_SIZE}" ]]; then
+  if (( NPROC_PER_NODE % RFT_VLLM_TP_SIZE == 0 )); then
+    RFT_VLLM_DP_SIZE="$(( NPROC_PER_NODE / RFT_VLLM_TP_SIZE ))"
+  else
+    RFT_VLLM_DP_SIZE="${DEFAULT_VLLM_DP_SIZE}"
+  fi
+fi
+
 if [[ -z "${RFT_VLLM_EXTRA_ARGS}" ]]; then
-  RFT_VLLM_EXTRA_ARGS="--tensor-parallel-size ${NPROC_PER_NODE}"
+  RFT_VLLM_EXTRA_ARGS="--tensor-parallel-size ${RFT_VLLM_TP_SIZE}"
+  if (( RFT_VLLM_DP_SIZE > 1 )); then
+    RFT_VLLM_EXTRA_ARGS="${RFT_VLLM_EXTRA_ARGS} --data-parallel-size ${RFT_VLLM_DP_SIZE}"
+  fi
 fi
 
 export SMALL_SWE_VLLM_BASE_URL="${SMALL_SWE_VLLM_BASE_URL:-${DEFAULT_VLLM_BASE_URL}}"
@@ -184,6 +226,13 @@ LOOP_CMD=(
   --vllm-stop-timeout-sec "${RFT_VLLM_STOP_TIMEOUT_SEC}"
   --vllm-extra-args "${RFT_VLLM_EXTRA_ARGS}"
 )
+
+if [[ -n "${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}" ]]; then
+  LOOP_CMD+=(--collector-max-in-flight-tasks "${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}")
+fi
+if [[ -n "${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT}" ]]; then
+  LOOP_CMD+=(--collector-max-turns-per-attempt "${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT}")
+fi
 
 if [[ "${RFT_MANAGE_VLLM}" == "0" ]]; then
   LOOP_CMD+=(--skip-vllm-management)

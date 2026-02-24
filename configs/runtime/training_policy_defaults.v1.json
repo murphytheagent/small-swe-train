@@ -94,7 +94,8 @@
     "tool_timeout_sec": 30,
     "container_start_timeout_sec": 120,
     "attempt_timeout_sec": 300,
-    "max_tool_calls_per_turn": 3
+    "max_tool_calls_per_turn": 3,
+    "max_in_flight_tasks": 4
   },
   "rft_handoff": {
     "max_sequence_length": 12288,
@@ -120,6 +121,7 @@
       "steps": 100,
       "samples_per_task": 8,
       "task_batch_size": 128,
+      "collector_max_in_flight_tasks": 32,
       "train_batch_size": 1024,
       "checkpoint_keep_last": 1
     },
@@ -130,6 +132,14 @@
       "max_tokens": 1024,
       "temperature": 0.0,
       "top_p": 1.0
+    },
+    "vllm_parallelism": {
+      "by_nproc_per_node": {
+        "8": {
+          "tensor_parallel_size": 2,
+          "data_parallel_size": 4
+        }
+      }
     }
   },
   "runtime": {

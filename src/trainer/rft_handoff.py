@@ -59,22 +59,25 @@ def build_onpolicy_collector(
 def collect_rollouts_for_steps(
     *,
     total_steps: int,
+    start_step_index: int = 0,
     collector: OnPolicyRolloutCollector,
     output_dir: str | Path | None = None,
 ) -> list[list[RolloutRow]]:
     if total_steps < 1:
         raise ValueError("total_steps must be >= 1")
+    if start_step_index < 0:
+        raise ValueError("start_step_index must be >= 0")
 
     all_rows: list[list[RolloutRow]] = []
     base_dir = Path(output_dir) if output_dir is not None else None
     if base_dir is not None:
         base_dir.mkdir(parents=True, exist_ok=True)
 
-    for step_index in range(total_steps):
-        rows = collector.collect_step(step_index)
+    for local_step_index in range(total_steps):
+        rows = collector.collect_step(start_step_index + local_step_index)
         all_rows.append(rows)
         if base_dir is not None:
-            output_path = base_dir / f"step_{step_index:05d}.jsonl"
+            output_path = base_dir / f"step_{local_step_index:05d}.jsonl"
             write_jsonl_rows(output_path, rows)
     return all_rows
 
@@ -82,6 +85,7 @@ def collect_rollouts_for_steps(
 def collect_rft_sft_batch_for_steps(
     *,
     total_steps: int,
+    start_step_index: int = 0,
     collector: OnPolicyRolloutCollector,
     tokenizer: SupportsOffsetsTokenizer,
     handoff_overrides: Mapping[str, Any] | None = None,
@@ -90,6 +94,7 @@ def collect_rft_sft_batch_for_steps(
     """Collect rollouts, apply centralized RFT rejection policy, and build SFT tensors."""
     rollout_steps = collect_rollouts_for_steps(
         total_steps=total_steps,
+        start_step_index=start_step_index,
         collector=collector,
         output_dir=output_dir,
     )

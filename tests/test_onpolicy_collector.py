@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import threading
+import time
 
 from config import (
     OnPolicyDataConfig,
@@ -65,9 +67,11 @@ class _BatchTrackingPool:
     def __init__(self) -> None:
         self.acquire_inputs: list[list[str]] = []
         self.release_calls = 0
+        self._lock = threading.Lock()
 
     def acquire(self, tasks: list[TaskSample]) -> tuple[ContainerHandle, ...]:
-        self.acquire_inputs.append([task.task_id for task in tasks])
+        with self._lock:
+            self.acquire_inputs.append([task.task_id for task in tasks])
         return tuple(
             ContainerHandle(
                 task_id=task.task_id,
@@ -79,7 +83,8 @@ class _BatchTrackingPool:
         )
 
     def release_all(self) -> None:
-        self.release_calls += 1
+        with self._lock:
+            self.release_calls += 1
 
 
 class _FakeExecutor:
@@ -137,6 +142,39 @@ def _dataset_loader(_dataset_id: str, _split: str) -> list[dict[str, object]]:
             "FAIL_TO_PASS": ["a"],
             "PASS_TO_PASS": ["b"],
         }
+    ]
+
+
+def _four_task_dataset_loader(_dataset_id: str, _split: str) -> list[dict[str, object]]:
+    return [
+        {
+            "task_id": "task-a",
+            "image_name": "img:1",
+            "problem_statement": "Fix A",
+            "FAIL_TO_PASS": [],
+            "PASS_TO_PASS": [],
+        },
+        {
+            "task_id": "task-b",
+            "image_name": "img:2",
+            "problem_statement": "Fix B",
+            "FAIL_TO_PASS": [],
+            "PASS_TO_PASS": [],
+        },
+        {
+            "task_id": "task-c",
+            "image_name": "img:3",
+            "problem_statement": "Fix C",
+            "FAIL_TO_PASS": [],
+            "PASS_TO_PASS": [],
+        },
+        {
+            "task_id": "task-d",
+            "image_name": "img:4",
+            "problem_statement": "Fix D",
+            "FAIL_TO_PASS": [],
+            "PASS_TO_PASS": [],
+        },
     ]
 
 
@@ -304,7 +342,7 @@ def test_onpolicy_collector_uses_fresh_container_per_attempt() -> None:
     assert pool.release_calls == 2
 
 
-def test_onpolicy_collector_acquires_full_task_batch_once_per_attempt() -> None:
+def test_onpolicy_collector_dispatches_one_task_per_trajectory_attempt() -> None:
     settings = _settings()
     settings = OnPolicySettings(
         data=settings.data,
@@ -347,9 +385,122 @@ def test_onpolicy_collector_acquires_full_task_batch_once_per_attempt() -> None:
     rows = collector.collect_step(0)
 
     assert len(rows) == 4
-    assert pool.acquire_inputs == [["task-a", "task-b"], ["task-a", "task-b"]]
-    assert pool.release_calls == 2
+    assert pool.acquire_inputs == [["task-a"], ["task-a"], ["task-b"], ["task-b"]]
+    assert pool.release_calls == 4
+    assert [(row["task_id"], row["attempt_index"]) for row in rows] == [
+        ("task-a", 0),
+        ("task-a", 1),
+        ("task-b", 0),
+        ("task-b", 1),
+    ]
     assert all(row["batch_container_count"] == 2 for row in rows)
+
+
+def test_onpolicy_collector_runs_task_attempts_concurrently_when_enabled(
+    monkeypatch,
+) -> None:
+    settings = _settings()
+    settings = OnPolicySettings(
+        data=settings.data,
+        runtime=replace(
+            settings.runtime,
+            task_batch_size=4,
+            attempts_per_task=1,
+            env_pool_size=4,
+            max_in_flight_tasks=4,
+        ),
+    )
+    pool = _BatchTrackingPool()
+    executor = _FakeExecutor()
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    collector = OnPolicyRolloutCollector(
+        settings=settings,
+        turn_generator=lambda **_kwargs: (
+            '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+        ),
+        dataset_loader=_four_task_dataset_loader,
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+    )
+
+    def _fake_collect_attempt(**kwargs):
+        nonlocal active, max_active
+        task_position = int(kwargs["task_position"])
+        task = kwargs["task"]
+        with lock:
+            active += 1
+            if active > max_active:
+                max_active = active
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return {
+            "task_id": task.task_id,
+            "resolved": True,
+            "task_position": task_position,
+        }
+
+    monkeypatch.setattr(collector, "_collect_attempt", _fake_collect_attempt)
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 4
+    assert max_active >= 2
+    assert sorted(pool.acquire_inputs) == [["task-a"], ["task-b"], ["task-c"], ["task-d"]]
+    assert [row["task_position"] for row in rows] == [0, 1, 2, 3]
+    assert pool.release_calls == 4
+
+
+def test_onpolicy_collector_parallel_dispatch_reduces_rollout_wall_time(
+    monkeypatch,
+) -> None:
+    def _run_once(max_in_flight_tasks: int) -> float:
+        settings = _settings()
+        settings = OnPolicySettings(
+            data=settings.data,
+            runtime=replace(
+                settings.runtime,
+                task_batch_size=4,
+                attempts_per_task=1,
+                env_pool_size=4,
+                max_in_flight_tasks=max_in_flight_tasks,
+            ),
+        )
+        pool = _BatchTrackingPool()
+        executor = _FakeExecutor()
+        collector = OnPolicyRolloutCollector(
+            settings=settings,
+            turn_generator=lambda **_kwargs: (
+                '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+            ),
+            dataset_loader=_four_task_dataset_loader,
+            pool_factory=lambda _runtime: pool,
+            executor_factory=lambda _handle, _runtime: executor,
+        )
+
+        def _fake_collect_attempt(**kwargs):
+            task = kwargs["task"]
+            task_position = int(kwargs["task_position"])
+            time.sleep(0.08)
+            return {
+                "task_id": task.task_id,
+                "resolved": True,
+                "task_position": task_position,
+            }
+
+        monkeypatch.setattr(collector, "_collect_attempt", _fake_collect_attempt)
+        start = time.perf_counter()
+        rows = collector.collect_step(0)
+        elapsed = time.perf_counter() - start
+        assert len(rows) == 4
+        return elapsed
+
+    serial_elapsed = _run_once(1)
+    parallel_elapsed = _run_once(4)
+    assert parallel_elapsed < serial_elapsed * 0.6
 
 
 def test_onpolicy_collector_applies_task_patch_before_rollout_turns() -> None:
@@ -458,7 +609,7 @@ def test_onpolicy_collector_keeps_batch_running_when_patch_init_executor_raises(
     assert rows[1]["task_id"] == "task-b"
     assert rows[1]["resolved"] is True
     assert rows[1]["task_patch_applied"] is True
-    assert pool.release_calls == 1
+    assert pool.release_calls == 2
 
 
 def test_onpolicy_collector_keeps_tool_output_aligned_with_first_tool_call() -> None:

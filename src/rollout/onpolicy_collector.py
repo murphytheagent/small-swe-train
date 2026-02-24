@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from typing import Callable, Protocol, Sequence
 
@@ -82,7 +83,7 @@ def _default_attempt_resolver(
 
 
 class OnPolicyRolloutCollector:
-    """Collect task-attempt rollout rows with per-batch container pooling."""
+    """Collect task-attempt rollout rows with trajectory-level task dispatch."""
 
     def __init__(
         self,
@@ -119,32 +120,76 @@ class OnPolicyRolloutCollector:
             dataset_loader=self._dataset_loader,
         )
 
+        max_workers = max(1, min(runtime.max_in_flight_tasks, runtime.env_pool_size, len(tasks)))
+        ordered_rows_by_task: list[list[RolloutRow] | None] = [None] * len(tasks)
+
+        if max_workers <= 1:
+            for task_position, task in enumerate(tasks):
+                ordered_rows_by_task[task_position] = self._collect_task_attempt_rows(
+                    step_index=step_index,
+                    task_position=task_position,
+                    task=task,
+                    runtime=runtime,
+                    batch_container_count=max_workers,
+                )
+        else:
+            future_to_position = {}
+            with ThreadPoolExecutor(max_workers=max_workers) as pool_executor:
+                for task_position, task in enumerate(tasks):
+                    future = pool_executor.submit(
+                        self._collect_task_attempt_rows,
+                        step_index=step_index,
+                        task_position=task_position,
+                        task=task,
+                        runtime=runtime,
+                        batch_container_count=max_workers,
+                    )
+                    future_to_position[future] = task_position
+
+                for future in as_completed(future_to_position):
+                    task_position = future_to_position[future]
+                    ordered_rows_by_task[task_position] = future.result()
+
+        rows: list[RolloutRow] = []
+        for task_rows in ordered_rows_by_task:
+            if task_rows is None:
+                continue
+            rows.extend(task_rows)
+        return rows
+
+    def _collect_task_attempt_rows(
+        self,
+        *,
+        step_index: int,
+        task_position: int,
+        task: TaskSample,
+        runtime: OnPolicyRuntimeConfig,
+        batch_container_count: int,
+    ) -> list[RolloutRow]:
         rows: list[RolloutRow] = []
         for attempt_index in range(runtime.attempts_per_task):
             pool = self._pool_factory(runtime)
             try:
-                handles = pool.acquire(tasks)
-                if len(handles) != len(tasks):
+                handles = pool.acquire([task])
+                if len(handles) != 1:
                     raise RuntimeError(
-                        "Container pool must provide exactly one handle per task in the batch."
+                        "Container pool must provide exactly one handle per dispatched task."
                     )
-
-                for task_position, (task, handle) in enumerate(zip(tasks, handles)):
-                    executor = self._executor_factory(handle, runtime)
-                    row = self._collect_attempt(
-                        step_index=step_index,
-                        task_position=task_position,
-                        batch_container_count=len(handles),
-                        task=task,
-                        handle=handle,
-                        attempt_index=attempt_index,
-                        runtime=runtime,
-                        executor=executor,
-                    )
-                    rows.append(row)
+                handle = handles[0]
+                executor = self._executor_factory(handle, runtime)
+                row = self._collect_attempt(
+                    step_index=step_index,
+                    task_position=task_position,
+                    batch_container_count=batch_container_count,
+                    task=task,
+                    handle=handle,
+                    attempt_index=attempt_index,
+                    runtime=runtime,
+                    executor=executor,
+                )
+                rows.append(row)
             finally:
                 pool.release_all()
-
         return rows
 
     def _collect_attempt(
