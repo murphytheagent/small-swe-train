@@ -3,19 +3,20 @@
 # Think tokens are EXCLUDED from loss (§6 masking policy).
 #
 # Hardware target: single node, 8× A100/H100 GPUs
-# Model: Qwen3-4B with LoRA
+# Model: Qwen3-4B-Instruct-2507 with LoRA
 #
 # This stage must pass format quality gates before entering step-SDPO.
 # Gate thresholds are in configs/runtime/phase_transition_gates.v1.json.
 
 defaults:
+  - model_defaults
   - sft_trainer
   - user
   - _self_
 
 actor_rollout_ref:
   model:
-    path: Qwen/Qwen3-4B
+    path: ${model_defaults.primary_name}
     enable_gradient_checkpointing: true
     use_remove_padding: true
     trust_remote_code: false
@@ -62,6 +63,9 @@ actor_rollout_ref:
 
 # Maximum sequence length for RFT data (shorter than SDPO — no reprompt overhead)
 max_model_len: 12288
+
+model:
+  partial_pretrain: ${model_defaults.primary_name}
 
 data:
   train_batch_size: 64

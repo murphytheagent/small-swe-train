@@ -23,6 +23,7 @@ _CONFIGS_DIR = _PROJECT_ROOT / "configs"
 _DATA_CONFIGS_DIR = _CONFIGS_DIR / "data"
 _TRAINING_POLICY_PATH = _CONFIGS_DIR / "runtime" / "training_policy_defaults.v1.json"
 _PHASE_TRANSITION_GATES_PATH = _CONFIGS_DIR / "runtime" / "phase_transition_gates.v1.json"
+_VERL_MODEL_DEFAULTS_PATH = _CONFIGS_DIR / "verl" / "model_defaults.yaml"
 _MODEL_CONFIG_OVERRIDE_DIR = _CONFIGS_DIR / "model"
 _BUNDLED_MODEL_CONFIGS_DIR = Path(__file__).resolve().parent / "prompts" / "model_configs"
 
@@ -56,6 +57,7 @@ class OnPolicyRuntimeConfig:
     container_start_timeout_sec: int
     attempt_timeout_sec: int
     max_tool_calls_per_turn: int
+    max_in_flight_tasks: int = 4
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ class RFTSelectionPolicy:
     reject_on_executor_error: bool
     reject_on_parse_error: bool
     reject_on_validation_errors: bool
+    reject_on_invalid_final_submit: bool
     relabel_rejected_attempts: bool
 
 
@@ -98,6 +101,34 @@ def phase_transition_gates_defaults() -> dict[str, Any]:
     """Load and cache phase-transition gate thresholds."""
     with _PHASE_TRANSITION_GATES_PATH.open() as fh:
         return json.load(fh)
+
+
+@functools.lru_cache(maxsize=1)
+def verl_model_defaults() -> dict[str, Any]:
+    """Load and cache shared verl model defaults."""
+    with _VERL_MODEL_DEFAULTS_PATH.open() as fh:
+        payload = yaml.safe_load(fh)
+    if not isinstance(payload, Mapping):
+        raise ValueError(
+            f"Shared verl model defaults {_VERL_MODEL_DEFAULTS_PATH} must be a mapping."
+        )
+    return dict(payload)
+
+
+def default_training_model_name() -> str:
+    """Return the canonical training model name from shared verl config."""
+    defaults = verl_model_defaults()
+    model_defaults = defaults.get("model_defaults")
+    if not isinstance(model_defaults, Mapping):
+        raise ValueError(
+            f"`model_defaults` block is missing from {_VERL_MODEL_DEFAULTS_PATH}."
+        )
+    model_name = model_defaults.get("primary_name")
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError(
+            f"`model_defaults.primary_name` must be a non-empty string in {_VERL_MODEL_DEFAULTS_PATH}."
+        )
+    return model_name.strip()
 
 
 @functools.lru_cache(maxsize=8)
@@ -144,6 +175,67 @@ def rft_handoff_defaults() -> dict[str, Any]:
     return dict(handoff)
 
 
+def rft_runtime_defaults() -> dict[str, Any]:
+    """Return centralized RFT runtime loop/vLLM defaults from runtime policy JSON."""
+    defaults = training_policy_defaults()
+    runtime_defaults = defaults.get("rft_runtime")
+    if not isinstance(runtime_defaults, Mapping):
+        raise ValueError("`rft_runtime` block is missing from training policy defaults.")
+    return dict(runtime_defaults)
+
+
+def resolve_rft_collector_max_in_flight_default(*, task_batch_size: int) -> int:
+    """Resolve default collector in-flight task concurrency for an RFT loop run."""
+    if isinstance(task_batch_size, bool) or task_batch_size < 1:
+        raise ValueError("task_batch_size must be an integer >= 1.")
+
+    runtime_defaults = rft_runtime_defaults()
+    loop_defaults = runtime_defaults.get("loop")
+    configured_value: int | None = None
+    if isinstance(loop_defaults, Mapping):
+        configured_value = _coerce_optional_positive_int(loop_defaults.get("collector_max_in_flight_tasks"))
+
+    resolved = configured_value if configured_value is not None else int(task_batch_size)
+    return max(1, min(resolved, int(task_batch_size)))
+
+
+def resolve_rft_vllm_parallel_defaults(*, nproc_per_node: int) -> tuple[int, int]:
+    """Resolve default vLLM TP/DP sizes for a given node world size."""
+    if isinstance(nproc_per_node, bool) or nproc_per_node < 1:
+        raise ValueError("nproc_per_node must be an integer >= 1.")
+
+    runtime_defaults = rft_runtime_defaults()
+    parallel_defaults = runtime_defaults.get("vllm_parallelism")
+    resolved_tp: int | None = None
+    resolved_dp: int | None = None
+
+    if isinstance(parallel_defaults, Mapping):
+        by_nproc = parallel_defaults.get("by_nproc_per_node")
+        if isinstance(by_nproc, Mapping):
+            keyed_defaults = by_nproc.get(str(int(nproc_per_node)))
+            if isinstance(keyed_defaults, Mapping):
+                resolved_tp = _coerce_optional_positive_int(keyed_defaults.get("tensor_parallel_size"))
+                resolved_dp = _coerce_optional_positive_int(keyed_defaults.get("data_parallel_size"))
+        if resolved_tp is None:
+            resolved_tp = _coerce_optional_positive_int(parallel_defaults.get("default_tensor_parallel_size"))
+        if resolved_dp is None:
+            resolved_dp = _coerce_optional_positive_int(parallel_defaults.get("default_data_parallel_size"))
+
+    if resolved_tp is None:
+        resolved_tp = 2 if int(nproc_per_node) >= 4 else 1
+    if int(nproc_per_node) % resolved_tp != 0:
+        resolved_tp = 1
+        resolved_dp = None
+
+    max_supported_dp = max(1, int(nproc_per_node) // resolved_tp)
+    if resolved_dp is None:
+        resolved_dp = max_supported_dp
+    else:
+        resolved_dp = max(1, min(resolved_dp, max_supported_dp))
+
+    return resolved_tp, resolved_dp
+
+
 def output_contract_defaults() -> dict[str, Any]:
     """Return the output-contract defaults dictionary from runtime policy."""
     defaults = training_policy_defaults()
@@ -168,6 +260,7 @@ MIN_TOOL_CALLS_PER_TURN: int = int(_output_contract["min_tool_calls_per_turn"])
 MAX_TOOL_CALLS_PER_TURN: int = int(_output_contract["max_tool_calls_per_turn"])
 TERMINAL_TOOL_NAME: str = str(_output_contract["terminal_tool"]).strip().lower()
 SUBMIT_MUST_BE_ONLY_TOOL_CALL: bool = bool(_output_contract["submit_must_be_only_tool_call"])
+DEFAULT_TRAINING_MODEL_NAME: str = default_training_model_name()
 
 if MIN_TOOL_CALLS_PER_TURN < 1:
     raise ValueError("min_tool_calls_per_turn must be >= 1")
@@ -203,6 +296,14 @@ def _coerce_positive_int(value: Any, *, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{label} must be an integer >= 1.")
     return value
+
+
+def _coerce_optional_positive_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return int(value)
 
 
 def _coerce_non_negative_int(value: Any, *, label: str) -> int:
@@ -246,41 +347,55 @@ def _parse_on_policy_data_config(payload: Mapping[str, Any]) -> OnPolicyDataConf
 
 
 def _parse_on_policy_runtime_config(payload: Mapping[str, Any]) -> OnPolicyRuntimeConfig:
+    task_batch_size = _coerce_positive_int(
+        payload.get("task_batch_size"),
+        label="on_policy.task_batch_size",
+    )
+    attempts_per_task = _coerce_positive_int(
+        payload.get("attempts_per_task"),
+        label="on_policy.attempts_per_task",
+    )
+    max_turns_per_attempt = _coerce_positive_int(
+        payload.get("max_turns_per_attempt"),
+        label="on_policy.max_turns_per_attempt",
+    )
+    env_pool_size = _coerce_positive_int(
+        payload.get("env_pool_size"),
+        label="on_policy.env_pool_size",
+    )
+    tool_timeout_sec = _coerce_positive_int(
+        payload.get("tool_timeout_sec"),
+        label="on_policy.tool_timeout_sec",
+    )
+    container_start_timeout_sec = _coerce_positive_int(
+        payload.get("container_start_timeout_sec"),
+        label="on_policy.container_start_timeout_sec",
+    )
+    attempt_timeout_sec = _coerce_positive_int(
+        payload.get("attempt_timeout_sec"),
+        label="on_policy.attempt_timeout_sec",
+    )
+    max_tool_calls_per_turn = _coerce_positive_int(
+        payload.get("max_tool_calls_per_turn"),
+        label="on_policy.max_tool_calls_per_turn",
+    )
+    max_in_flight_tasks = _coerce_positive_int(
+        payload.get("max_in_flight_tasks", task_batch_size),
+        label="on_policy.max_in_flight_tasks",
+    )
+
     runtime = OnPolicyRuntimeConfig(
         enabled=_coerce_bool(payload.get("enabled"), label="on_policy.enabled"),
         rollout_only=_coerce_bool(payload.get("rollout_only"), label="on_policy.rollout_only"),
-        task_batch_size=_coerce_positive_int(
-            payload.get("task_batch_size"),
-            label="on_policy.task_batch_size",
-        ),
-        attempts_per_task=_coerce_positive_int(
-            payload.get("attempts_per_task"),
-            label="on_policy.attempts_per_task",
-        ),
-        max_turns_per_attempt=_coerce_positive_int(
-            payload.get("max_turns_per_attempt"),
-            label="on_policy.max_turns_per_attempt",
-        ),
-        env_pool_size=_coerce_positive_int(
-            payload.get("env_pool_size"),
-            label="on_policy.env_pool_size",
-        ),
-        tool_timeout_sec=_coerce_positive_int(
-            payload.get("tool_timeout_sec"),
-            label="on_policy.tool_timeout_sec",
-        ),
-        container_start_timeout_sec=_coerce_positive_int(
-            payload.get("container_start_timeout_sec"),
-            label="on_policy.container_start_timeout_sec",
-        ),
-        attempt_timeout_sec=_coerce_positive_int(
-            payload.get("attempt_timeout_sec"),
-            label="on_policy.attempt_timeout_sec",
-        ),
-        max_tool_calls_per_turn=_coerce_positive_int(
-            payload.get("max_tool_calls_per_turn"),
-            label="on_policy.max_tool_calls_per_turn",
-        ),
+        task_batch_size=task_batch_size,
+        attempts_per_task=attempts_per_task,
+        max_turns_per_attempt=max_turns_per_attempt,
+        env_pool_size=env_pool_size,
+        tool_timeout_sec=tool_timeout_sec,
+        container_start_timeout_sec=container_start_timeout_sec,
+        attempt_timeout_sec=attempt_timeout_sec,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
+        max_in_flight_tasks=max_in_flight_tasks,
     )
 
     if runtime.env_pool_size < runtime.task_batch_size:
@@ -321,6 +436,11 @@ def resolve_on_policy_settings(
     runtime_payload = on_policy_runtime_defaults()
     if runtime_overrides is not None:
         runtime_payload.update(runtime_overrides)
+        if (
+            "task_batch_size" in runtime_overrides
+            and "max_in_flight_tasks" not in runtime_overrides
+        ):
+            runtime_payload["max_in_flight_tasks"] = runtime_payload["task_batch_size"]
 
     data_payload = on_policy_data_defaults(data_config_name)
     if data_overrides is not None:
@@ -373,6 +493,10 @@ def _parse_rft_selection_policy(payload: Mapping[str, Any]) -> RFTSelectionPolic
         reject_on_validation_errors=_coerce_bool(
             payload.get("reject_on_validation_errors"),
             label="rft_handoff.selection.reject_on_validation_errors",
+        ),
+        reject_on_invalid_final_submit=_coerce_bool(
+            payload.get("reject_on_invalid_final_submit"),
+            label="rft_handoff.selection.reject_on_invalid_final_submit",
         ),
         relabel_rejected_attempts=_coerce_bool(
             payload.get("relabel_rejected_attempts"),

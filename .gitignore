@@ -2,3 +2,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .venv/
+.DS_Store
+*.egg-info/
+outputs/
+wandb/

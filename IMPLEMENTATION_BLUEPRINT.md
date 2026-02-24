@@ -1,6 +1,6 @@
 # Implementation Blueprint: step-SDPO on verl for SWE-Agent Training
 
-> **Status**: Draft v1 — 2026-02-21
+> **Status**: Active implementation snapshot — 2026-02-24 03:26 UTC
 > **Scope**: Single-node 8×GPU training of Qwen3-4B with LoRA on SWE-bench using
 > `lasgroup/SDPO` (a verl fork) as the training and rollout framework.
 
@@ -19,6 +19,7 @@
 9. [Dependency Stack](#9-dependency-stack)
 10. [Milestone Schedule](#10-milestone-schedule)
 11. [Configuration & Type Authority](#11-configuration--type-authority)
+12. [Current Build and Run Commands](#12-current-build-and-run-commands)
 
 ---
 
@@ -501,8 +502,8 @@ docker>=24.0                   # container runtime
 - [x] `configs/verl/rft_swe.yaml` finalized (done — see `configs/verl/`)
 - [x] `verl_integration/mask_injector.py` for RFT-stage masking (2026-02-21 09:55 UTC)
 - [x] Launcher dry-run path validated via `tests/test_run_scripts.py` (2026-02-21 19:03 UTC)
-- [ ] Environment executor (Docker sandbox) — prerequisite for on-policy rollouts
-- [ ] RFT rollout loop: generate N attempts per task, filter successful, train CE on masked tokens
+- [x] Environment executor (Docker sandbox) wired into on-policy collector/runtime loop (2026-02-23 10:45 UTC)
+- [x] RFT rollout loop: generate N attempts per task, filter by rejection policy, train CE on accepted trajectories, then restart vLLM from latest checkpoint (2026-02-23 10:45 UTC)
 
 ### M3: Environment Executor
 - [x] `verl_integration/env_bridge.py` — deterministic rollout bridge with executor protocol (2026-02-21 09:55 UTC)
@@ -564,6 +565,27 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-22 11:17 UTC] Follow-up next-step implementation after PR #4 merge: aligned `onpolicy_collector` row `turn_index` with the sampled `assistant_response`/`tool_output` turn (instead of terminal submit turn), added regression assertions in `tests/test_onpolicy_collector.py`, and revalidated full local suite (`104 passed, 2 skipped`).
 - [2026-02-22 21:27 UTC] Addressed PR #6 P1 reliability findings in `src/rollout/onpolicy_collector.py` and `src/env/docker_executor.py`: task patches are now streamed via stdin to `docker exec -i` (instead of embedding full base64 patch payload in argv), and task-env init executor exceptions are downgraded into row-level `executor_error` values so one failing task does not crash batch collection.
 - [2026-02-22 21:27 UTC] Added regressions in `tests/test_onpolicy_collector.py` and `tests/test_docker_executor.py`; validation status: `python3 -m pytest tests/test_onpolicy_collector.py tests/test_onpolicy_rollout_adapter.py tests/test_sdpo_trainer.py tests/test_run_scripts.py tests/test_task_dataset.py tests/test_docker_executor.py -q` passing (`34 passed`).
+- [2026-02-22 23:26 UTC] Added explicit Step-SDPO runner I/O interface via `scripts/run_step_sdpo_scaffold.py`: JSON/JSONL input rows in, deterministic scaffold step execution, and stable output artifacts (`rollout_rows.jsonl`, `teacher_prompts.jsonl`, `sdpo_step_summary.json`) out.
+- [2026-02-22 23:26 UTC] Added CLI regression coverage in `tests/test_run_step_sdpo_scaffold_script.py` to validate artifact creation and summary/reward fields.
+- [2026-02-22 23:34 UTC] Added optional RFT checkpoint/saving scaffold in `SDPOTrainerScaffold.run_onpolicy_rft_step(...)`: when `checkpoint_dir` is provided, the trainer now writes `checkpoints/global_step_<n>/rft_step_manifest.json` plus `checkpoints/latest_checkpoint.txt`, and exposes `checkpoint_dir`/`checkpoint_exists` in `OnPolicyRFTStepArtifacts`.
+- [2026-02-22 23:34 UTC] Added regression coverage in `tests/test_sdpo_trainer.py` for checkpoint manifest and latest-pointer writes.
+- [2026-02-22 23:42 UTC] Hardened RFT checkpoint contract to require explicit `global_step` whenever `checkpoint_dir` is set; removed fallback to `total_steps` to prevent iterative runs from overwriting `global_step_1`.
+- [2026-02-22 23:42 UTC] Added regression coverage in `tests/test_sdpo_trainer.py` asserting checkpoint writes fail fast without explicit `global_step`.
+- [2026-02-22 23:50 UTC] Moved `global_step` checkpoint validation to run before `collect_rft_sft_batch_for_steps(...)` so invalid checkpoint requests fail fast before rollout/training side effects; added regression `test_run_onpolicy_rft_step_checkpoint_validation_fails_before_rollout`.
+- [2026-02-23 02:30 UTC] Split RFT flow into dedicated `src/trainer/rft_trainer.py` (`RFTTrainerScaffold`) and kept `SDPOTrainerScaffold` as the SDPO-focused facade with compatibility delegation for `run_onpolicy_rft_step(...)`.
+- [2026-02-23 02:30 UTC] Extended on-policy rollout artifacts for GPU runs: collector rows now include `image_name` plus serialized `trajectory_steps`/`trajectory_history`, and `collect_rft_sft_batch_for_steps(...)` now writes `rollout_rows.jsonl` + `rollout_artifact_summary.json` (unique task IDs, task-image pairs, trajectory counts) under `output_dir`.
+- [2026-02-23 02:30 UTC] Hardened RFT handoff identity checks to fail fast on empty `task_id` before SFT batch assembly; added regression coverage in `tests/test_onpolicy_rollout_adapter.py`, `tests/test_rft_trainer.py`, and updated `tests/test_sdpo_trainer.py` to resolve settings from real dataset config name (`on_policy_swe_smith`) while preserving deterministic local fakes.
+- [2026-02-23 03:08 UTC] Wired live on-policy RFT runtime orchestration into a dedicated module `src/verl_integration/rft_runtime.py` (typed request signature + `rft_runtime_manifest.json` artifact), moved rejection-policy selection logic into `src/verl_integration/rft_rejection.py`, and updated `OnPolicyRFTDataset` to route runtime collection through this explicit handoff layer.
+- [2026-02-23 03:44 UTC] Refactored RFT runtime ownership so project-specific handoff logic now lives under `src/trainer/` (`rft_handoff.py`, `rft_runtime.py`, `rft_rejection.py`), while `src/verl_integration/` keeps thin compatibility wrappers only.
+- [2026-02-23 10:15 UTC] Rewired `data.on_policy.turn_generator_mode=default` to a live vLLM OpenAI-compatible generator (`src/rollout/vllm_turn_generator.py`) and updated `scripts/run_rft.sh` to load centralized `rft_runtime.loop` defaults (`RFT_STEPS`, `SAMPLES_PER_TASK`, `RFT_TASK_BATCH_SIZE`, `RFT_SFT_NUM_EPOCH_PER_BATCH`) from `configs/runtime/training_policy_defaults.v1.json`.
+- [2026-02-23 10:15 UTC] Updated collector/handoff/rejection flow to enforce trajectory-level RFT rejection criteria (any tool formatting failure, missing terminal submit, invalid terminal submit args) via rollout metadata fields (`trajectory_format_valid`, `final_turn_has_submit`, `final_submit_format_valid`), plus regression coverage in `tests/test_onpolicy_collector.py`, `tests/test_onpolicy_rollout_adapter.py`, `tests/test_rft_runtime.py`, and new `tests/test_vllm_turn_generator.py`.
+- [2026-02-23 10:15 UTC] Test status: `python3 -m pytest -q` passing (`126 passed, 2 skipped`).
+- [2026-02-23 10:45 UTC] Implemented an end-to-end RFT supervisor loop in `src/trainer/rft_runtime_loop.py`: per step it collects live trajectories, writes selected samples to `MultiTurnSFTDataset` parquet (`src/trainer/rft_multiturn_dataset.py`), trains via `torchrun -m verl.trainer.fsdp_sft_trainer` with per-step `data.train_files`, then resolves the newest `global_step_*` checkpoint and points vLLM to the new `huggingface/` snapshot for the next step.
+- [2026-02-23 10:45 UTC] Updated `scripts/run_rft.sh` to use this loop by default (`RFT_RUNTIME_MODE=loop`) while preserving `RFT_RUNTIME_MODE=direct` for proof/legacy one-shot launches; updated `scripts/run_rft_onpolicy_rollout_proof.sh` to pin `direct` mode explicitly.
+- [2026-02-23 10:45 UTC] Added regression coverage in `tests/test_rft_multiturn_dataset.py` and `tests/test_rft_runtime_loop.py`, plus launcher compatibility checks in `tests/test_run_scripts.py`.
+- [2026-02-23 10:47 UTC] Grounded vLLM/verl launcher imports with explicit doc/source links in `scripts/run_rft.sh` and `src/trainer/rft_runtime_loop.py` to keep external module entrypoints tied to authoritative references.
+- [2026-02-24 03:02 UTC] Locked realistic validated defaults in `configs/runtime/training_policy_defaults.v1.json` and config resolvers: `collector_max_in_flight_tasks=32` plus 8-GPU vLLM parallelism `TP/DP=2/4`; merged collector-concurrency PR #9 into PR #8 base.
+- [2026-02-24 03:26 UTC] Hardened `scripts/run_rft.sh` TP/DP auto-resolution so non-divisible TP overrides now safely fall back to `DP=1` (instead of reusing default DP and producing invalid combinations); added regression `test_run_rft_script_dry_run_nondivisible_tp_override_falls_back_to_dp_one`.
 
 ---
 
@@ -603,3 +625,65 @@ M5 (eval) can run against either M2 or M4 checkpoints.
   - configured terminal tool is not in schema `ALLOWED_TOOLS`,
   - configured tool-call bounds are invalid (`min < 1` or `max < min`).
 - This keeps runtime config flexible while preserving schema correctness.
+
+---
+
+## 12. Current Build and Run Commands
+
+### 12.1 Build
+
+Preferred (safe compile parallelism):
+```bash
+make build-train CORES=2
+```
+
+Equivalent `uv` command:
+```bash
+MAX_JOBS=2 uv sync --python 3.13 --extra train
+```
+
+Run tests:
+```bash
+python3 -m pytest -q
+```
+
+### 12.2 Run
+
+Dry-run launcher resolution:
+```bash
+NPROC_PER_NODE=8 bash scripts/run_rft.sh --dry-run trainer.total_training_steps=1
+```
+
+Default runtime loop:
+```bash
+NPROC_PER_NODE=8 WANDB_MODE=offline bash scripts/run_rft.sh
+```
+
+Realistic 2-step profile command:
+```bash
+RFT_STEPS=2 \
+SAMPLES_PER_TASK=8 \
+RFT_TASK_BATCH_SIZE=64 \
+RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT=16 \
+SMALL_SWE_VLLM_MAX_TOKENS=512 \
+NPROC_PER_NODE=8 \
+WANDB_MODE=offline \
+bash scripts/run_rft.sh
+```
+
+Proof-mode direct path:
+```bash
+bash scripts/run_rft_onpolicy_rollout_proof.sh
+```
+
+Flash-attn constrained rebuild via Slurm:
+```bash
+bash scripts/run_flash_attn_rebuild.sh
+```
+
+### 12.3 Locked 8-GPU runtime defaults
+
+- Source of truth: `configs/runtime/training_policy_defaults.v1.json`
+- `rft_runtime.loop.collector_max_in_flight_tasks=32`
+- `rft_runtime.vllm_parallelism.by_nproc_per_node.8.tensor_parallel_size=2`
+- `rft_runtime.vllm_parallelism.by_nproc_per_node.8.data_parallel_size=4`
