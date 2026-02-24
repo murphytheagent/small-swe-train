@@ -1,18 +1,15 @@
-"""Prompt fragments for delimited tool-call contract.
-
-Delimiter strings are loaded from the model-family YAML config via
-``default_delimiters()``.  Legacy module-level constants (``CHATML_START``,
-etc.) are derived from the default (Qwen3) config for backward compatibility.
-"""
+"""Runtime prompt templates and tool-contract text for on-policy rollouts."""
 
 from __future__ import annotations
 
+import json
 import types
 from typing import Any, Mapping, get_args, get_origin, get_type_hints
 
-from prompts.model_delimiters import ModelDelimiters, default_delimiters
 from config import MAX_TOOL_CALLS_PER_TURN, TERMINAL_TOOL_NAME
 from schemas import ALLOWED_TOOLS, TOOL_SCHEMAS
+
+from .model_delimiters import ModelDelimiters, default_delimiters
 
 _d = default_delimiters()
 CHATML_START: str = _d.role_start
@@ -24,6 +21,12 @@ TOOL_CALL_END: str = _d.tool_call_end
 TOOL_RESPONSE_START: str = _d.tool_response_start
 TOOL_RESPONSE_END: str = _d.tool_response_end
 del _d
+
+_DEFAULT_SYSTEM_PROMPT_PREFIX = (
+    "You are a software engineering agent working in a real repository.\n"
+    "Inspect code, run tools, apply targeted patches, and validate behavior with tests.\n"
+    "Return one assistant turn at a time and follow the tool-output contract exactly.\n"
+)
 
 
 def _type_label(annotation: Any) -> str:
@@ -107,6 +110,38 @@ def _build_tool_schema_prompt() -> str:
     return "\n".join(lines)
 
 
+def _build_required_args_prompt() -> str:
+    required_fields: list[str] = []
+    for tool_name in ALLOWED_TOOLS:
+        schema = TOOL_SCHEMAS.get(tool_name)
+        if not isinstance(schema, Mapping):
+            continue
+        required_raw = schema.get("required")
+        if not isinstance(required_raw, (list, tuple, set)):
+            continue
+        for field_name in required_raw:
+            if isinstance(field_name, str):
+                required_fields.append(f"{tool_name}.{field_name}")
+    rendered = ", ".join(required_fields) if required_fields else "-"
+    return f"5) Required args by tool: {rendered}.\n"
+
+
+def _build_tool_examples_prompt() -> str:
+    examples: list[str] = []
+    for tool_name in ALLOWED_TOOLS:
+        schema = TOOL_SCHEMAS.get(tool_name)
+        if not isinstance(schema, Mapping):
+            continue
+        example_raw = schema.get("prompt_example")
+        if not isinstance(example_raw, Mapping):
+            continue
+        serialized = json.dumps(dict(example_raw), ensure_ascii=True, sort_keys=True)
+        examples.append(f"   - {tool_name}: {serialized}")
+    if not examples:
+        return ""
+    return "9) Realistic examples (one tool call each):\n" + "\n".join(examples)
+
+
 def build_assistant_contract_prompt(
     *,
     delimiters: ModelDelimiters | None = None,
@@ -116,16 +151,60 @@ def build_assistant_contract_prompt(
     """Return an instruction block that matches the v1.6 action contract."""
     d = delimiters or default_delimiters()
     allowed_tools_text = ", ".join(ALLOWED_TOOLS)
+    tool_schema_block = _build_tool_schema_prompt()
+    tool_examples_block = _build_tool_examples_prompt()
+    suffix = (
+        f"{tool_schema_block}\n{tool_examples_block}"
+        if tool_examples_block
+        else tool_schema_block
+    )
     return (
         "Assistant output contract:\n"
-        "1) Output only contract blocks; no plain prose outside delimiters.\n"
+        "1) Surround each tool action with a tool-call delimiter block.\n"
         f"2) Optional reasoning span: {d.think_start}...{d.think_end}\n"
-        f"3) 1..{max_tool_calls} ordered tool calls: "
+        f"3) Emit 1..{max_tool_calls} ordered tool calls: "
         f"{d.tool_call_start}{{\"tool\":\"...\",\"args\":{{...}}}}{d.tool_call_end}\n"
-        f"4) Allowed tools are exactly: {allowed_tools_text}.\n"
-        "5) Required args by tool: "
-        "bash.command, search.query, edit.path+edit.patch, submit.final_response.\n"
+        "   Every tool-call JSON object MUST include both keys: 'tool' and 'args'.\n"
+        "   'args' MUST be a JSON object (never put command/query/path at top level).\n"
+        f"4) Allowed tools: {allowed_tools_text}.\n"
+        f"{_build_required_args_prompt()}"
         "6) Do not invent tool names or wrapper labels.\n"
-        f"7) Terminal tool is '{terminal_tool}', and if present it must be the only tool call.\n"
-        f"{_build_tool_schema_prompt()}"
+        f"7) Terminal tool is '{terminal_tool}', you must end conversation with this tool, and if present it must be the only tool call.\n"
+        f"{suffix}"
     )
+
+
+def build_onpolicy_system_prompt() -> str:
+    """Build the default system prompt for on-policy runtime rollouts."""
+    return _DEFAULT_SYSTEM_PROMPT_PREFIX + build_assistant_contract_prompt()
+
+
+def build_onpolicy_initial_user_message(
+    *,
+    problem_statement: str,
+    fail_to_pass: Any,
+    pass_to_pass: Any,
+) -> str:
+    """Build the initial user message for one on-policy task attempt."""
+    fail_to_pass_text = _stable_json(fail_to_pass)
+    pass_to_pass_text = _stable_json(pass_to_pass)
+    return (
+        "You are solving one software engineering task.\n"
+        "Task objective:\n"
+        f"{problem_statement}\n\n"
+        "Test targets:\n"
+        "- FAIL_TO_PASS: tests currently failing that should pass after your fix.\n"
+        f"{fail_to_pass_text}\n\n"
+        "- PASS_TO_PASS: tests currently passing that must keep passing (regression guard).\n"
+        f"{pass_to_pass_text}\n\n"
+        "Execution guidance:\n"
+        "- Use tool calls to inspect code, apply patches, and run validation commands.\n"
+        "- Submit only when you are ready to end the attempt."
+    )
+
+
+def _stable_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=True, sort_keys=True)
+    except TypeError:
+        return json.dumps(str(value), ensure_ascii=True)

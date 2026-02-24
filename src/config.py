@@ -89,6 +89,14 @@ class RFTHandoffSettings:
     selection: RFTSelectionPolicy
 
 
+@dataclass(frozen=True)
+class DeterministicTruncationSettings:
+    head_tokens: int
+    tail_tokens: int
+    apply_after_payload_canonicalization: bool
+    apply_before_teacher_prompt_wrapping: bool
+
+
 @functools.lru_cache(maxsize=1)
 def training_policy_defaults() -> dict[str, Any]:
     """Load and cache the full training policy defaults dict."""
@@ -182,6 +190,25 @@ def rft_runtime_defaults() -> dict[str, Any]:
     if not isinstance(runtime_defaults, Mapping):
         raise ValueError("`rft_runtime` block is missing from training policy defaults.")
     return dict(runtime_defaults)
+
+
+def feedback_processing_defaults() -> dict[str, Any]:
+    """Return centralized feedback-processing defaults from runtime policy JSON."""
+    defaults = training_policy_defaults()
+    feedback_processing = defaults.get("feedback_processing")
+    if not isinstance(feedback_processing, Mapping):
+        raise ValueError("`feedback_processing` block is missing from training policy defaults.")
+    return dict(feedback_processing)
+
+
+@functools.lru_cache(maxsize=1)
+def resolve_feedback_self_containment_signals_enabled() -> bool:
+    """Resolve whether canonicalizer should extract self-containment signals."""
+    payload = feedback_processing_defaults()
+    raw_value = payload.get("extract_self_containment_signals", False)
+    if not isinstance(raw_value, bool):
+        raise ValueError("`feedback_processing.extract_self_containment_signals` must be a boolean.")
+    return raw_value
 
 
 def adaptation_defaults() -> dict[str, Any]:
@@ -578,6 +605,39 @@ def resolve_rft_handoff_settings(
             label="rft_handoff.pad_token_id",
         ),
         selection=selection,
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def resolve_feedback_deterministic_truncation_settings() -> DeterministicTruncationSettings:
+    """Resolve deterministic truncation settings for feedback/tool-response payloads."""
+    feedback_payload = _require_mapping(
+        feedback_processing_defaults().get("deterministic_truncation"),
+        label="feedback_processing.deterministic_truncation",
+    )
+    return DeterministicTruncationSettings(
+        head_tokens=_coerce_positive_int(
+            feedback_payload.get("head_tokens"),
+            label="feedback_processing.deterministic_truncation.head_tokens",
+        ),
+        tail_tokens=_coerce_positive_int(
+            feedback_payload.get("tail_tokens"),
+            label="feedback_processing.deterministic_truncation.tail_tokens",
+        ),
+        apply_after_payload_canonicalization=_coerce_bool(
+            feedback_payload.get("apply_after_payload_canonicalization"),
+            label=(
+                "feedback_processing.deterministic_truncation."
+                "apply_after_payload_canonicalization"
+            ),
+        ),
+        apply_before_teacher_prompt_wrapping=_coerce_bool(
+            feedback_payload.get("apply_before_teacher_prompt_wrapping"),
+            label=(
+                "feedback_processing.deterministic_truncation."
+                "apply_before_teacher_prompt_wrapping"
+            ),
+        ),
     )
 
 

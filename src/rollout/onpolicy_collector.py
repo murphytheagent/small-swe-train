@@ -12,7 +12,7 @@ from env.docker_executor import DockerToolExecutor
 from env.runtime_protocol import EnvironmentStep, ToolRequest, ToolResponse
 from env.task_dataset import DatasetLoader, TaskSample, load_task_batch
 from schemas import RolloutRow
-from verl_integration.env_bridge import run_env_bridge_step
+from verl_integration.env_bridge import build_tool_response_payload, run_env_bridge_step
 
 
 class ToolExecutorLike(Protocol):
@@ -44,6 +44,7 @@ class AssistantTurnGenerator(Protocol):
 AttemptResolver = Callable[[TaskSample, int, bool, Sequence[EnvironmentStep]], bool]
 PoolFactory = Callable[[OnPolicyRuntimeConfig], CollectorPool]
 ExecutorFactory = Callable[[ContainerHandle, OnPolicyRuntimeConfig], ToolExecutorLike]
+_TASK_PATCH_INIT_MAX_ATTEMPTS = 2
 
 
 def _default_turn_generator(
@@ -220,6 +221,7 @@ class OnPolicyRolloutCollector:
         tool_name = ""
         exit_code = 0
         task_patch_applied = False
+        container_init_succeeded = True
         attempt_steps: list[EnvironmentStep] = []
         trajectory_steps: list[dict[str, object]] = []
         trajectory_assistant_turns: list[str] = []
@@ -233,6 +235,7 @@ class OnPolicyRolloutCollector:
             runtime=runtime,
         )
         if init_failure is not None:
+            container_init_succeeded = False
             executor_error = init_failure
             turn_index = 0
         elif _task_patch(task) is not None:
@@ -296,12 +299,7 @@ class OnPolicyRolloutCollector:
                 first_step = bridge_result.steps[0]
                 tool_name = first_step.request.tool
                 exit_code = first_step.response.exit_code
-                tool_output = {
-                    "stdout": first_step.response.stdout,
-                    "stderr": first_step.response.stderr,
-                    "exit_code": first_step.response.exit_code,
-                    "metadata": dict(first_step.response.metadata),
-                }
+                tool_output = build_tool_response_payload(first_step.response)
                 failing_step = next(
                     (step for step in bridge_result.steps if step.response.exit_code != 0),
                     None,
@@ -361,6 +359,7 @@ class OnPolicyRolloutCollector:
             "trajectory_format_valid": trajectory_format_valid,
             "final_turn_has_submit": final_turn_has_submit,
             "final_submit_format_valid": final_submit_format_valid,
+            "container_init_succeeded": container_init_succeeded,
         }
         if collector_error:
             row["collector_error"] = collector_error
@@ -397,19 +396,25 @@ class OnPolicyRolloutCollector:
                 "timeout_sec": runtime.tool_timeout_sec,
             },
         )
-        try:
-            response = executor.run(init_request)
-        except Exception as exc:
-            return f"task_env_init_failed: {exc}"
-        if response.exit_code == 0:
-            return None
-        stderr = response.stderr.strip()
-        if stderr:
-            return f"task_env_init_failed: {stderr}"
-        return (
-            "task_env_init_failed: patch apply command exited with non-zero status "
-            f"{response.exit_code}."
-        )
+        errors: list[str] = []
+        for attempt_index in range(_TASK_PATCH_INIT_MAX_ATTEMPTS):
+            attempt_number = attempt_index + 1
+            attempt_label = f"attempt {attempt_number}/{_TASK_PATCH_INIT_MAX_ATTEMPTS}"
+            try:
+                response = executor.run(init_request)
+            except Exception as exc:
+                errors.append(f"{attempt_label}: {exc}")
+                continue
+            if response.exit_code == 0:
+                return None
+            stderr = response.stderr.strip()
+            if stderr:
+                errors.append(f"{attempt_label}: {stderr}")
+            else:
+                errors.append(
+                    f"{attempt_label}: patch apply command exited with non-zero status {response.exit_code}."
+                )
+        return f"task_env_init_failed: {' | '.join(errors)}"
 
 
 def _default_pool_factory(runtime: OnPolicyRuntimeConfig) -> CollectorPool:
@@ -432,15 +437,16 @@ def _default_executor_factory(
 def _serialize_environment_steps(steps: Sequence[EnvironmentStep]) -> list[dict[str, object]]:
     payload: list[dict[str, object]] = []
     for step in steps:
+        step_response_payload = build_tool_response_payload(step.response)
         payload.append(
             {
                 "step_index": int(step.step_index),
                 "tool": step.request.tool,
                 "args": dict(step.request.args),
-                "stdout": step.response.stdout,
-                "stderr": step.response.stderr,
-                "exit_code": int(step.response.exit_code),
-                "metadata": dict(step.response.metadata),
+                "stdout": str(step_response_payload.get("stdout", "")),
+                "stderr": str(step_response_payload.get("stderr", "")),
+                "exit_code": int(step_response_payload.get("exit_code", step.response.exit_code)),
+                "metadata": dict(step_response_payload.get("metadata", {})),
             }
         )
     return payload
@@ -499,10 +505,40 @@ def _build_patch_apply_command() -> str:
         "exit 2; "
         "fi; "
         'patch_file="$(mktemp)"; '
-        'cleanup() { rm -f "${patch_file}"; }; '
+        'git_apply_err="$(mktemp)"; '
+        'git_apply_3way_err="$(mktemp)"; '
+        'patch_p1_err="$(mktemp)"; '
+        'patch_p0_err="$(mktemp)"; '
+        'cleanup() { '
+        'rm -f "${patch_file}" "${git_apply_err}" "${git_apply_3way_err}" "${patch_p1_err}" "${patch_p0_err}"; '
+        "}; "
         "trap cleanup EXIT; "
         'cat > "${patch_file}"; '
         'cd "${repo_root}"; '
-        'git apply --whitespace=nowarn "${patch_file}"; '
-        'printf "task patch applied in %s\\n" "${repo_root}"'
+        'if git apply --whitespace=nowarn "${patch_file}" >/dev/null 2>"${git_apply_err}"; then '
+        'printf "task patch applied in %s via git-apply\\n" "${repo_root}"; '
+        "exit 0; "
+        "fi; "
+        'if git apply --reverse --check --whitespace=nowarn "${patch_file}" >/dev/null 2>&1; then '
+        'printf "task patch already present in %s\\n" "${repo_root}"; '
+        "exit 0; "
+        "fi; "
+        'if git apply --3way --whitespace=nowarn "${patch_file}" >/dev/null 2>"${git_apply_3way_err}"; then '
+        'printf "task patch applied in %s via git-apply-3way\\n" "${repo_root}"; '
+        "exit 0; "
+        "fi; "
+        'if patch --batch --forward -p1 < "${patch_file}" >/dev/null 2>"${patch_p1_err}"; then '
+        'printf "task patch applied in %s via patch-p1\\n" "${repo_root}"; '
+        "exit 0; "
+        "fi; "
+        'if patch --batch --forward -p0 < "${patch_file}" >/dev/null 2>"${patch_p0_err}"; then '
+        'printf "task patch applied in %s via patch-p0\\n" "${repo_root}"; '
+        "exit 0; "
+        "fi; "
+        'printf "task patch apply failed in %s\\n" "${repo_root}" >&2; '
+        'printf "git apply stderr:\\n%s\\n" "$(cat "${git_apply_err}")" >&2; '
+        'printf "git apply --3way stderr:\\n%s\\n" "$(cat "${git_apply_3way_err}")" >&2; '
+        'printf "patch -p1 stderr:\\n%s\\n" "$(cat "${patch_p1_err}")" >&2; '
+        'printf "patch -p0 stderr:\\n%s\\n" "$(cat "${patch_p0_err}")" >&2; '
+        "exit 1"
     )

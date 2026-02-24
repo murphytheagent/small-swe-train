@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-import shlex
 import subprocess
 from typing import Any
 
 from .command_runner import CommandRunner, default_command_runner
 from .runtime_protocol import ToolRequest, ToolResponse
+
+_BASH_TIMEOUT_MIN = 1
+_BASH_TIMEOUT_MAX = 600
+_SEARCH_TOP_K_DEFAULT = 10
+_SEARCH_TOP_K_MIN = 1
+_SEARCH_TOP_K_MAX = 50
+_APPLY_PATCH_BEGIN_MARKER = "*** Begin Patch"
 
 
 class DockerToolExecutor:
@@ -30,9 +36,29 @@ class DockerToolExecutor:
 
     def run(self, request: ToolRequest) -> ToolResponse:
         if request.tool == "submit":
-            final_response = str(request.args.get("final_response", ""))
+            errors: list[str] = []
+            self._reject_unknown_args(
+                request.args,
+                allowed={"final_response", "changed_paths"},
+                tool_name="submit",
+                errors=errors,
+            )
+            final_response = self._require_non_empty_str(
+                request.args,
+                key="final_response",
+                tool_name="submit",
+                errors=errors,
+            )
+            self._validate_string_list(
+                request.args,
+                key="changed_paths",
+                tool_name="submit",
+                errors=errors,
+            )
+            if errors:
+                return self._validation_error(errors)
             return ToolResponse(
-                stdout=final_response,
+                stdout=final_response or "",
                 stderr="",
                 exit_code=0,
                 metadata={"submitted": True, "container_id": self._container_id},
@@ -42,8 +68,8 @@ class DockerToolExecutor:
             return self._run_bash(request.args)
         if request.tool == "search":
             return self._run_search(request.args)
-        if request.tool == "edit":
-            return self._run_edit(request.args)
+        if request.tool in {"apply_patch", "edit"}:
+            return self._run_apply_patch(request.args)
 
         return ToolResponse(
             stdout="",
@@ -53,93 +79,172 @@ class DockerToolExecutor:
         )
 
     def _run_bash(self, args: dict[str, Any]) -> ToolResponse:
-        command = str(args.get("command", ""))
-        if not command.strip():
-            return ToolResponse(
-                stdout="",
-                stderr="Missing required 'command' for bash tool.",
-                exit_code=2,
-                metadata={"container_id": self._container_id},
-            )
-        cwd = args.get("cwd")
-        stdin_payload = args.get("stdin")
-        if stdin_payload is not None and not isinstance(stdin_payload, str):
-            stdin_payload = str(stdin_payload)
-        timeout_sec = _coerce_timeout(args.get("timeout_sec"), fallback=self._tool_timeout_sec)
+        errors: list[str] = []
+        self._reject_unknown_args(
+            args,
+            allowed={"command", "cwd", "timeout_sec", "stdin"},
+            tool_name="bash",
+            errors=errors,
+        )
+        command = self._require_non_empty_str(args, key="command", tool_name="bash", errors=errors)
+        cwd = self._optional_non_empty_str(args, key="cwd", tool_name="bash", errors=errors)
+        stdin_payload = self._optional_str(args, key="stdin", tool_name="bash", errors=errors)
+        timeout_sec = self._optional_int_in_range(
+            args,
+            key="timeout_sec",
+            tool_name="bash",
+            minimum=_BASH_TIMEOUT_MIN,
+            maximum=_BASH_TIMEOUT_MAX,
+            default=self._tool_timeout_sec,
+            errors=errors,
+        )
+        if errors:
+            return self._validation_error(errors)
 
         docker_cmd = ["docker", "exec"]
         if stdin_payload is not None:
             docker_cmd.append("-i")
-        if isinstance(cwd, str) and cwd.strip():
-            docker_cmd.extend(["-w", cwd.strip()])
-        docker_cmd.extend([self._container_id, "sh", "-lc", command])
+        if cwd is not None:
+            docker_cmd.extend(["-w", cwd])
+        docker_cmd.extend([self._container_id, "sh", "-lc", command or ""])
         return self._run_command(
             docker_cmd,
-            timeout_sec=timeout_sec,
+            timeout_sec=timeout_sec or self._tool_timeout_sec,
             stdin_text=stdin_payload,
         )
 
     def _run_search(self, args: dict[str, Any]) -> ToolResponse:
-        query = str(args.get("query", ""))
-        if not query.strip():
-            return ToolResponse(
-                stdout="",
-                stderr="Missing required 'query' for search tool.",
-                exit_code=2,
-                metadata={"container_id": self._container_id},
-            )
-        path_hint = str(args.get("path_hint") or ".")
-        top_k = _coerce_positive_int(args.get("top_k"), fallback=10)
-        timeout_sec = self._tool_timeout_sec
-
-        quoted_query = shlex.quote(query)
-        quoted_path = shlex.quote(path_hint)
-        search_cmd = (
-            "grep -R -n -F -- "
-            f"{quoted_query} {quoted_path} 2>/dev/null | head -n {top_k} || true"
+        errors: list[str] = []
+        self._reject_unknown_args(
+            args,
+            allowed={"query", "path_hint", "top_k"},
+            tool_name="search",
+            errors=errors,
         )
-        docker_cmd = ["docker", "exec", self._container_id, "sh", "-lc", search_cmd]
-        return self._run_command(docker_cmd, timeout_sec=timeout_sec)
+        query = self._require_non_empty_str(args, key="query", tool_name="search", errors=errors)
+        path_hint = self._optional_str(args, key="path_hint", tool_name="search", errors=errors)
+        top_k = self._optional_int_in_range(
+            args,
+            key="top_k",
+            tool_name="search",
+            minimum=_SEARCH_TOP_K_MIN,
+            maximum=_SEARCH_TOP_K_MAX,
+            default=_SEARCH_TOP_K_DEFAULT,
+            errors=errors,
+        )
+        if errors:
+            return self._validation_error(errors)
 
-    def _run_edit(self, args: dict[str, Any]) -> ToolResponse:
-        path = str(args.get("path", ""))
-        patch = str(args.get("patch", ""))
-        if not path.strip() or not patch:
-            return ToolResponse(
-                stdout="",
-                stderr="Missing required 'path' or 'patch' for edit tool.",
-                exit_code=2,
-                metadata={"container_id": self._container_id},
-            )
-        timeout_sec = self._tool_timeout_sec
-        script = (
-            'mkdir -p "$(dirname "$TARGET_PATH")" && '
-            'PATCH_FILE="$(mktemp)" && '
-            'printf "%s\\n" "$PATCH_PAYLOAD" > "$PATCH_FILE" && '
-            'if grep -Eq "^(--- |\\+\\+\\+ |@@ |\\*\\*\\* Begin Patch)" "$PATCH_FILE"; then '
-            'if patch --batch --forward --silent "$TARGET_PATH" "$PATCH_FILE" >/dev/null 2>&1; then '
-            ":; "
-            "else "
-            'printf "%s\\n" "$PATCH_PAYLOAD" > "$TARGET_PATH"; '
-            "fi; "
-            "else "
-            'printf "%s\\n" "$PATCH_PAYLOAD" > "$TARGET_PATH"; '
-            "fi && "
-            'rm -f "$PATCH_FILE"'
+        resolved_path = path_hint if path_hint else "."
+        search_cmd = (
+            'status=0; grep -R -n -F -m "$TOP_K" -- "$QUERY" "$PATH_HINT" || status=$?; '
+            'if [ "$status" -eq 0 ] || [ "$status" -eq 1 ]; then exit 0; fi; exit "$status"'
         )
         docker_cmd = [
             "docker",
             "exec",
             "-e",
-            f"TARGET_PATH={path}",
+            f"QUERY={query or ''}",
             "-e",
-            f"PATCH_PAYLOAD={patch}",
+            f"PATH_HINT={resolved_path}",
+            "-e",
+            f"TOP_K={top_k or _SEARCH_TOP_K_DEFAULT}",
+            self._container_id,
+            "sh",
+            "-lc",
+            search_cmd,
+        ]
+        return self._run_command(docker_cmd, timeout_sec=self._tool_timeout_sec)
+
+    def _run_apply_patch(self, args: dict[str, Any]) -> ToolResponse:
+        errors: list[str] = []
+        self._reject_unknown_args(
+            args,
+            allowed={"path", "patch", "description"},
+            tool_name="apply_patch",
+            errors=errors,
+        )
+        patch = self._require_non_empty_str(
+            args,
+            key="patch",
+            tool_name="apply_patch",
+            errors=errors,
+        )
+        path = self._optional_non_empty_str(
+            args,
+            key="path",
+            tool_name="apply_patch",
+            errors=errors,
+        )
+        self._optional_str(
+            args,
+            key="description",
+            tool_name="apply_patch",
+            errors=errors,
+        )
+        if errors:
+            return self._validation_error(errors)
+
+        patch_text = patch or ""
+        timeout_sec = self._tool_timeout_sec
+        if _is_codex_apply_patch_payload(patch_text):
+            codex_script = (
+                "set -eu; "
+                "if command -v apply_patch >/dev/null 2>&1; then "
+                "apply_patch; "
+                "else "
+                'printf "Codex apply_patch format requires an apply_patch command in the container.\\n" >&2; '
+                "exit 127; "
+                "fi"
+            )
+            codex_cmd = ["docker", "exec", "-i", self._container_id, "sh", "-lc", codex_script]
+            return self._run_command(codex_cmd, timeout_sec=timeout_sec, stdin_text=patch_text)
+
+        if path is None:
+            return self._validation_error(
+                [
+                    "Missing required arg 'path' for tool 'apply_patch' when patch is not Codex apply_patch format."
+                ]
+            )
+
+        script = (
+            "set -eu; "
+            'PATCH_FILE="$(mktemp)"; '
+            'WRITE_FILE=""; '
+            "cleanup() { "
+            'rm -f "$PATCH_FILE"; '
+            'if [ -n "$WRITE_FILE" ]; then rm -f "$WRITE_FILE"; fi; '
+            "}; "
+            "trap cleanup EXIT; "
+            'cat >"$PATCH_FILE"; '
+            'mkdir -p "$(dirname "$TARGET_PATH")"; '
+            'if grep -Eq "^(--- |\\+\\+\\+ |@@ )" "$PATCH_FILE"; then '
+            'if patch --batch --forward "$TARGET_PATH" "$PATCH_FILE"; then '
+            'printf "Applied patch to %s\\n" "$TARGET_PATH"; '
+            "else "
+            'printf "Failed to apply patch to %s\\n" "$TARGET_PATH" >&2; '
+            "exit 1; "
+            "fi; "
+            "else "
+            'WRITE_FILE="$(mktemp)"; '
+            'cat "$PATCH_FILE" >"$WRITE_FILE"; '
+            'mv "$WRITE_FILE" "$TARGET_PATH"; '
+            'WRITE_FILE=""; '
+            'printf "Wrote file %s\\n" "$TARGET_PATH"; '
+            "fi"
+        )
+        docker_cmd = [
+            "docker",
+            "exec",
+            "-i",
+            "-e",
+            f"TARGET_PATH={path or ''}",
             self._container_id,
             "sh",
             "-lc",
             script,
         ]
-        return self._run_command(docker_cmd, timeout_sec=timeout_sec)
+        return self._run_command(docker_cmd, timeout_sec=timeout_sec, stdin_text=patch_text)
 
     def _run_command(
         self,
@@ -178,16 +283,148 @@ class DockerToolExecutor:
             metadata={"container_id": self._container_id},
         )
 
+    def _validation_error(self, errors: list[str]) -> ToolResponse:
+        return ToolResponse(
+            stdout="",
+            stderr="; ".join(errors),
+            exit_code=2,
+            metadata={"container_id": self._container_id, "validation_errors": list(errors)},
+        )
 
-def _coerce_timeout(value: Any, *, fallback: int) -> int:
-    if value is None:
-        return fallback
-    return _coerce_positive_int(value, fallback=fallback)
+    def _reject_unknown_args(
+        self,
+        args: dict[str, Any],
+        *,
+        allowed: set[str],
+        tool_name: str,
+        errors: list[str],
+    ) -> None:
+        for key in args:
+            if key not in allowed:
+                errors.append(f"Unknown arg '{key}' for tool '{tool_name}'")
 
+    def _require_non_empty_str(
+        self,
+        args: dict[str, Any],
+        *,
+        key: str,
+        tool_name: str,
+        errors: list[str],
+    ) -> str | None:
+        raw = args.get(key)
+        if raw is None:
+            errors.append(f"Missing required arg '{key}' for tool '{tool_name}'")
+            return None
+        if not isinstance(raw, str):
+            errors.append(f"Arg '{key}': expected str, got {type(raw).__name__}")
+            return None
+        if not raw.strip():
+            errors.append(f"Arg '{key}': length must be >= 1")
+            return None
+        return raw
 
-def _coerce_positive_int(value: Any, *, fallback: int) -> int:
-    if isinstance(value, bool):
-        return fallback
-    if isinstance(value, int) and value >= 1:
+    def _optional_str(
+        self,
+        args: dict[str, Any],
+        *,
+        key: str,
+        tool_name: str,
+        errors: list[str],
+    ) -> str | None:
+        if key not in args:
+            return None
+        raw = args[key]
+        if not isinstance(raw, str):
+            errors.append(f"Arg '{key}': expected str, got {type(raw).__name__}")
+            return None
+        return raw
+
+    def _optional_non_empty_str(
+        self,
+        args: dict[str, Any],
+        *,
+        key: str,
+        tool_name: str,
+        errors: list[str],
+    ) -> str | None:
+        value = self._optional_str(args, key=key, tool_name=tool_name, errors=errors)
+        if value is None:
+            return None
+        if not value.strip():
+            errors.append(f"Arg '{key}': length must be >= 1")
+            return None
         return value
-    return fallback
+
+    def _optional_int_in_range(
+        self,
+        args: dict[str, Any],
+        *,
+        key: str,
+        tool_name: str,
+        minimum: int,
+        maximum: int,
+        default: int,
+        errors: list[str],
+    ) -> int | None:
+        if key not in args:
+            return default
+        raw = args[key]
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            errors.append(f"Arg '{key}': expected int, got {type(raw).__name__}")
+            return None
+        if raw < minimum:
+            errors.append(f"Arg '{key}': must be >= {minimum}")
+            return None
+        if raw > maximum:
+            errors.append(f"Arg '{key}': must be <= {maximum}")
+            return None
+        return raw
+
+    def _validate_float_range(
+        self,
+        args: dict[str, Any],
+        *,
+        key: str,
+        tool_name: str,
+        minimum: float,
+        maximum: float,
+        errors: list[str],
+    ) -> float | None:
+        if key not in args:
+            return None
+        raw = args[key]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            errors.append(f"Arg '{key}': expected float, got {type(raw).__name__}")
+            return None
+        value = float(raw)
+        if value < minimum:
+            errors.append(f"Arg '{key}': must be >= {minimum}")
+            return None
+        if value > maximum:
+            errors.append(f"Arg '{key}': must be <= {maximum}")
+            return None
+        return value
+
+    def _validate_string_list(
+        self,
+        args: dict[str, Any],
+        *,
+        key: str,
+        tool_name: str,
+        errors: list[str],
+    ) -> None:
+        if key not in args:
+            return
+        raw = args[key]
+        if not isinstance(raw, list):
+            errors.append(f"Arg '{key}': expected list[str], got {type(raw).__name__}")
+            return
+        for item in raw:
+            if not isinstance(item, str):
+                errors.append(f"Arg '{key}': expected list[str], got list[{type(item).__name__}]")
+                return
+
+
+def _is_codex_apply_patch_payload(patch: str) -> bool:
+    stripped = patch.lstrip()
+    return stripped.startswith(_APPLY_PATCH_BEGIN_MARKER)

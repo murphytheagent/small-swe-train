@@ -124,6 +124,41 @@ def test_build_vllm_turn_generator_calls_chat_completion(monkeypatch) -> None:
     assert "PASS_TO_PASS" in first_user_content
 
 
+def test_build_messages_starts_with_single_user_message() -> None:
+    messages = vllm_turn_generator_module._build_messages(
+        config=VLLMTurnGeneratorConfig(
+            base_url="http://localhost:8000/v1",
+            model_name="Qwen/Qwen3-4B-Instruct-2507",
+            request_timeout_sec=12,
+            max_tokens=256,
+            temperature=0.0,
+            top_p=1.0,
+            system_prompt="contract",
+        ),
+        task=_sample_task(),
+        attempt_index=0,
+        turn_index=0,
+        step_index=0,
+        history=[],
+    )
+    roles = [str(message.get("role", "")) for message in messages if isinstance(message, dict)]
+    assert roles.count("user") == 1
+
+
+def test_parse_tool_response_block_uses_model_delimiters(monkeypatch) -> None:
+    class _FakeDelimiters:
+        tool_response_start = "<resp>"
+        tool_response_end = "</resp>"
+
+    monkeypatch.setattr(
+        vllm_turn_generator_module,
+        "default_delimiters",
+        lambda: _FakeDelimiters(),
+    )
+    parsed = vllm_turn_generator_module._parse_tool_response_block('<resp>{"stdout":"ok"}</resp>')
+    assert parsed == {"stdout": "ok"}
+
+
 def test_load_vllm_turn_generator_config_honors_env_override(monkeypatch) -> None:
     monkeypatch.setenv("SMALL_SWE_VLLM_BASE_URL", "http://localhost:9000/v1/")
     config = load_vllm_turn_generator_config()

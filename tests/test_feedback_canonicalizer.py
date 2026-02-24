@@ -18,11 +18,11 @@ def test_build_feedback_packet_derives_self_containment_checks() -> None:
     )
 
     assert packet.include_student_attempt_for_teacher is True
-    assert packet.canonical_feedback.actionable_error_text is not None
-    assert packet.self_containment_checks.has_failing_artifact_identity is True
-    assert packet.self_containment_checks.has_actionable_error_text is True
-    assert packet.self_containment_checks.has_localization_hint is True
-    assert packet.is_self_contained is True
+    assert packet.canonical_feedback.actionable_error_text is None
+    assert packet.self_containment_checks.has_failing_artifact_identity is False
+    assert packet.self_containment_checks.has_actionable_error_text is False
+    assert packet.self_containment_checks.has_localization_hint is False
+    assert packet.is_self_contained is False
 
 
 def test_head_tail_truncation_is_deterministic() -> None:

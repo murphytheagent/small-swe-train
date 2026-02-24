@@ -23,6 +23,7 @@ class RolloutRow(RolloutRowRequired, total=False):
     bridge_error: str
     timeout_error: str
     executor_error: str
+    container_init_succeeded: bool
     tool_name: str
     exit_code: int
     is_terminal: bool

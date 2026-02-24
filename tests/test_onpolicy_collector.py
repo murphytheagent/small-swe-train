@@ -9,6 +9,7 @@ from config import (
     OnPolicyDatasetColumns,
     OnPolicyRuntimeConfig,
     OnPolicySettings,
+    resolve_feedback_deterministic_truncation_settings,
 )
 from env.container_pool import ContainerHandle
 from env.runtime_protocol import ToolRequest, ToolResponse
@@ -104,6 +105,20 @@ class _FailingInitExecutor:
     def run(self, request: ToolRequest) -> ToolResponse:
         self.requests.append(request)
         raise OSError(self._message)
+
+
+class _FlakyInitExecutor:
+    def __init__(self, *, message: str) -> None:
+        self._message = message
+        self.requests: list[ToolRequest] = []
+        self._call_count = 0
+
+    def run(self, request: ToolRequest) -> ToolResponse:
+        self.requests.append(request)
+        self._call_count += 1
+        if self._call_count == 1:
+            raise OSError(self._message)
+        return ToolResponse(stdout=f"ran:{request.tool}", stderr="", exit_code=0)
 
 
 def _settings() -> OnPolicySettings:
@@ -211,8 +226,45 @@ def test_onpolicy_collector_collects_terminal_attempt_rows() -> None:
     assert row["trajectory_format_valid"] is True
     assert row["final_turn_has_submit"] is True
     assert row["final_submit_format_valid"] is True
+    assert row["container_init_succeeded"] is True
     assert row["attempt_index"] == 0
     assert pool.release_called is True
+
+
+def test_onpolicy_collector_truncates_tool_output_payload_fields() -> None:
+    pool = _FakePool()
+    truncation_settings = resolve_feedback_deterministic_truncation_settings()
+    long_stdout = " ".join(
+        f"tok{i}"
+        for i in range(truncation_settings.head_tokens + truncation_settings.tail_tokens + 32)
+    )
+
+    class _LongOutputExecutor:
+        def run(self, request: ToolRequest) -> ToolResponse:
+            del request
+            return ToolResponse(stdout=long_stdout, stderr="", exit_code=0)
+
+    def turn_generator(**kwargs: object) -> str:
+        turn_index = int(kwargs["turn_index"])
+        if turn_index == 0:
+            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+        return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+
+    collector = OnPolicyRolloutCollector(
+        settings=_settings(),
+        turn_generator=turn_generator,
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: _LongOutputExecutor(),
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert "<...truncated...>" in str(row["tool_output"]["stdout"])
+    first_step = row["trajectory_steps"][0]
+    assert "<...truncated...>" in str(first_step["stdout"])
 
 
 def test_onpolicy_collector_keeps_failed_rows() -> None:
@@ -549,10 +601,55 @@ def test_onpolicy_collector_applies_task_patch_before_rollout_turns() -> None:
     assert executor.requests[0].args.get("stdin") == task_patch
     assert task_patch not in str(executor.requests[0].args.get("command", ""))
     assert "git apply" in str(executor.requests[0].args.get("command", ""))
+    assert "git apply --3way" in str(executor.requests[0].args.get("command", ""))
+    assert "patch --batch --forward -p1" in str(executor.requests[0].args.get("command", ""))
+    assert "git apply --reverse --check" in str(executor.requests[0].args.get("command", ""))
     assert executor.requests[1].tool == "search"
     assert rows[0]["resolved"] is True
     assert rows[0]["task_patch_applied"] is True
+    assert rows[0]["container_init_succeeded"] is True
     assert rows[0]["batch_container_count"] == 1
+
+
+def test_onpolicy_collector_retries_task_patch_init_once_on_transient_executor_error() -> None:
+    settings = _settings()
+    pool = _FakePool()
+    flaky_executor = _FlakyInitExecutor(message="temporary docker exec failure")
+    task_patch = "diff --git a/a.txt b/a.txt\n"
+
+    def turn_generator(**kwargs: object) -> str:
+        turn_index = int(kwargs["turn_index"])
+        if turn_index == 0:
+            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+        return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+
+    collector = OnPolicyRolloutCollector(
+        settings=settings,
+        turn_generator=turn_generator,
+        dataset_loader=lambda _dataset_id, _split: [
+            {
+                "task_id": "task-1",
+                "image_name": "img:1",
+                "problem_statement": "Fix patch flow",
+                "patch": task_patch,
+                "FAIL_TO_PASS": [],
+                "PASS_TO_PASS": [],
+            }
+        ],
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: flaky_executor,
+        attempt_resolver=lambda _task, _attempt, is_terminal, _steps: is_terminal,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    assert rows[0]["resolved"] is True
+    assert rows[0]["task_patch_applied"] is True
+    assert rows[0]["container_init_succeeded"] is True
+    assert "executor_error" not in rows[0]
+    assert [request.tool for request in flaky_executor.requests[:2]] == ["bash", "bash"]
+    assert flaky_executor.requests[2].tool == "search"
 
 
 def test_onpolicy_collector_keeps_batch_running_when_patch_init_executor_raises() -> None:
@@ -605,10 +702,14 @@ def test_onpolicy_collector_keeps_batch_running_when_patch_init_executor_raises(
     assert rows[0]["task_id"] == "task-a"
     assert rows[0]["resolved"] is False
     assert "executor_error" in rows[0]
+    assert rows[0]["container_init_succeeded"] is False
     assert "argument list too long" in str(rows[0]["executor_error"])
+    assert "attempt 1/2" in str(rows[0]["executor_error"])
+    assert "attempt 2/2" in str(rows[0]["executor_error"])
     assert rows[1]["task_id"] == "task-b"
     assert rows[1]["resolved"] is True
     assert rows[1]["task_patch_applied"] is True
+    assert rows[1]["container_init_succeeded"] is True
     assert pool.release_calls == 2
 
 
