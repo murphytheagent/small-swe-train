@@ -63,6 +63,7 @@ class RFTLoopConfig:
     trainer_overrides: tuple[str, ...]
     dry_run: bool
     collector_max_in_flight_tasks: int | None = None
+    collector_max_turns_per_attempt: int | None = None
 
 
 class VLLMServerController:
@@ -144,6 +145,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     if collector_max_in_flight_tasks is None:
         collector_max_in_flight_tasks = config.task_batch_size
     collector_max_in_flight_tasks = max(1, min(collector_max_in_flight_tasks, config.task_batch_size))
+    collector_max_turns_per_attempt = config.collector_max_turns_per_attempt
     runtime_manifest: dict[str, Any] = {
         "generated_utc": _utc_now(),
         "config": {
@@ -151,6 +153,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             "samples_per_task": config.samples_per_task,
             "task_batch_size": config.task_batch_size,
             "collector_max_in_flight_tasks": collector_max_in_flight_tasks,
+            "collector_max_turns_per_attempt": collector_max_turns_per_attempt,
             "sft_num_epoch_per_batch": config.sft_num_epoch_per_batch,
             "checkpoint_keep_last": config.checkpoint_keep_last,
             "train_batch_size": config.train_batch_size,
@@ -188,16 +191,20 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             step_dir.mkdir(parents=True, exist_ok=True)
             run_step_dirs.append(step_dir)
 
+            runtime_overrides: dict[str, int] = {
+                "task_batch_size": config.task_batch_size,
+                "attempts_per_task": config.samples_per_task,
+                "env_pool_size": config.task_batch_size,
+                "max_in_flight_tasks": collector_max_in_flight_tasks,
+            }
+            if collector_max_turns_per_attempt is not None:
+                runtime_overrides["max_turns_per_attempt"] = collector_max_turns_per_attempt
             request = OnPolicyRFTRuntimeRequest(
                 data_config_name=config.data_config_name,
                 turn_generator_mode=config.turn_generator_mode,
                 total_steps=1,
-                runtime_overrides={
-                    "task_batch_size": config.task_batch_size,
-                    "attempts_per_task": config.samples_per_task,
-                    "env_pool_size": config.task_batch_size,
-                    "max_in_flight_tasks": collector_max_in_flight_tasks,
-                },
+                start_step_index=step_index,
+                runtime_overrides=runtime_overrides,
                 output_dir=str(collector_dir),
             )
             collect_start = time.monotonic()
@@ -560,6 +567,8 @@ def _print_dry_run_plan(config: RFTLoopConfig) -> None:
         f"task_batch_size={config.task_batch_size}",
         "collector_max_in_flight_tasks="
         f"{config.collector_max_in_flight_tasks or config.task_batch_size}",
+        "collector_max_turns_per_attempt="
+        f"{config.collector_max_turns_per_attempt or 'default'}",
         f"checkpoint_keep_last={config.checkpoint_keep_last}",
     )
     if config.manage_vllm:
@@ -755,6 +764,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
             "defaults to task-batch-size."
         ),
     )
+    parser.add_argument(
+        "--collector-max-turns-per-attempt",
+        type=int,
+        default=None,
+        help=(
+            "optional override for collector max turns per trajectory attempt; "
+            "defaults to centralized on-policy runtime config."
+        ),
+    )
     parser.add_argument("--sft-num-epoch-per-batch", type=int, required=True)
     parser.add_argument("--checkpoint-keep-last", type=int, default=1)
     parser.add_argument("--train-batch-size", type=int, required=True)
@@ -789,6 +807,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         raise ValueError("--task-batch-size must be >= 1.")
     if args.collector_max_in_flight_tasks is not None and args.collector_max_in_flight_tasks < 1:
         raise ValueError("--collector-max-in-flight-tasks must be >= 1 when provided.")
+    if (
+        args.collector_max_turns_per_attempt is not None
+        and args.collector_max_turns_per_attempt < 1
+    ):
+        raise ValueError("--collector-max-turns-per-attempt must be >= 1 when provided.")
     if args.sft_num_epoch_per_batch < 1:
         raise ValueError("--sft-num-epoch-per-batch must be >= 1.")
     if args.checkpoint_keep_last < 1:
@@ -830,6 +853,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         collector_max_in_flight_tasks=(
             int(args.collector_max_in_flight_tasks)
             if args.collector_max_in_flight_tasks is not None
+            else None
+        ),
+        collector_max_turns_per_attempt=(
+            int(args.collector_max_turns_per_attempt)
+            if args.collector_max_turns_per_attempt is not None
             else None
         ),
     )

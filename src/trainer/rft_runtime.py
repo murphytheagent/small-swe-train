@@ -21,6 +21,7 @@ class OnPolicyRFTRuntimeRequest:
     data_config_name: str = DEFAULT_ON_POLICY_DATA_CONFIG_NAME
     turn_generator_mode: str = "default"
     total_steps: int = 1
+    start_step_index: int = 0
     runtime_overrides: Mapping[str, Any] | None = None
     data_overrides: Mapping[str, Any] | None = None
     handoff_overrides: Mapping[str, Any] | None = None
@@ -43,9 +44,12 @@ def collect_onpolicy_rft_runtime_batch(
     resolved_output_dir = _normalized_output_dir(request.output_dir)
     if resolved_output_dir is not None:
         Path(resolved_output_dir).mkdir(parents=True, exist_ok=True)
+    if request.start_step_index < 0:
+        raise ValueError("start_step_index must be >= 0")
 
     result = collect_rft_sft_batch_for_steps(
         total_steps=request.total_steps,
+        start_step_index=request.start_step_index,
         collector=collector,
         tokenizer=tokenizer,
         handoff_overrides=request.handoff_overrides,
@@ -101,6 +105,7 @@ def _build_runtime_manifest_payload(
         "data_config_name": request.data_config_name,
         "turn_generator_mode": request.turn_generator_mode,
         "total_steps": int(request.total_steps),
+        "start_step_index": int(request.start_step_index),
         "rollout_count": len(rollout_rows),
         "selected_count": len(selected_rows),
         "rejected_count": len(rejected_rows),

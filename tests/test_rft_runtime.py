@@ -26,12 +26,14 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
     def fake_collect_rft_sft_batch_for_steps(
         *,
         total_steps,
+        start_step_index,
         collector,
         tokenizer,
         handoff_overrides,
         output_dir,
     ):
         assert total_steps == 2
+        assert start_step_index == 3
         assert collector is fake_collector
         assert tokenizer == "tokenizer"
         assert handoff_overrides == {"require_resolved": True}
@@ -59,6 +61,7 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
         data_config_name="on_policy_swe_smith",
         turn_generator_mode="proof_tool_chain",
         total_steps=2,
+        start_step_index=3,
         runtime_overrides={"task_batch_size": 2},
         data_overrides={"dataset_split": "train"},
         handoff_overrides={"require_resolved": True},
@@ -84,6 +87,7 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
     manifest_path = tmp_path / "rft_runtime_manifest.json"
     manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest_payload["total_steps"] == 2
+    assert manifest_payload["start_step_index"] == 3
     assert manifest_payload["rollout_count"] == 2
     assert manifest_payload["selected_count"] == 1
     assert manifest_payload["rejected_count"] == 1
@@ -117,12 +121,14 @@ def test_collect_onpolicy_rft_runtime_batch_default_mode_uses_vllm_turn_generato
     def fake_collect_rft_sft_batch_for_steps(
         *,
         total_steps,
+        start_step_index,
         collector,
         tokenizer,
         handoff_overrides,
         output_dir,
     ):
         assert total_steps == 1
+        assert start_step_index == 0
         assert collector is fake_collector
         assert tokenizer == "tokenizer"
         assert handoff_overrides is None
@@ -155,3 +161,21 @@ def test_collect_onpolicy_rft_runtime_batch_default_mode_uses_vllm_turn_generato
     collect_onpolicy_rft_runtime_batch(request=request, tokenizer="tokenizer")
 
     assert captured_turn_generator["value"] is sentinel_turn_generator
+
+
+def test_collect_onpolicy_rft_runtime_batch_rejects_negative_start_step_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rft_runtime_module,
+        "build_onpolicy_collector",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        rft_runtime_module,
+        "collect_rft_sft_batch_for_steps",
+        lambda **_kwargs: {},
+    )
+    request = OnPolicyRFTRuntimeRequest(start_step_index=-1)
+    with pytest.raises(ValueError, match="start_step_index"):
+        collect_onpolicy_rft_runtime_batch(request=request, tokenizer="tokenizer")

@@ -119,6 +119,45 @@ def test_collect_rollouts_for_steps_writes_jsonl_artifacts(tmp_path: Path) -> No
     assert rows[0][0]["trajectory_history"]
 
 
+def test_collect_rollouts_for_steps_applies_start_step_offset() -> None:
+    seen_step_indexes: list[int] = []
+
+    class _FakeCollector:
+        def collect_step(self, step_index: int):
+            seen_step_indexes.append(step_index)
+            return [
+                {
+                    "task_id": f"task-{step_index}",
+                    "step_index": step_index,
+                    "attempt_index": 0,
+                    "turn_index": 0,
+                    "resolved": False,
+                    "is_terminal": True,
+                    "format_valid": True,
+                    "prompt": "Fix bug",
+                    "assistant_response": "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>",
+                    "trajectory_history": [
+                        "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
+                    ],
+                    "trajectory_steps": [],
+                    "trajectory_assistant_turns": [],
+                    "trajectory_tool_validation_errors": [],
+                    "final_turn_has_submit": True,
+                    "final_submit_format_valid": True,
+                }
+            ]
+
+    rows = collect_rollouts_for_steps(
+        total_steps=2,
+        start_step_index=5,
+        collector=_FakeCollector(),  # type: ignore[arg-type]
+    )
+
+    assert seen_step_indexes == [5, 6]
+    assert rows[0][0]["task_id"] == "task-5"
+    assert rows[1][0]["task_id"] == "task-6"
+
+
 def test_select_rft_attempt_rows_relabels_deterministically() -> None:
     selection = resolve_rft_handoff_settings().selection
     selected, rejected = select_rft_attempt_rows(
