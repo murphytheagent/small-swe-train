@@ -9,14 +9,15 @@ from typing import Any, Mapping, Sequence
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-from config import DEFAULT_TRAINING_MODEL_NAME, rft_runtime_defaults
+from config import rft_runtime_defaults
 from env.task_dataset import TaskSample
 from prompts.chat_contract import build_assistant_contract_prompt
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _DEFAULT_SYSTEM_PROMPT = (
-    "You are an on-policy SWE rollout assistant.\n"
-    "Return exactly one assistant turn with no extra prose.\n"
+    "You are an autonomous software engineering agent working in a real repository.\n"
+    "Investigate the codebase, run tools, apply targeted edits, and verify fixes with tests.\n"
+    "Return exactly one assistant turn each time and follow the tool-output contract exactly.\n"
 )
 
 
@@ -76,49 +77,71 @@ def build_vllm_turn_generator(
 def load_vllm_turn_generator_config() -> VLLMTurnGeneratorConfig:
     """Resolve vLLM chat settings from centralized defaults + environment overrides."""
     runtime_defaults = rft_runtime_defaults()
-    vllm_defaults = _as_mapping(runtime_defaults.get("vllm"))
+    vllm_defaults = _require_mapping(
+        runtime_defaults.get("vllm"),
+        label="rft_runtime.vllm",
+    )
+
+    configured_base_url = _require_non_empty_str(
+        vllm_defaults.get("base_url"),
+        label="rft_runtime.vllm.base_url",
+    )
+    configured_model_name = _require_non_empty_str(
+        vllm_defaults.get("model_name"),
+        label="rft_runtime.vllm.model_name",
+    )
+    configured_timeout_sec = _require_positive_int(
+        vllm_defaults.get("request_timeout_sec"),
+        label="rft_runtime.vllm.request_timeout_sec",
+    )
+    configured_max_tokens = _require_positive_int(
+        vllm_defaults.get("max_tokens"),
+        label="rft_runtime.vllm.max_tokens",
+    )
+    configured_temperature = _require_float(
+        vllm_defaults.get("temperature"),
+        label="rft_runtime.vllm.temperature",
+    )
+    configured_top_p = _require_float(
+        vllm_defaults.get("top_p"),
+        label="rft_runtime.vllm.top_p",
+    )
 
     base_url = _env_or_default(
         "SMALL_SWE_VLLM_BASE_URL",
-        _coerce_non_empty_str(
-            vllm_defaults.get("base_url"),
-            fallback="http://127.0.0.1:8000/v1",
-        ),
+        configured_base_url,
     )
     model_name = _env_or_default(
         "SMALL_SWE_VLLM_MODEL",
-        _coerce_non_empty_str(
-            vllm_defaults.get("model_name"),
-            fallback=DEFAULT_TRAINING_MODEL_NAME,
-        ),
+        configured_model_name,
     )
     request_timeout_sec = _coerce_positive_int(
         _env_or_default(
             "SMALL_SWE_VLLM_REQUEST_TIMEOUT_SEC",
-            str(vllm_defaults.get("request_timeout_sec", 90)),
+            str(configured_timeout_sec),
         ),
-        fallback=90,
+        fallback=configured_timeout_sec,
     )
     max_tokens = _coerce_positive_int(
         _env_or_default(
             "SMALL_SWE_VLLM_MAX_TOKENS",
-            str(vllm_defaults.get("max_tokens", 1024)),
+            str(configured_max_tokens),
         ),
-        fallback=1024,
+        fallback=configured_max_tokens,
     )
     temperature = _coerce_float(
         _env_or_default(
             "SMALL_SWE_VLLM_TEMPERATURE",
-            str(vllm_defaults.get("temperature", 0.0)),
+            str(configured_temperature),
         ),
-        fallback=0.0,
+        fallback=configured_temperature,
     )
     top_p = _coerce_float(
         _env_or_default(
             "SMALL_SWE_VLLM_TOP_P",
-            str(vllm_defaults.get("top_p", 1.0)),
+            str(configured_top_p),
         ),
-        fallback=1.0,
+        fallback=configured_top_p,
     )
     system_prompt = _DEFAULT_SYSTEM_PROMPT + build_assistant_contract_prompt()
 
@@ -142,19 +165,11 @@ def _build_messages(
     step_index: int,
     history: Sequence[str],
 ) -> list[dict[str, str]]:
-    fail_to_pass = _stable_json(task.fail_to_pass)
-    pass_to_pass = _stable_json(task.pass_to_pass)
-    initial_user_message = (
-        f"Task ID: {task.task_id}\n"
-        f"Step Index: {step_index}\n"
-        f"Attempt Index: {attempt_index}\n"
-        f"Turn Index: {turn_index}\n"
-        "Problem Statement:\n"
-        f"{task.problem_statement}\n\n"
-        "FAIL_TO_PASS:\n"
-        f"{fail_to_pass}\n\n"
-        "PASS_TO_PASS:\n"
-        f"{pass_to_pass}"
+    initial_user_message = _build_initial_user_message(
+        task=task,
+        attempt_index=attempt_index,
+        turn_index=turn_index,
+        step_index=step_index,
     )
 
     messages: list[dict[str, str]] = [
@@ -180,11 +195,36 @@ def _build_messages(
             "role": "user",
             "content": (
                 "Return the next assistant turn now. "
-                "If the task is solved, return a submit tool call."
+                "Use bash/search/edit while still working. "
+                "If solved, return one submit tool call with a concise final_response."
             ),
         }
     )
     return messages
+
+
+def _build_initial_user_message(
+    *,
+    task: TaskSample,
+    attempt_index: int,
+    turn_index: int,
+    step_index: int,
+) -> str:
+    fail_to_pass = _stable_json(task.fail_to_pass)
+    pass_to_pass = _stable_json(task.pass_to_pass)
+    return (
+        "You are solving one SWE task.\n"
+        "Task objective:\n"
+        f"{task.problem_statement}\n\n"
+        "Test expectations:\n"
+        "- FAIL_TO_PASS: these tests are currently failing and should pass after your fix.\n"
+        f"{fail_to_pass}\n\n"
+        "- PASS_TO_PASS: these tests currently pass and should keep passing (no regressions).\n"
+        f"{pass_to_pass}\n\n"
+        "Execution guidance:\n"
+        "- Use tool calls to inspect files, edit code, and run validation commands.\n"
+        "- Submit only when you are ready to end the attempt."
+    )
 
 
 def _parse_tool_response_block(value: str) -> Mapping[str, Any] | None:
@@ -327,6 +367,36 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     return {}
 
 
+def _require_mapping(value: Any, *, label: str) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    raise ValueError(f"`{label}` must be configured as a mapping.")
+
+
+def _require_non_empty_str(value: Any, *, label: str) -> str:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    raise ValueError(f"`{label}` must be a non-empty string.")
+
+
+def _require_positive_int(value: Any, *, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"`{label}` must be an integer >= 1.")
+    if isinstance(value, int) and value >= 1:
+        return int(value)
+    raise ValueError(f"`{label}` must be an integer >= 1.")
+
+
+def _require_float(value: Any, *, label: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"`{label}` must be numeric.")
+    if isinstance(value, (int, float)):
+        return float(value)
+    raise ValueError(f"`{label}` must be numeric.")
+
+
 def _coerce_json_mapping(value: Any, *, fallback: Mapping[str, Any]) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
@@ -346,14 +416,6 @@ def _env_or_default(name: str, default: str) -> str:
         return default
     stripped = value.strip()
     return stripped if stripped else default
-
-
-def _coerce_non_empty_str(value: Any, *, fallback: str) -> str:
-    if isinstance(value, str):
-        normalized = value.strip()
-        if normalized:
-            return normalized
-    return fallback
 
 
 def _coerce_positive_int(value: Any, *, fallback: int) -> int:

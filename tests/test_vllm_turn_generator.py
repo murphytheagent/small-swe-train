@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from env.task_dataset import TaskSample
+import pytest
 import rollout.vllm_turn_generator as vllm_turn_generator_module
 from rollout.vllm_turn_generator import (
     VLLMTurnGeneratorConfig,
@@ -111,9 +112,46 @@ def test_build_vllm_turn_generator_calls_chat_completion(monkeypatch) -> None:
     messages = payload.get("messages")
     assert isinstance(messages, list)
     assert len(messages) >= 3
+    first_user = messages[1]
+    assert isinstance(first_user, dict)
+    first_user_content = str(first_user.get("content", ""))
+    assert "Field meanings" in first_user_content
+    assert "- task_id: task-1" in first_user_content
+    assert "- image_name: img:1" in first_user_content
+    assert "FAIL_TO_PASS" in first_user_content
+    assert "PASS_TO_PASS" in first_user_content
 
 
 def test_load_vllm_turn_generator_config_honors_env_override(monkeypatch) -> None:
     monkeypatch.setenv("SMALL_SWE_VLLM_BASE_URL", "http://localhost:9000/v1/")
     config = load_vllm_turn_generator_config()
     assert config.base_url == "http://localhost:9000/v1"
+
+
+def test_load_vllm_turn_generator_config_requires_vllm_mapping(monkeypatch) -> None:
+    monkeypatch.setattr(
+        vllm_turn_generator_module,
+        "rft_runtime_defaults",
+        lambda: {},
+    )
+    with pytest.raises(ValueError, match="rft_runtime.vllm"):
+        load_vllm_turn_generator_config()
+
+
+def test_load_vllm_turn_generator_config_rejects_invalid_max_tokens(monkeypatch) -> None:
+    monkeypatch.setattr(
+        vllm_turn_generator_module,
+        "rft_runtime_defaults",
+        lambda: {
+            "vllm": {
+                "base_url": "http://127.0.0.1:8000/v1",
+                "model_name": "Qwen/Qwen3-4B-Instruct-2507",
+                "request_timeout_sec": 90,
+                "max_tokens": 0,
+                "temperature": 0.0,
+                "top_p": 1.0,
+            }
+        },
+    )
+    with pytest.raises(ValueError, match="max_tokens"):
+        load_vllm_turn_generator_config()

@@ -7,7 +7,7 @@ import pytest
 
 import config
 from prompts.chat_contract import build_assistant_contract_prompt
-from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME
+from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME, TOOL_SCHEMAS
 
 
 def test_terminal_tool_is_supported_by_schema() -> None:
@@ -46,6 +46,17 @@ def test_prompt_contract_uses_centralized_terminal_tool_default() -> None:
     assert "Allowed tools are exactly: bash, search, edit, submit." in prompt
 
 
+def test_prompt_contract_schema_text_is_rendered_from_tool_schemas(monkeypatch: pytest.MonkeyPatch) -> None:
+    search_schema = dict(TOOL_SCHEMAS["search"])
+    constraints = dict(search_schema["constraints"])
+    constraints["query"] = {"min_length": 7}
+    search_schema["constraints"] = constraints
+    monkeypatch.setitem(TOOL_SCHEMAS, "search", search_schema)
+
+    prompt = build_assistant_contract_prompt()
+    assert "search args: required {query:str(min_len=7)}" in prompt
+
+
 def test_terminal_tool_validator_rejects_unknown_name() -> None:
     with pytest.raises(ValueError, match="Invalid terminal tool"):
         config._validate_terminal_tool_name("not-a-tool", allowed_tools=ALLOWED_TOOLS)
@@ -53,11 +64,27 @@ def test_terminal_tool_validator_rejects_unknown_name() -> None:
 
 def test_on_policy_runtime_defaults_load_from_central_json() -> None:
     on_policy = config.on_policy_runtime_defaults()
-    assert on_policy["task_batch_size"] >= 1
-    assert on_policy["attempts_per_task"] >= 1
-    assert on_policy["env_pool_size"] >= on_policy["task_batch_size"]
-    assert on_policy["max_in_flight_tasks"] >= 1
-    assert on_policy["max_in_flight_tasks"] == on_policy["task_batch_size"]
+    assert on_policy["max_turns_per_attempt"] >= 1
+    assert on_policy["tool_timeout_sec"] >= 1
+    assert "task_batch_size" not in on_policy
+    assert "attempts_per_task" not in on_policy
+    assert "env_pool_size" not in on_policy
+    assert "max_in_flight_tasks" not in on_policy
+
+
+def test_adaptation_defaults_load_from_central_json() -> None:
+    adaptation = config.adaptation_defaults()
+    assert adaptation["mode"] == "lora"
+    assert adaptation["target_modules"] == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+    assert adaptation["compute_precision"] == "bf16"
 
 
 def test_on_policy_data_defaults_load_from_configs_data() -> None:
@@ -71,21 +98,26 @@ def test_on_policy_data_defaults_load_from_configs_data() -> None:
 
 def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     settings = config.resolve_on_policy_settings()
+    runtime_defaults = config.rft_runtime_defaults()
+    loop_defaults = runtime_defaults["loop"]
     assert settings.data.dataset_id == "SWE-bench/SWE-smith-py"
-    assert settings.runtime.env_pool_size >= settings.runtime.task_batch_size
+    assert settings.runtime.task_batch_size == loop_defaults["task_batch_size"]
+    assert settings.runtime.attempts_per_task == loop_defaults["samples_per_task"]
+    assert settings.runtime.env_pool_size == settings.runtime.task_batch_size
     assert settings.runtime.max_tool_calls_per_turn <= config.MAX_TOOL_CALLS_PER_TURN
-    assert settings.runtime.max_in_flight_tasks >= 1
-    assert settings.runtime.max_in_flight_tasks == settings.runtime.task_batch_size
+    assert settings.runtime.max_in_flight_tasks == config.resolve_rft_collector_max_in_flight_default(
+        task_batch_size=settings.runtime.task_batch_size
+    )
 
 
 def test_resolve_on_policy_settings_aligns_in_flight_with_task_batch_override() -> None:
     settings = config.resolve_on_policy_settings(
         runtime_overrides={
             "task_batch_size": 8,
-            "env_pool_size": 8,
         },
     )
     assert settings.runtime.task_batch_size == 8
+    assert settings.runtime.env_pool_size == 8
     assert settings.runtime.max_in_flight_tasks == 8
 
 
@@ -93,11 +125,11 @@ def test_resolve_on_policy_settings_respects_explicit_in_flight_override() -> No
     settings = config.resolve_on_policy_settings(
         runtime_overrides={
             "task_batch_size": 8,
-            "env_pool_size": 8,
             "max_in_flight_tasks": 3,
         },
     )
     assert settings.runtime.task_batch_size == 8
+    assert settings.runtime.env_pool_size == 8
     assert settings.runtime.max_in_flight_tasks == 3
 
 
@@ -110,8 +142,7 @@ def test_rft_runtime_defaults_load_loop_and_vllm_config() -> None:
     assert runtime_defaults["loop"]["train_batch_size"] >= 1
     assert runtime_defaults["loop"]["checkpoint_keep_last"] >= 1
     assert runtime_defaults["vllm"]["base_url"].startswith("http://")
-    assert runtime_defaults["vllm_parallelism"]["by_nproc_per_node"]["8"]["tensor_parallel_size"] == 2
-    assert runtime_defaults["vllm_parallelism"]["by_nproc_per_node"]["8"]["data_parallel_size"] == 4
+    assert runtime_defaults["vllm_parallelism"]["default_tensor_parallel_size"] == 2
 
 
 def test_resolve_rft_collector_max_in_flight_default_clamps_to_task_batch_size() -> None:
@@ -119,7 +150,7 @@ def test_resolve_rft_collector_max_in_flight_default_clamps_to_task_batch_size()
     assert config.resolve_rft_collector_max_in_flight_default(task_batch_size=16) == 16
 
 
-def test_resolve_rft_vllm_parallel_defaults_prefers_centralized_8gpu_profile() -> None:
+def test_resolve_rft_vllm_parallel_defaults_uses_dynamic_dp_for_8gpu_world_size() -> None:
     assert config.resolve_rft_vllm_parallel_defaults(nproc_per_node=8) == (2, 4)
 
 

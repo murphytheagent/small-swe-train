@@ -39,7 +39,7 @@ actor_rollout_ref:
       enable: true
       rank: 64
       alpha: 128
-      target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+      target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
       dropout: 0.05
 
   actor:
@@ -82,7 +82,7 @@ actor_rollout_ref:
       lr: 1.0e-5
       lr_warmup_steps: 10
       weight_decay: 0.0
-      lr_scheduler_type: cosine
+      lr_scheduler_type: constant_with_warmup
 
     # -- Mini-batch / micro-batch ----------------------------------------------
     ppo_mini_batch_size: 128

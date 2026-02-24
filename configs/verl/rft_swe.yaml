@@ -2,7 +2,7 @@
 # Supervised cross-entropy on formatted tool-call trajectories from SWE-smith.
 # Think tokens are EXCLUDED from loss (§6 masking policy).
 #
-# Hardware target: single node, 8× A100/H100 GPUs
+# Hardware target: single node, variable GPU count
 # Model: Qwen3-4B-Instruct-2507 with LoRA
 #
 # This stage must pass format quality gates before entering step-SDPO.
@@ -16,7 +16,6 @@ defaults:
 
 actor_rollout_ref:
   model:
-    path: ${model_defaults.primary_name}
     enable_gradient_checkpointing: true
     use_remove_padding: true
     trust_remote_code: false
@@ -24,9 +23,9 @@ actor_rollout_ref:
     override_config: {}
     lora:
       enable: true
-      rank: 64
-      alpha: 128
-      target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+      rank: 16
+      alpha: 32
+      target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
       dropout: 0.05
 
   actor:
@@ -35,14 +34,11 @@ actor_rollout_ref:
       lr: 5.0e-5
       lr_warmup_steps: 50
       weight_decay: 0.01
-      lr_scheduler_type: cosine
+      lr_scheduler_type: constant_with_warmup
 
     grad_clip: 1.0
 
     fsdp_config:
-      dtype: bfloat16
-      fsdp_size: 8
-      model_dtype: bf16
       forward_prefetch: true
       offload_policy: false
       reshard_after_forward: true
@@ -50,27 +46,18 @@ actor_rollout_ref:
         min_num_params: 0
 
     use_remove_padding: true
-
+# the rollout section will be completely ignored in our control flow
+# this section is only here for compatibility with verl SFT trainer config
   rollout:
     name: vllm
-    tensor_model_parallel_size: 2
-    data_parallel_size: 4
     gpu_memory_utilization: 0.9
     enforce_eager: true
     free_cache_engine: true
     max_num_seqs: 64
     max_num_batched_tokens: 262144
 
-# Maximum sequence length for RFT data (shorter than SDPO — no reprompt overhead)
-max_model_len: 12288
-
-model:
-  partial_pretrain: ${model_defaults.primary_name}
-
 data:
-  train_batch_size: 64
-  micro_batch_size_per_gpu: 1
-  max_length: 12288
+  micro_batch_size_per_gpu: 2
   train_files: /tmp/onpolicy-rft-train.parquet
   val_files: /tmp/onpolicy-rft-val.parquet
   custom_cls:
@@ -80,14 +67,9 @@ data:
     enabled: true
     data_config_name: on_policy_swe_smith
     turn_generator_mode: default
-    total_steps: 1
     output_dir: null
-    runtime_overrides: {}
-    data_overrides: {}
-    rft_handoff_overrides: {}
 
 trainer:
-  save_freq: 200
-  test_freq: -1
-  total_epochs: 3
+  save_freq: 100
+  test_freq: 100
   group_name: small-swe-rft

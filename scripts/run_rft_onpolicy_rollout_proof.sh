@@ -9,11 +9,62 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  else
+    echo "Neither python3 nor python is available in PATH."
+    exit 1
+  fi
+fi
+
+_detect_available_gpu_count() {
+  local detected
+  detected="$(
+    "${PYTHON_BIN}" - <<'PY'
+try:
+    import torch
+except Exception:
+    print(0)
+else:
+    try:
+        count = int(torch.cuda.device_count())
+    except Exception:
+        count = 0
+    print(count if count > 0 else 0)
+PY
+  )"
+  if [[ "${detected}" =~ ^[0-9]+$ ]] && (( detected > 0 )); then
+    printf '%s\n' "${detected}"
+    return
+  fi
+
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    detected="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d '[:space:]')"
+    if [[ "${detected}" =~ ^[0-9]+$ ]] && (( detected > 0 )); then
+      printf '%s\n' "${detected}"
+      return
+    fi
+  fi
+
+  printf '1\n'
+}
+
+REQUESTED_NPROC_PER_NODE="${ON_POLICY_PROOF_NPROC_PER_NODE:-${NPROC_PER_NODE:-}}"
+if [[ -z "${REQUESTED_NPROC_PER_NODE}" ]]; then
+  NPROC_PER_NODE="$(_detect_available_gpu_count)"
+else
+  NPROC_PER_NODE="${REQUESTED_NPROC_PER_NODE}"
+fi
+if ! [[ "${NPROC_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Resolved NPROC_PER_NODE must be a positive integer (got: ${NPROC_PER_NODE})."
+  exit 1
+fi
+
 STEPS="${ON_POLICY_PROOF_STEPS:-1}"
-NPROC_PER_NODE="${ON_POLICY_PROOF_NPROC_PER_NODE:-1}"
 TASK_BATCH_SIZE="${ON_POLICY_TASK_BATCH_SIZE:-${NPROC_PER_NODE}}"
 ATTEMPTS_PER_TASK="${ON_POLICY_ATTEMPTS_PER_TASK:-2}"
-ENV_POOL_SIZE="${ON_POLICY_ENV_POOL_SIZE:-${TASK_BATCH_SIZE}}"
 MAX_TURNS_PER_ATTEMPT="${ON_POLICY_MAX_TURNS_PER_ATTEMPT:-5}"
 TRAIN_BATCH_SIZE="${ON_POLICY_TRAIN_BATCH_SIZE:-${NPROC_PER_NODE}}"
 MICRO_BATCH_SIZE_PER_GPU="${ON_POLICY_MICRO_BATCH_SIZE_PER_GPU:-1}"
@@ -47,11 +98,10 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
     data.on_policy.enabled=true \
     data.on_policy.data_config_name=on_policy_swe_smith \
     data.on_policy.turn_generator_mode=proof_tool_chain \
-    data.on_policy.total_steps="${STEPS}" \
+    ++data.on_policy.total_steps="${STEPS}" \
     data.on_policy.output_dir="${PROOF_OUTPUT_DIR}" \
     +data.on_policy.runtime_overrides.task_batch_size="${TASK_BATCH_SIZE}" \
     +data.on_policy.runtime_overrides.attempts_per_task="${ATTEMPTS_PER_TASK}" \
-    +data.on_policy.runtime_overrides.env_pool_size="${ENV_POOL_SIZE}" \
     +data.on_policy.runtime_overrides.max_turns_per_attempt="${MAX_TURNS_PER_ATTEMPT}" \
     "$@"
   exit 0
@@ -76,10 +126,9 @@ NPROC_PER_NODE="${NPROC_PER_NODE}" "${SCRIPT_DIR}/run_rft.sh" \
   data.on_policy.enabled=true \
   data.on_policy.data_config_name=on_policy_swe_smith \
   data.on_policy.turn_generator_mode=proof_tool_chain \
-  data.on_policy.total_steps="${STEPS}" \
+  ++data.on_policy.total_steps="${STEPS}" \
   data.on_policy.output_dir="${PROOF_OUTPUT_DIR}" \
   +data.on_policy.runtime_overrides.task_batch_size="${TASK_BATCH_SIZE}" \
   +data.on_policy.runtime_overrides.attempts_per_task="${ATTEMPTS_PER_TASK}" \
-  +data.on_policy.runtime_overrides.env_pool_size="${ENV_POOL_SIZE}" \
   +data.on_policy.runtime_overrides.max_turns_per_attempt="${MAX_TURNS_PER_ATTEMPT}" \
   "$@"

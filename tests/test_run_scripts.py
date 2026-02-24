@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Mapping
 
+import config
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -34,8 +35,12 @@ def _write_python_defaults_stub(tmp_path: Path, defaults_line: str) -> Path:
     stub_path.write_text(
         "#!/usr/bin/env bash\n"
         "if [[ \"${1:-}\" == \"-\" ]]; then\n"
-        "  cat >/dev/null\n"
-        f"  printf '%s\\n' '{defaults_line}'\n"
+        "  payload=\"$(cat)\"\n"
+        "  if [[ \"${payload}\" == *\"torch.cuda.device_count\"* ]]; then\n"
+        "    printf '%s\\n' \"${STUB_GPU_COUNT:-0}\"\n"
+        "  else\n"
+        f"    printf '%s\\n' '{defaults_line}'\n"
+        "  fi\n"
         "  exit 0\n"
         "fi\n"
         "exec python3 \"$@\"\n",
@@ -71,7 +76,8 @@ def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topo
         (
             "100 8 64 32 1 1 512 2 2 "
             "http://127.0.0.1:8000/v1 "
-            "Qwen/Qwen3-4B-Instruct-2507 90 1024 0.0 1.0"
+            "Qwen/Qwen3-4B-Instruct-2507 90 1024 0.0 1.0 8 12288 "
+            "lora q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
         ),
     )
     result = _run_script(
@@ -84,6 +90,29 @@ def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topo
     )
     assert "--tensor-parallel-size 2" in result.stdout
     assert "--data-parallel-size 2" in result.stdout
+
+
+def test_run_rft_script_dry_run_defaults_nproc_to_detected_gpu_count(
+    tmp_path: Path,
+) -> None:
+    fake_python = _write_python_defaults_stub(
+        tmp_path,
+        (
+            "100 8 64 32 1 1 512 2 4 "
+            "http://127.0.0.1:8000/v1 "
+            "Qwen/Qwen3-4B-Instruct-2507 90 1024 0.0 1.0 8 12288 "
+            "lora q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+        ),
+    )
+    result = _run_script(
+        "run_rft.sh",
+        env_overrides={
+            "PYTHON_BIN": str(fake_python),
+            "STUB_GPU_COUNT": "8",
+            "NPROC_PER_NODE": "",
+        },
+    )
+    assert "--nproc_per_node 8" in result.stdout
 
 
 def test_run_rft_script_dry_run_uses_centralized_collector_in_flight_default() -> None:
@@ -155,6 +184,33 @@ def test_run_rft_script_dry_run_respects_explicit_vllm_extra_args() -> None:
     assert "--max-num-seqs 16" in result.stdout
 
 
+def test_run_rft_script_dry_run_uses_centralized_sequence_length_overrides() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+    )
+    assert "data.max_length=12288" in result.stdout
+
+
+def test_run_rft_script_dry_run_direct_mode_uses_centralized_runtime_overrides() -> None:
+    on_policy_defaults = config.on_policy_runtime_defaults()
+    expected_max_turns = on_policy_defaults["max_turns_per_attempt"]
+    result = _run_script(
+        "run_rft.sh",
+        env_overrides={
+            "NPROC_PER_NODE": "8",
+            "RFT_RUNTIME_MODE": "direct",
+            "RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT": "",
+        },
+    )
+    assert (
+        "actor_rollout_ref.model.lora.target_modules="
+        "\\[q_proj\\,k_proj\\,v_proj\\,o_proj\\,gate_proj\\,up_proj\\,down_proj\\]"
+    ) in result.stdout
+    assert f"+data.on_policy.runtime_overrides.max_turns_per_attempt={expected_max_turns}" in result.stdout
+    assert "data.max_length=12288" in result.stdout
+
+
 def test_run_sdft_script_dry_run_includes_loss_mode_override() -> None:
     result = _run_script("run_sdft.sh")
     assert "--config-name sdpo_swe" in result.stdout
@@ -206,7 +262,6 @@ def test_run_rft_onpolicy_rollout_proof_script_defaults_train_batch_to_world_siz
     assert "data.train_batch_size=8" in result.stdout
     assert "data.micro_batch_size_per_gpu=1" in result.stdout
     assert "+data.on_policy.runtime_overrides.task_batch_size=8" in result.stdout
-    assert "+data.on_policy.runtime_overrides.env_pool_size=8" in result.stdout
 
 
 def test_run_rft_onpolicy_rollout_proof_script_honors_explicit_batch_overrides() -> None:

@@ -7,6 +7,7 @@ pytest>=8.3
 torch<2.10,>=2.9.1
 transformers>=4.57.3
 flash-attn>=2.8.3
+orjson>=3.10
 peft>=0.18
 vllm>=0.8.4
 datasets>=4.4.2

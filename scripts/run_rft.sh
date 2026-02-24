@@ -20,7 +20,47 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     exit 1
   fi
 fi
-NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+
+_detect_available_gpu_count() {
+  local detected
+  detected="$(
+    "${PYTHON_BIN}" - <<'PY'
+try:
+    import torch
+except Exception:
+    print(0)
+else:
+    try:
+        count = int(torch.cuda.device_count())
+    except Exception:
+        count = 0
+    print(count if count > 0 else 0)
+PY
+  )"
+  if [[ "${detected}" =~ ^[0-9]+$ ]] && (( detected > 0 )); then
+    printf '%s\n' "${detected}"
+    return
+  fi
+
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    detected="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d '[:space:]')"
+    if [[ "${detected}" =~ ^[0-9]+$ ]] && (( detected > 0 )); then
+      printf '%s\n' "${detected}"
+      return
+    fi
+  fi
+
+  printf '1\n'
+}
+
+if [[ -z "${NPROC_PER_NODE:-}" ]]; then
+  NPROC_PER_NODE="$(_detect_available_gpu_count)"
+fi
+if ! [[ "${NPROC_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "NPROC_PER_NODE must be a positive integer (got: ${NPROC_PER_NODE})."
+  exit 1
+fi
+export NPROC_PER_NODE
 NNODES="${NNODES:-1}"
 # Grounded defaults:
 # - verl SFT trainer entrypoint: https://github.com/lasgroup/SDPO/blob/main/verl/trainer/fsdp_sft_trainer.py
@@ -47,31 +87,58 @@ RFT_TURN_GENERATOR_MODE="${RFT_TURN_GENERATOR_MODE:-default}"
 _load_rft_runtime_defaults() {
   "${PYTHON_BIN}" - <<'PY'
 import os
+from collections.abc import Mapping
 
 from config import (
+    adaptation_defaults,
     DEFAULT_TRAINING_MODEL_NAME,
+    on_policy_runtime_defaults,
+    rft_handoff_defaults,
     resolve_rft_collector_max_in_flight_default,
     resolve_rft_vllm_parallel_defaults,
     rft_runtime_defaults,
 )
 
 runtime = rft_runtime_defaults()
-loop = runtime.get("loop", {})
-vllm = runtime.get("vllm", {})
+loop = runtime.get("loop")
+if not isinstance(loop, Mapping):
+    raise ValueError("`rft_runtime.loop` must be configured as a mapping.")
+vllm = runtime.get("vllm")
+if not isinstance(vllm, Mapping):
+    raise ValueError("`rft_runtime.vllm` must be configured as a mapping.")
+on_policy = on_policy_runtime_defaults()
+if not isinstance(on_policy, Mapping):
+    raise ValueError("`on_policy` must be configured as a mapping.")
+handoff = rft_handoff_defaults()
+if not isinstance(handoff, Mapping):
+    raise ValueError("`rft_handoff` must be configured as a mapping.")
+adaptation = adaptation_defaults()
+if not isinstance(adaptation, Mapping):
+    raise ValueError("`adaptation` must be configured as a mapping.")
 
-def _positive_int(value, fallback):
+
+def _required_positive_int(value, *, label):
     if isinstance(value, bool):
-        return fallback
+        raise ValueError(f"`{label}` must be an integer >= 1.")
     if isinstance(value, int) and value >= 1:
         return value
-    return fallback
+    raise ValueError(f"`{label}` must be an integer >= 1.")
 
-def _finite_float(value, fallback):
+
+def _required_number(value, *, label):
     if isinstance(value, bool):
-        return fallback
+        raise ValueError(f"`{label}` must be a finite number.")
     if isinstance(value, (int, float)):
         return float(value)
-    return fallback
+    raise ValueError(f"`{label}` must be a finite number.")
+
+
+def _required_non_empty_str(value, *, label):
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    raise ValueError(f"`{label}` must be a non-empty string.")
 
 
 def _parse_positive_int(value, fallback):
@@ -82,28 +149,93 @@ def _parse_positive_int(value, fallback):
     return parsed if parsed >= 1 else fallback
 
 
-steps = _positive_int(loop.get("steps"), 1)
-samples_per_task = _positive_int(loop.get("samples_per_task"), 1)
-task_batch_size = _positive_int(loop.get("task_batch_size"), 1)
+steps = _required_positive_int(loop.get("steps"), label="rft_runtime.loop.steps")
+samples_per_task = _required_positive_int(
+    loop.get("samples_per_task"),
+    label="rft_runtime.loop.samples_per_task",
+)
+task_batch_size = _required_positive_int(
+    loop.get("task_batch_size"),
+    label="rft_runtime.loop.task_batch_size",
+)
 collector_max_in_flight_tasks = resolve_rft_collector_max_in_flight_default(
     task_batch_size=task_batch_size
 )
-sft_num_epoch_per_batch = _positive_int(loop.get("sft_num_epoch_per_batch"), 1)
-checkpoint_keep_last = _positive_int(loop.get("checkpoint_keep_last"), 1)
-train_batch_size = _positive_int(loop.get("train_batch_size"), samples_per_task * task_batch_size)
+sft_num_epoch_per_batch = _required_positive_int(
+    loop.get("sft_num_epoch_per_batch"),
+    label="rft_runtime.loop.sft_num_epoch_per_batch",
+)
+checkpoint_keep_last = _required_positive_int(
+    loop.get("checkpoint_keep_last"),
+    label="rft_runtime.loop.checkpoint_keep_last",
+)
+train_batch_size = _required_positive_int(
+    loop.get("train_batch_size"),
+    label="rft_runtime.loop.train_batch_size",
+)
 nproc_per_node = _parse_positive_int(os.environ.get("NPROC_PER_NODE"), 1)
 default_tp, default_dp = resolve_rft_vllm_parallel_defaults(nproc_per_node=nproc_per_node)
 
-base_url = vllm.get("base_url")
-if not isinstance(base_url, str) or not base_url.strip():
-    base_url = "http://127.0.0.1:8000/v1"
-model_name = vllm.get("model_name")
-if not isinstance(model_name, str) or not model_name.strip():
-    model_name = DEFAULT_TRAINING_MODEL_NAME
-request_timeout_sec = _positive_int(vllm.get("request_timeout_sec"), 90)
-max_tokens = _positive_int(vllm.get("max_tokens"), 1024)
-temperature = _finite_float(vllm.get("temperature"), 0.0)
-top_p = _finite_float(vllm.get("top_p"), 1.0)
+base_url = _required_non_empty_str(
+    vllm.get("base_url"),
+    label="rft_runtime.vllm.base_url",
+)
+model_name = _required_non_empty_str(
+    vllm.get("model_name", DEFAULT_TRAINING_MODEL_NAME),
+    label="rft_runtime.vllm.model_name",
+)
+request_timeout_sec = _required_positive_int(
+    vllm.get("request_timeout_sec"),
+    label="rft_runtime.vllm.request_timeout_sec",
+)
+max_tokens = _required_positive_int(
+    vllm.get("max_tokens"),
+    label="rft_runtime.vllm.max_tokens",
+)
+temperature = _required_number(
+    vllm.get("temperature"),
+    label="rft_runtime.vllm.temperature",
+)
+top_p = _required_number(
+    vllm.get("top_p"),
+    label="rft_runtime.vllm.top_p",
+)
+default_max_turns_per_attempt = _required_positive_int(
+    on_policy.get("max_turns_per_attempt"),
+    label="on_policy.max_turns_per_attempt",
+)
+default_max_sequence_length = _required_positive_int(
+    handoff.get("max_sequence_length"),
+    label="rft_handoff.max_sequence_length",
+)
+adaptation_mode = _required_non_empty_str(
+    adaptation.get("mode"),
+    label="adaptation.mode",
+).lower()
+if adaptation_mode != "lora":
+    raise ValueError(
+        "run_rft.sh currently supports only adaptation.mode='lora'. "
+        f"Got {adaptation_mode!r}."
+    )
+
+target_modules_raw = adaptation.get("target_modules")
+if not isinstance(target_modules_raw, list) or not target_modules_raw:
+    raise ValueError("`adaptation.target_modules` must be a non-empty list of strings.")
+target_modules: list[str] = []
+for item in target_modules_raw:
+    if not isinstance(item, str) or not item.strip():
+        raise ValueError("`adaptation.target_modules` must contain non-empty strings.")
+    target_modules.append(item.strip())
+
+compute_precision = _required_non_empty_str(
+    adaptation.get("compute_precision"),
+    label="adaptation.compute_precision",
+).lower()
+if compute_precision not in {"bf16", "bfloat16", "fp16", "float16"}:
+    raise ValueError(
+        "run_rft.sh supports adaptation.compute_precision in {bf16,bfloat16,fp16,float16}. "
+        f"Got {compute_precision!r}."
+    )
 
 print(
     steps,
@@ -115,18 +247,22 @@ print(
     train_batch_size,
     default_tp,
     default_dp,
-    base_url.strip(),
-    model_name.strip(),
+    base_url,
+    model_name,
     request_timeout_sec,
     max_tokens,
     temperature,
     top_p,
+    default_max_turns_per_attempt,
+    default_max_sequence_length,
+    adaptation_mode,
+    ",".join(target_modules),
 )
 PY
 }
 
 RFT_DEFAULTS="$(_load_rft_runtime_defaults)"
-read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P <<<"${RFT_DEFAULTS}"
+read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT DEFAULT_RFT_MAX_SEQUENCE_LENGTH DEFAULT_ADAPTATION_MODE DEFAULT_LORA_TARGET_MODULES <<<"${RFT_DEFAULTS}"
 
 RFT_STEPS="${RFT_STEPS:-${DEFAULT_RFT_STEPS}}"
 SAMPLES_PER_TASK="${SAMPLES_PER_TASK:-${DEFAULT_SAMPLES_PER_TASK}}"
@@ -136,8 +272,18 @@ RFT_SFT_NUM_EPOCH_PER_BATCH="${RFT_SFT_NUM_EPOCH_PER_BATCH:-${DEFAULT_RFT_SFT_NU
 RFT_CHECKPOINT_KEEP_LAST="${RFT_CHECKPOINT_KEEP_LAST:-${DEFAULT_RFT_CHECKPOINT_KEEP_LAST}}"
 RFT_BATCH_SIZE="${RFT_BATCH_SIZE:-$((SAMPLES_PER_TASK * RFT_TASK_BATCH_SIZE))}"
 RFT_TRAIN_BATCH_SIZE="${RFT_TRAIN_BATCH_SIZE:-${DEFAULT_RFT_TRAIN_BATCH_SIZE}}"
+RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT="${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT:-${DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT}}"
+RFT_MAX_SEQUENCE_LENGTH="${RFT_MAX_SEQUENCE_LENGTH:-${DEFAULT_RFT_MAX_SEQUENCE_LENGTH}}"
+RFT_ADAPTATION_MODE="${RFT_ADAPTATION_MODE:-${DEFAULT_ADAPTATION_MODE}}"
+RFT_LORA_TARGET_MODULES="${RFT_LORA_TARGET_MODULES:-${DEFAULT_LORA_TARGET_MODULES}}"
 RFT_OUTPUT_DIR="${RFT_OUTPUT_DIR:-${PROJECT_ROOT}/outputs/rft_runtime}"
 RFT_INITIAL_MODEL="${RFT_INITIAL_MODEL:-${DEFAULT_VLLM_MODEL}}"
+
+if [[ "${RFT_ADAPTATION_MODE}" != "lora" ]]; then
+  echo "run_rft.sh currently supports only RFT_ADAPTATION_MODE=lora (resolved: ${RFT_ADAPTATION_MODE})."
+  exit 1
+fi
+RFT_LORA_TARGET_MODULES_HYDRA="[${RFT_LORA_TARGET_MODULES}]"
 
 RFT_VLLM_TP_SIZE="${RFT_VLLM_TP_SIZE:-${DEFAULT_VLLM_TP_SIZE}}"
 if [[ -z "${RFT_VLLM_DP_SIZE}" ]]; then
@@ -171,20 +317,29 @@ export EXPERIMENT="${EXPERIMENT:-${RFT_TASK_NAME}}"
 
 if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
   CMD=(
-    torchrun
+    "${PYTHON_BIN}"
+    -m
+    torch.distributed.run
     --standalone
     --nnodes "${NNODES}"
     --nproc_per_node "${NPROC_PER_NODE}"
     -m "${RFT_TRAINER_MODULE}"
     --config-name rft_swe
     --config-dir "${CONFIG_DIR}"
+    +max_model_len="${RFT_MAX_SEQUENCE_LENGTH}"
+    data.max_length="${RFT_MAX_SEQUENCE_LENGTH}"
     trainer.total_epochs="${RFT_SFT_NUM_EPOCH_PER_BATCH}"
     trainer.total_training_steps="${RFT_STEPS}"
     data.train_batch_size="${RFT_TRAIN_BATCH_SIZE}"
-    data.on_policy.total_steps="${RFT_STEPS}"
+    actor_rollout_ref.model.path="${RFT_INITIAL_MODEL}"
+    model.partial_pretrain="${RFT_INITIAL_MODEL}"
+    actor_rollout_ref.model.lora.enable=true
+    actor_rollout_ref.model.lora.target_modules="${RFT_LORA_TARGET_MODULES_HYDRA}"
+    ++data.on_policy.total_steps="${RFT_STEPS}"
     +data.on_policy.runtime_overrides.task_batch_size="${RFT_TASK_BATCH_SIZE}"
     +data.on_policy.runtime_overrides.attempts_per_task="${SAMPLES_PER_TASK}"
-    +data.on_policy.runtime_overrides.env_pool_size="${RFT_TASK_BATCH_SIZE}"
+    +data.on_policy.runtime_overrides.max_in_flight_tasks="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}"
+    +data.on_policy.runtime_overrides.max_turns_per_attempt="${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT}"
     "$@"
   )
 
@@ -231,6 +386,11 @@ LOOP_CMD=(
   --vllm-ready-timeout-sec "${RFT_VLLM_READY_TIMEOUT_SEC}"
   --vllm-stop-timeout-sec "${RFT_VLLM_STOP_TIMEOUT_SEC}"
   --vllm-extra-args "${RFT_VLLM_EXTRA_ARGS}"
+  --trainer-override "+max_model_len=${RFT_MAX_SEQUENCE_LENGTH}"
+  --trainer-override "data.max_length=${RFT_MAX_SEQUENCE_LENGTH}"
+  --trainer-override "actor_rollout_ref.model.path=${RFT_INITIAL_MODEL}"
+  --trainer-override "actor_rollout_ref.model.lora.enable=true"
+  --trainer-override "actor_rollout_ref.model.lora.target_modules=${RFT_LORA_TARGET_MODULES_HYDRA}"
 )
 
 if [[ -n "${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}" ]]; then

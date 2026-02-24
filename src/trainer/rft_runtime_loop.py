@@ -33,6 +33,7 @@ _VLLM_OPENAI_SERVER_DOC = (
 _VLLM_OPENAI_SERVER_SOURCE = (
     "https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/api_server.py"
 )
+_MICRO_BATCH_SIZE_KEY = "data.micro_batch_size_per_gpu"
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,11 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         )
     collector_max_in_flight_tasks = max(1, min(collector_max_in_flight_tasks, config.task_batch_size))
     collector_max_turns_per_attempt = config.collector_max_turns_per_attempt
+    micro_batch_size_per_gpu = resolve_micro_batch_size_per_gpu(
+        config_dir=config.config_dir,
+        config_name=config.config_name,
+        trainer_overrides=config.trainer_overrides,
+    )
     runtime_manifest: dict[str, Any] = {
         "generated_utc": _utc_now(),
         "config": {
@@ -160,6 +166,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             "sft_num_epoch_per_batch": config.sft_num_epoch_per_batch,
             "checkpoint_keep_last": config.checkpoint_keep_last,
             "train_batch_size": config.train_batch_size,
+            "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
             "data_config_name": config.data_config_name,
             "turn_generator_mode": config.turn_generator_mode,
             "initial_model": config.initial_model,
@@ -200,7 +207,6 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             runtime_overrides: dict[str, int] = {
                 "task_batch_size": config.task_batch_size,
                 "attempts_per_task": config.samples_per_task,
-                "env_pool_size": config.task_batch_size,
                 "max_in_flight_tasks": collector_max_in_flight_tasks,
             }
             if collector_max_turns_per_attempt is not None:
@@ -237,56 +243,55 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 skip_reason = "no_selected_rows"
             else:
                 world_size = config.nnodes * config.nproc_per_node
-                selected_rows_for_train = upsample_rows_to_min_count(
-                    selected_rows,
-                    min_count=world_size,
-                )
                 selected_count_for_train = write_selected_rows_to_multiturn_parquet(
-                    selected_rows_for_train,
+                    selected_rows,
                     parquet_path,
                 )
-                selected_rows_upsampled = selected_count_for_train - selected_count_raw
                 effective_train_batch_size = resolve_effective_train_batch_size(
                     requested=config.train_batch_size,
                     selected_count=selected_count_for_train,
                     world_size=world_size,
+                    micro_batch_size_per_gpu=micro_batch_size_per_gpu,
                 )
+                if effective_train_batch_size is None:
+                    trainer_skipped = True
+                    skip_reason = "insufficient_selected_rows_for_batch_constraints"
+                else:
+                    trainer_command = build_trainer_step_command(
+                        python_bin=config.python_bin,
+                        nnodes=config.nnodes,
+                        nproc_per_node=config.nproc_per_node,
+                        trainer_module=config.trainer_module,
+                        config_name=config.config_name,
+                        config_dir=config.config_dir,
+                        model_path=current_model_path,
+                        train_parquet_path=parquet_path,
+                        val_parquet_path=parquet_path,
+                        trainer_output_dir=trainer_checkpoint_root,
+                        train_batch_size=effective_train_batch_size,
+                        sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
+                        trainer_overrides=config.trainer_overrides,
+                    )
 
-                trainer_command = build_trainer_step_command(
-                    python_bin=config.python_bin,
-                    nnodes=config.nnodes,
-                    nproc_per_node=config.nproc_per_node,
-                    trainer_module=config.trainer_module,
-                    config_name=config.config_name,
-                    config_dir=config.config_dir,
-                    model_path=current_model_path,
-                    train_parquet_path=parquet_path,
-                    val_parquet_path=parquet_path,
-                    trainer_output_dir=trainer_checkpoint_root,
-                    train_batch_size=effective_train_batch_size,
-                    sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
-                    trainer_overrides=config.trainer_overrides,
-                )
+                    if config.manage_vllm:
+                        vllm_controller.stop()
+                    trainer_start = time.monotonic()
+                    _run_command(trainer_command, cwd=config.project_root)
+                    trainer_duration_sec = time.monotonic() - trainer_start
 
-                if config.manage_vllm:
-                    vllm_controller.stop()
-                trainer_start = time.monotonic()
-                _run_command(trainer_command, cwd=config.project_root)
-                trainer_duration_sec = time.monotonic() - trainer_start
+                    latest_hf_checkpoint = resolve_latest_hf_checkpoint(trainer_checkpoint_root)
+                    pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
+                        checkpoint_root=trainer_checkpoint_root,
+                        keep_last=config.checkpoint_keep_last,
+                    )
+                    current_model_path = str(latest_hf_checkpoint)
+                    checkpoint_step_dirs.append(step_dir)
 
-                latest_hf_checkpoint = resolve_latest_hf_checkpoint(trainer_checkpoint_root)
-                pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
-                    checkpoint_root=trainer_checkpoint_root,
-                    keep_last=config.checkpoint_keep_last,
-                )
-                current_model_path = str(latest_hf_checkpoint)
-                checkpoint_step_dirs.append(step_dir)
-
-                # Restart vLLM only when another collection step remains.
-                # Restarting after the final step adds unnecessary startup cost
-                # and can surface avoidable restart-path failures.
-                if config.manage_vllm and step_index + 1 < config.rft_steps:
-                    vllm_controller.start(model_path=current_model_path)
+                    # Restart vLLM only when another collection step remains.
+                    # Restarting after the final step adds unnecessary startup cost
+                    # and can surface avoidable restart-path failures.
+                    if config.manage_vllm and step_index + 1 < config.rft_steps:
+                        vllm_controller.start(model_path=current_model_path)
 
             pruned_checkpoint_roots: list[Path] = []
             if latest_hf_checkpoint is not None:
@@ -693,50 +698,82 @@ def _coerce_rows(value: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def upsample_rows_to_min_count(
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    min_count: int,
-) -> list[dict[str, Any]]:
-    """Repeat selected rows to satisfy minimum global batch constraints."""
-    if min_count < 1:
-        raise ValueError("min_count must be >= 1.")
-    if not rows:
-        return []
-
-    result = [dict(row) for row in rows]
-    source_rows = list(rows)
-    index = 0
-    while len(result) < min_count:
-        result.append(dict(source_rows[index % len(source_rows)]))
-        index += 1
-    return result
-
-
 def resolve_effective_train_batch_size(
     *,
     requested: int,
     selected_count: int,
     world_size: int,
-) -> int:
-    """Clamp global train batch size to selected rows and DP divisibility constraints."""
+    micro_batch_size_per_gpu: int = 1,
+) -> int | None:
+    """Clamp global train batch size to selected rows and DP/micro-batch divisibility."""
     if requested < 1:
         raise ValueError("requested train batch size must be >= 1.")
     if selected_count < 1:
         raise ValueError("selected_count must be >= 1.")
     if world_size < 1:
         raise ValueError("world_size must be >= 1.")
+    if micro_batch_size_per_gpu < 1:
+        raise ValueError("micro_batch_size_per_gpu must be >= 1.")
 
     max_global = min(requested, selected_count)
-    if max_global < world_size:
-        return max_global
+    divisor = world_size * micro_batch_size_per_gpu
+    if max_global < divisor:
+        return None
 
-    divisible = (max_global // world_size) * world_size
+    divisible = (max_global // divisor) * divisor
     if divisible < 1:
-        raise ValueError(
-            "Unable to derive a valid global train batch size from selected_count/world_size."
-        )
+        return None
     return divisible
+
+
+def resolve_micro_batch_size_per_gpu(
+    *,
+    config_dir: Path,
+    config_name: str,
+    trainer_overrides: Sequence[str],
+) -> int:
+    """Resolve micro-batch size from config file with optional override precedence."""
+    resolved = _load_default_micro_batch_size_per_gpu(config_dir=config_dir, config_name=config_name)
+    for override in trainer_overrides:
+        parsed = _parse_positive_int_override(override, key=_MICRO_BATCH_SIZE_KEY)
+        if parsed is not None:
+            resolved = parsed
+    return resolved
+
+
+def _load_default_micro_batch_size_per_gpu(*, config_dir: Path, config_name: str) -> int:
+    config_path = config_dir / f"{config_name}.yaml"
+    if not config_path.is_file():
+        return 1
+
+    pattern = re.compile(r"^\s*micro_batch_size_per_gpu\s*:\s*([0-9]+)\s*(?:#.*)?$")
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line)
+        if match is None:
+            continue
+        value = int(match.group(1))
+        if value >= 1:
+            return value
+        break
+    return 1
+
+
+def _parse_positive_int_override(override: str, *, key: str) -> int | None:
+    normalized = override.strip()
+    while normalized.startswith("+"):
+        normalized = normalized[1:]
+    prefix = f"{key}="
+    if not normalized.startswith(prefix):
+        return None
+
+    value_raw = normalized[len(prefix) :].strip()
+    try:
+        value = int(value_raw)
+    except ValueError as exc:
+        raise ValueError(f"{key} override must be an integer >= 1 (got {value_raw!r}).") from exc
+    if value < 1:
+        raise ValueError(f"{key} override must be >= 1 (got {value}).")
+    return value
 
 
 def _utc_now() -> str:

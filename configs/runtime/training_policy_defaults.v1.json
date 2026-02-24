@@ -80,22 +80,21 @@
       "q_proj",
       "k_proj",
       "v_proj",
-      "o_proj"
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
     ],
     "compute_precision": "bf16"
   },
   "on_policy": {
     "enabled": true,
     "rollout_only": true,
-    "task_batch_size": 4,
-    "attempts_per_task": 2,
-    "max_turns_per_attempt": 8,
-    "env_pool_size": 4,
-    "tool_timeout_sec": 30,
+    "max_turns_per_attempt": 16,
+    "tool_timeout_sec": 60,
     "container_start_timeout_sec": 120,
     "attempt_timeout_sec": 300,
-    "max_tool_calls_per_turn": 3,
-    "max_in_flight_tasks": 4
+    "max_tool_calls_per_turn": 3
   },
   "rft_handoff": {
     "max_sequence_length": 12288,
@@ -118,28 +117,23 @@
   "rft_runtime": {
     "loop": {
       "sft_num_epoch_per_batch": 1,
-      "steps": 100,
+      "steps": 2,
       "samples_per_task": 8,
-      "task_batch_size": 128,
+      "task_batch_size": 32,
       "collector_max_in_flight_tasks": 32,
-      "train_batch_size": 1024,
+      "train_batch_size": 16,
       "checkpoint_keep_last": 1
     },
     "vllm": {
       "base_url": "http://127.0.0.1:8000/v1",
       "model_name": "Qwen/Qwen3-4B-Instruct-2507",
-      "request_timeout_sec": 90,
+      "request_timeout_sec": 180,
       "max_tokens": 1024,
-      "temperature": 0.0,
+      "temperature": 0.7,
       "top_p": 1.0
     },
     "vllm_parallelism": {
-      "by_nproc_per_node": {
-        "8": {
-          "tensor_parallel_size": 2,
-          "data_parallel_size": 4
-        }
-      }
+      "default_tensor_parallel_size": 2
     }
   },
   "runtime": {

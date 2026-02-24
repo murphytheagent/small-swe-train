@@ -17,8 +17,8 @@ from trainer.rft_runtime_loop import (
     prune_old_step_payloads,
     reset_step_artifacts,
     resolve_effective_train_batch_size,
+    resolve_micro_batch_size_per_gpu,
     resolve_latest_hf_checkpoint,
-    upsample_rows_to_min_count,
 )
 
 
@@ -626,13 +626,13 @@ def test_resolve_effective_train_batch_size_enforces_world_size_divisibility_whe
     assert resolved == 64
 
 
-def test_resolve_effective_train_batch_size_allows_tiny_global_batches() -> None:
+def test_resolve_effective_train_batch_size_returns_none_when_below_world_size() -> None:
     resolved = resolve_effective_train_batch_size(
         requested=64,
         selected_count=3,
         world_size=8,
     )
-    assert resolved == 3
+    assert resolved is None
 
 
 def test_resolve_effective_train_batch_size_rejects_invalid_inputs() -> None:
@@ -642,24 +642,46 @@ def test_resolve_effective_train_batch_size_rejects_invalid_inputs() -> None:
         resolve_effective_train_batch_size(requested=1, selected_count=0, world_size=8)
     with pytest.raises(ValueError, match="world_size"):
         resolve_effective_train_batch_size(requested=1, selected_count=8, world_size=0)
+    with pytest.raises(ValueError, match="micro_batch_size_per_gpu"):
+        resolve_effective_train_batch_size(
+            requested=1,
+            selected_count=8,
+            world_size=8,
+            micro_batch_size_per_gpu=0,
+        )
 
 
-def test_upsample_rows_to_min_count_repeats_rows_until_target() -> None:
-    rows = [{"id": 1}, {"id": 2}]
-
-    upsampled = upsample_rows_to_min_count(rows, min_count=5)
-
-    assert len(upsampled) == 5
-    assert [row["id"] for row in upsampled] == [1, 2, 1, 2, 1]
-
-
-def test_upsample_rows_to_min_count_handles_empty_rows() -> None:
-    assert upsample_rows_to_min_count([], min_count=8) == []
+def test_resolve_effective_train_batch_size_enforces_micro_batch_divisibility() -> None:
+    resolved = resolve_effective_train_batch_size(
+        requested=47,
+        selected_count=47,
+        world_size=8,
+        micro_batch_size_per_gpu=4,
+    )
+    assert resolved == 32
 
 
-def test_upsample_rows_to_min_count_rejects_invalid_min_count() -> None:
-    with pytest.raises(ValueError, match="min_count"):
-        upsample_rows_to_min_count([{"id": 1}], min_count=0)
+def test_resolve_micro_batch_size_per_gpu_prefers_override(tmp_path: Path) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(parents=True)
+    (config_dir / "rft_swe.yaml").write_text(
+        "data:\n  micro_batch_size_per_gpu: 4\n",
+        encoding="utf-8",
+    )
+
+    resolved_default = resolve_micro_batch_size_per_gpu(
+        config_dir=config_dir,
+        config_name="rft_swe",
+        trainer_overrides=(),
+    )
+    assert resolved_default == 4
+
+    resolved_override = resolve_micro_batch_size_per_gpu(
+        config_dir=config_dir,
+        config_name="rft_swe",
+        trainer_overrides=("+data.micro_batch_size_per_gpu=2",),
+    )
+    assert resolved_override == 2
 
 
 def test_reset_step_artifacts_removes_mutable_outputs(tmp_path: Path) -> None:

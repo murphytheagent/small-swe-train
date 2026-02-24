@@ -184,6 +184,15 @@ def rft_runtime_defaults() -> dict[str, Any]:
     return dict(runtime_defaults)
 
 
+def adaptation_defaults() -> dict[str, Any]:
+    """Return centralized adaptation defaults from runtime policy JSON."""
+    defaults = training_policy_defaults()
+    adaptation = defaults.get("adaptation")
+    if not isinstance(adaptation, Mapping):
+        raise ValueError("`adaptation` block is missing from training policy defaults.")
+    return dict(adaptation)
+
+
 def resolve_rft_collector_max_in_flight_default(*, task_batch_size: int) -> int:
     """Resolve default collector in-flight task concurrency for an RFT loop run."""
     if isinstance(task_batch_size, bool) or task_batch_size < 1:
@@ -426,6 +435,31 @@ def _merge_on_policy_data_payload(
     return merged
 
 
+def _resolve_on_policy_runtime_scale_defaults() -> dict[str, int]:
+    runtime_defaults = rft_runtime_defaults()
+    loop_defaults = _require_mapping(
+        runtime_defaults.get("loop"),
+        label="rft_runtime.loop",
+    )
+    task_batch_size = _coerce_positive_int(
+        loop_defaults.get("task_batch_size"),
+        label="rft_runtime.loop.task_batch_size",
+    )
+    attempts_per_task = _coerce_positive_int(
+        loop_defaults.get("samples_per_task"),
+        label="rft_runtime.loop.samples_per_task",
+    )
+    max_in_flight_tasks = resolve_rft_collector_max_in_flight_default(
+        task_batch_size=task_batch_size,
+    )
+    return {
+        "task_batch_size": task_batch_size,
+        "attempts_per_task": attempts_per_task,
+        "env_pool_size": task_batch_size,
+        "max_in_flight_tasks": max_in_flight_tasks,
+    }
+
+
 def resolve_on_policy_settings(
     *,
     data_config_name: str = DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
@@ -434,6 +468,7 @@ def resolve_on_policy_settings(
 ) -> OnPolicySettings:
     """Resolve and validate merged on-policy settings from centralized configs."""
     runtime_payload = on_policy_runtime_defaults()
+    runtime_payload.update(_resolve_on_policy_runtime_scale_defaults())
     if runtime_overrides is not None:
         runtime_payload.update(runtime_overrides)
         if (
@@ -441,6 +476,8 @@ def resolve_on_policy_settings(
             and "max_in_flight_tasks" not in runtime_overrides
         ):
             runtime_payload["max_in_flight_tasks"] = runtime_payload["task_batch_size"]
+        if "task_batch_size" in runtime_overrides and "env_pool_size" not in runtime_overrides:
+            runtime_payload["env_pool_size"] = runtime_payload["task_batch_size"]
 
     data_payload = on_policy_data_defaults(data_config_name)
     if data_overrides is not None:
