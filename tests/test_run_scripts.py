@@ -47,6 +47,14 @@ def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
     assert "--data-parallel-size 4" in result.stdout
 
 
+def test_run_rft_script_dry_run_uses_centralized_collector_in_flight_default() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+    )
+    assert "collector_max_in_flight_tasks=32" in result.stdout
+
+
 def test_run_rft_script_dry_run_allows_explicit_tp_override() -> None:
     result = _run_script(
         "run_rft.sh",

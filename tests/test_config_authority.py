@@ -106,9 +106,25 @@ def test_rft_runtime_defaults_load_loop_and_vllm_config() -> None:
     assert runtime_defaults["loop"]["steps"] >= 1
     assert runtime_defaults["loop"]["samples_per_task"] >= 1
     assert runtime_defaults["loop"]["task_batch_size"] >= 1
+    assert runtime_defaults["loop"]["collector_max_in_flight_tasks"] >= 1
     assert runtime_defaults["loop"]["train_batch_size"] >= 1
     assert runtime_defaults["loop"]["checkpoint_keep_last"] >= 1
     assert runtime_defaults["vllm"]["base_url"].startswith("http://")
+    assert runtime_defaults["vllm_parallelism"]["by_nproc_per_node"]["8"]["tensor_parallel_size"] == 2
+    assert runtime_defaults["vllm_parallelism"]["by_nproc_per_node"]["8"]["data_parallel_size"] == 4
+
+
+def test_resolve_rft_collector_max_in_flight_default_clamps_to_task_batch_size() -> None:
+    assert config.resolve_rft_collector_max_in_flight_default(task_batch_size=64) == 32
+    assert config.resolve_rft_collector_max_in_flight_default(task_batch_size=16) == 16
+
+
+def test_resolve_rft_vllm_parallel_defaults_prefers_centralized_8gpu_profile() -> None:
+    assert config.resolve_rft_vllm_parallel_defaults(nproc_per_node=8) == (2, 4)
+
+
+def test_resolve_rft_vllm_parallel_defaults_falls_back_for_non_profiled_world_size() -> None:
+    assert config.resolve_rft_vllm_parallel_defaults(nproc_per_node=4) == (2, 2)
 
 
 def test_resolve_rft_handoff_settings_loads_selection_policy() -> None:

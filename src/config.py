@@ -184,6 +184,58 @@ def rft_runtime_defaults() -> dict[str, Any]:
     return dict(runtime_defaults)
 
 
+def resolve_rft_collector_max_in_flight_default(*, task_batch_size: int) -> int:
+    """Resolve default collector in-flight task concurrency for an RFT loop run."""
+    if isinstance(task_batch_size, bool) or task_batch_size < 1:
+        raise ValueError("task_batch_size must be an integer >= 1.")
+
+    runtime_defaults = rft_runtime_defaults()
+    loop_defaults = runtime_defaults.get("loop")
+    configured_value: int | None = None
+    if isinstance(loop_defaults, Mapping):
+        configured_value = _coerce_optional_positive_int(loop_defaults.get("collector_max_in_flight_tasks"))
+
+    resolved = configured_value if configured_value is not None else int(task_batch_size)
+    return max(1, min(resolved, int(task_batch_size)))
+
+
+def resolve_rft_vllm_parallel_defaults(*, nproc_per_node: int) -> tuple[int, int]:
+    """Resolve default vLLM TP/DP sizes for a given node world size."""
+    if isinstance(nproc_per_node, bool) or nproc_per_node < 1:
+        raise ValueError("nproc_per_node must be an integer >= 1.")
+
+    runtime_defaults = rft_runtime_defaults()
+    parallel_defaults = runtime_defaults.get("vllm_parallelism")
+    resolved_tp: int | None = None
+    resolved_dp: int | None = None
+
+    if isinstance(parallel_defaults, Mapping):
+        by_nproc = parallel_defaults.get("by_nproc_per_node")
+        if isinstance(by_nproc, Mapping):
+            keyed_defaults = by_nproc.get(str(int(nproc_per_node)))
+            if isinstance(keyed_defaults, Mapping):
+                resolved_tp = _coerce_optional_positive_int(keyed_defaults.get("tensor_parallel_size"))
+                resolved_dp = _coerce_optional_positive_int(keyed_defaults.get("data_parallel_size"))
+        if resolved_tp is None:
+            resolved_tp = _coerce_optional_positive_int(parallel_defaults.get("default_tensor_parallel_size"))
+        if resolved_dp is None:
+            resolved_dp = _coerce_optional_positive_int(parallel_defaults.get("default_data_parallel_size"))
+
+    if resolved_tp is None:
+        resolved_tp = 2 if int(nproc_per_node) >= 4 else 1
+    if int(nproc_per_node) % resolved_tp != 0:
+        resolved_tp = 1
+        resolved_dp = None
+
+    max_supported_dp = max(1, int(nproc_per_node) // resolved_tp)
+    if resolved_dp is None:
+        resolved_dp = max_supported_dp
+    else:
+        resolved_dp = max(1, min(resolved_dp, max_supported_dp))
+
+    return resolved_tp, resolved_dp
+
+
 def output_contract_defaults() -> dict[str, Any]:
     """Return the output-contract defaults dictionary from runtime policy."""
     defaults = training_policy_defaults()
@@ -244,6 +296,14 @@ def _coerce_positive_int(value: Any, *, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{label} must be an integer >= 1.")
     return value
+
+
+def _coerce_optional_positive_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return int(value)
 
 
 def _coerce_non_negative_int(value: Any, *, label: str) -> int:

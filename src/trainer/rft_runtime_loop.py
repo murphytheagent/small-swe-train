@@ -19,6 +19,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from config import resolve_rft_collector_max_in_flight_default
 from trainer.rft_multiturn_dataset import write_selected_rows_to_multiturn_parquet
 from trainer.rft_runtime import OnPolicyRFTRuntimeRequest, collect_onpolicy_rft_runtime_batch
 
@@ -143,7 +144,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     vllm_logs = config.output_dir / "vllm_server.log"
     collector_max_in_flight_tasks = config.collector_max_in_flight_tasks
     if collector_max_in_flight_tasks is None:
-        collector_max_in_flight_tasks = config.task_batch_size
+        collector_max_in_flight_tasks = resolve_rft_collector_max_in_flight_default(
+            task_batch_size=config.task_batch_size,
+        )
     collector_max_in_flight_tasks = max(1, min(collector_max_in_flight_tasks, config.task_batch_size))
     collector_max_turns_per_attempt = config.collector_max_turns_per_attempt
     runtime_manifest: dict[str, Any] = {
@@ -168,7 +171,10 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     }
 
     if config.dry_run:
-        _print_dry_run_plan(config=config)
+        _print_dry_run_plan(
+            config=config,
+            collector_max_in_flight_tasks=collector_max_in_flight_tasks,
+        )
         return
 
     tokenizer = _load_tokenizer(config.initial_model)
@@ -558,15 +564,18 @@ def _iter_global_step_dirs(root: Path) -> Sequence[tuple[int, int, Path]]:
     return rows
 
 
-def _print_dry_run_plan(config: RFTLoopConfig) -> None:
+def _print_dry_run_plan(
+    config: RFTLoopConfig,
+    *,
+    collector_max_in_flight_tasks: int,
+) -> None:
     preview_steps = min(config.rft_steps, 2)
     print(
         "# [dry-run] planned RFT loop",
         f"steps={config.rft_steps}",
         f"samples_per_task={config.samples_per_task}",
         f"task_batch_size={config.task_batch_size}",
-        "collector_max_in_flight_tasks="
-        f"{config.collector_max_in_flight_tasks or config.task_batch_size}",
+        f"collector_max_in_flight_tasks={collector_max_in_flight_tasks}",
         "collector_max_turns_per_attempt="
         f"{config.collector_max_turns_per_attempt or 'default'}",
         f"checkpoint_keep_last={config.checkpoint_keep_last}",
@@ -761,7 +770,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         default=None,
         help=(
             "optional override for collector task-dispatch concurrency; "
-            "defaults to task-batch-size."
+            "defaults to centralized runtime policy (clamped by task-batch-size)."
         ),
     )
     parser.add_argument(
