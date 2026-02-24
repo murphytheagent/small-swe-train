@@ -14,14 +14,24 @@ def build_multiturn_dataset_records(
     """Convert selected attempt rows into verl MultiTurnSFTDataset parquet records."""
     records: list[dict[str, Any]] = []
     for index, row in enumerate(selected_rows):
+        row_label = f"selected_rows[{index}]"
+        task_id = _require_non_empty_text(row.get("task_id"), label=f"{row_label}.task_id")
+        image_name = _require_non_empty_text(row.get("image_name"), label=f"{row_label}.image_name")
+        attempt_index = _require_int(row.get("attempt_index"), label=f"{row_label}.attempt_index")
+        step_index = _require_int(row.get("step_index"), label=f"{row_label}.step_index")
+        turn_index = _require_int(row.get("turn_index"), label=f"{row_label}.turn_index")
         messages = build_multiturn_messages(row, row_index=index)
         records.append(
             {
+                # Keep `messages` for existing MultiTurnSFT readers and add `prompt`
+                # so RLHFDataset-based SDPO runs can consume the same handoff parquet.
                 "messages": messages,
-                "task_id": _as_text(row.get("task_id")),
-                "attempt_index": _coerce_int(row.get("attempt_index"), fallback=0),
-                "step_index": _coerce_int(row.get("step_index"), fallback=0),
-                "turn_index": _coerce_int(row.get("turn_index"), fallback=0),
+                "prompt": messages,
+                "task_id": task_id,
+                "image_name": image_name,
+                "attempt_index": attempt_index,
+                "step_index": step_index,
+                "turn_index": turn_index,
                 "resolved": _coerce_bool(row.get("resolved"), fallback=False),
                 "format_valid": _coerce_bool(row.get("format_valid"), fallback=False),
                 "final_turn_has_submit": _coerce_bool(
@@ -118,6 +128,13 @@ def _as_text(value: Any) -> str:
     return str(value)
 
 
+def _require_non_empty_text(value: Any, *, label: str) -> str:
+    text = _as_text(value).strip()
+    if not text:
+        raise ValueError(f"{label} must be a non-empty string.")
+    return text
+
+
 def _coerce_int(value: Any, *, fallback: int) -> int:
     if isinstance(value, bool):
         return fallback
@@ -133,6 +150,28 @@ def _coerce_int(value: Any, *, fallback: int) -> int:
             except ValueError:
                 return fallback
     return fallback
+
+
+def _require_int(value: Any, *, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be an integer >= 0.")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float) and value.is_integer():
+        parsed = int(value)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(f"{label} must be an integer >= 0.")
+        try:
+            parsed = int(stripped)
+        except ValueError as exc:
+            raise ValueError(f"{label} must be an integer >= 0.") from exc
+    else:
+        raise ValueError(f"{label} must be an integer >= 0.")
+    if parsed < 0:
+        raise ValueError(f"{label} must be an integer >= 0.")
+    return parsed
 
 
 def _coerce_bool(value: Any, *, fallback: bool) -> bool:

@@ -64,6 +64,7 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
             "prompt": "Task prompt",
             "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"ok"}}</tool_call>',
             "task_id": "task-1",
+            "image_name": "img:task-1",
             "attempt_index": 7,
             "step_index": 4,
             "turn_index": 2,
@@ -78,9 +79,27 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
 
     assert len(records) == 1
     assert records[0]["task_id"] == "task-1"
+    assert records[0]["image_name"] == "img:task-1"
     assert records[0]["attempt_index"] == 7
     assert records[0]["resolved"] is True
     assert records[0]["messages"][0]["role"] == "user"
+    assert records[0]["prompt"] == records[0]["messages"]
+
+
+def test_build_multiturn_dataset_records_requires_image_name() -> None:
+    rows = [
+        {
+            "prompt": "Task prompt",
+            "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"ok"}}</tool_call>',
+            "task_id": "task-1",
+            "attempt_index": 0,
+            "step_index": 0,
+            "turn_index": 0,
+        }
+    ]
+
+    with pytest.raises(ValueError, match=r"selected_rows\[0\]\.image_name"):
+        build_multiturn_dataset_records(rows)
 
 
 def test_write_selected_rows_to_multiturn_parquet_delegates_to_internal_writer(
@@ -100,6 +119,11 @@ def test_write_selected_rows_to_multiturn_parquet_delegates_to_internal_writer(
             {
                 "prompt": "Task prompt",
                 "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"ok"}}</tool_call>',
+                "task_id": "task-1",
+                "image_name": "img:task-1",
+                "attempt_index": 0,
+                "step_index": 0,
+                "turn_index": 0,
             }
         ],
         tmp_path / "train.parquet",

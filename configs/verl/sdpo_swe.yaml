@@ -189,6 +189,8 @@ algorithm:
 # ---------------------------------------------------------------------------
 data:
   train_batch_size: 32                        # prompts per global batch
+  prompt_key: prompt                          # RFT handoff parquet exports metadata-rich `prompt` chats
+  return_raw_chat: true
   # train_files / val_files set at launch time
 
 # ---------------------------------------------------------------------------
