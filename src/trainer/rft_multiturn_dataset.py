@@ -31,6 +31,7 @@ def build_multiturn_dataset_records(
             fallback=False,
         )
         messages = build_multiturn_messages(row, row_index=index)
+        prompt_messages = build_rollout_prompt_messages(messages, row_index=index)
         reward_ground_truth = {
             "task_id": task_id,
             "image_name": image_name,
@@ -45,10 +46,10 @@ def build_multiturn_dataset_records(
         data_source = _as_text(row.get("data_source")).strip() or "small_swe_phase_d"
         records.append(
             {
-                # Keep `messages` for existing MultiTurnSFT readers and add `prompt`
-                # so RLHFDataset-based SDPO runs can consume the same handoff parquet.
+                # Keep `messages` as the full trajectory, and store `prompt` as the
+                # rollout context that should precede a fresh assistant generation.
                 "messages": messages,
-                "prompt": messages,
+                "prompt": prompt_messages,
                 "data_source": data_source,
                 "reward_model": {"ground_truth": reward_ground_truth},
                 "task_id": task_id,
@@ -94,6 +95,34 @@ def build_multiturn_messages(
             f"selected_rows[{row_index}] cannot be serialized: no assistant turns available."
         )
     return messages
+
+
+def build_rollout_prompt_messages(
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    row_index: int,
+) -> list[dict[str, str]]:
+    """Build the SDPO rollout prompt context by trimming trailing assistant turns."""
+    prompt_messages: list[dict[str, str]] = []
+    for item in messages:
+        role = _as_text(item.get("role")).strip()
+        content = _as_text(item.get("content"))
+        if not role or not content:
+            continue
+        prompt_messages.append({"role": role, "content": content})
+
+    while prompt_messages and prompt_messages[-1]["role"] == "assistant":
+        prompt_messages.pop()
+
+    if not prompt_messages:
+        raise ValueError(
+            f"selected_rows[{row_index}] cannot be serialized: rollout prompt context is empty."
+        )
+    if prompt_messages[-1]["role"] == "assistant":
+        raise ValueError(
+            f"selected_rows[{row_index}] cannot be serialized: rollout prompt must not end on assistant."
+        )
+    return prompt_messages
 
 
 def write_selected_rows_to_multiturn_parquet(

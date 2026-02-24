@@ -86,7 +86,41 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
     assert records[0]["reward_model"]["ground_truth"]["task_id"] == "task-1"
     assert records[0]["reward_model"]["ground_truth"]["resolved"] is True
     assert records[0]["messages"][0]["role"] == "user"
-    assert records[0]["prompt"] == records[0]["messages"]
+    assert records[0]["messages"][-1]["role"] == "assistant"
+    assert records[0]["prompt"] == [{"role": "user", "content": "Task prompt"}]
+
+
+def test_build_multiturn_dataset_records_prompt_uses_preceding_context() -> None:
+    rows = [
+        {
+            "prompt": "Task prompt",
+            "trajectory_history": [
+                '<tool_call>{"tool":"bash","args":{"command":"pytest -q"}}</tool_call>',
+                "<tool_response>{\"stdout\":\"1 failed\",\"stderr\":\"\"}</tool_response>",
+                '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
+            ],
+            "task_id": "task-1",
+            "image_name": "img:task-1",
+            "attempt_index": 0,
+            "step_index": 0,
+            "turn_index": 2,
+        }
+    ]
+
+    records = build_multiturn_dataset_records(rows)
+
+    assert [message["role"] for message in records[0]["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert [message["role"] for message in records[0]["prompt"]] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert records[0]["prompt"][-1]["content"].startswith("<tool_response>")
 
 
 def test_build_multiturn_dataset_records_requires_image_name() -> None:
