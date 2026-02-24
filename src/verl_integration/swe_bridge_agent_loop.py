@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import numbers
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -16,6 +18,9 @@ from env.runtime_protocol import EnvironmentStep, ToolRequest
 from env.task_dataset import TaskSample
 from rollout.onpolicy_collector import _build_patch_apply_command
 from verl_integration.env_bridge import run_env_bridge_step
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 try:  # pragma: no cover - exercised in train runtime
     from verl.experimental.agent_loop.agent_loop import (
@@ -216,6 +221,11 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         metrics = {"generate_sequences": 0.0, "tool_calls": 0.0}
 
         task_context = build_bridge_task_context(kwargs)
+        logger.info(
+            "swe_bridge_agent start task_id=%s image_name=%s",
+            task_context.task_id,
+            task_context.image_name,
+        )
         task_sample = _build_task_sample(task_context=task_context, raw_kwargs=kwargs)
         request_id = uuid4().hex
         assistant_turns = 0
@@ -341,6 +351,12 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                         user_turns += 1
 
                 if bridge_result.is_terminal:
+                    logger.info(
+                        "swe_bridge_agent terminal task_id=%s assistant_turns=%d user_turns=%d",
+                        task_context.task_id,
+                        assistant_turns,
+                        user_turns,
+                    )
                     break
         finally:
             await asyncio.to_thread(pool.release_all)
