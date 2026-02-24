@@ -15,9 +15,8 @@ from prompts.chat_contract import build_assistant_contract_prompt
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _DEFAULT_SYSTEM_PROMPT = (
-    "You are an autonomous software engineering agent working in a real repository.\n"
-    "Investigate the codebase, run tools, apply targeted edits, and verify fixes with tests.\n"
-    "Return exactly one assistant turn each time and follow the tool-output contract exactly.\n"
+    "You are an on-policy SWE rollout assistant.\n"
+    "Return exactly one assistant turn with no extra prose.\n"
 )
 
 
@@ -195,8 +194,8 @@ def _build_messages(
             "role": "user",
             "content": (
                 "Return the next assistant turn now. "
-                "Use bash/search/edit while still working. "
-                "If solved, return one submit tool call with a concise final_response."
+                "Output exactly one tool_call block with no extra prose. "
+                "If the task is solved, return a submit tool call."
             ),
         }
     )
@@ -213,17 +212,22 @@ def _build_initial_user_message(
     fail_to_pass = _stable_json(task.fail_to_pass)
     pass_to_pass = _stable_json(task.pass_to_pass)
     return (
-        "You are solving one SWE task.\n"
-        "Task objective:\n"
+        f"Task ID: {task.task_id}\n"
+        f"Step Index: {step_index}\n"
+        f"Attempt Index: {attempt_index}\n"
+        f"Turn Index: {turn_index}\n"
+        "Field meanings:\n"
+        f"- task_id: {task.task_id}\n"
+        f"- image_name: {task.image_name}\n"
+        f"- step_index: {step_index}\n"
+        f"- attempt_index: {attempt_index}\n"
+        f"- turn_index: {turn_index}\n"
+        "Problem Statement:\n"
         f"{task.problem_statement}\n\n"
-        "Test expectations:\n"
-        "- FAIL_TO_PASS: these tests are currently failing and should pass after your fix.\n"
+        "FAIL_TO_PASS:\n"
         f"{fail_to_pass}\n\n"
-        "- PASS_TO_PASS: these tests currently pass and should keep passing (no regressions).\n"
-        f"{pass_to_pass}\n\n"
-        "Execution guidance:\n"
-        "- Use tool calls to inspect files, edit code, and run validation commands.\n"
-        "- Submit only when you are ready to end the attempt."
+        "PASS_TO_PASS:\n"
+        f"{pass_to_pass}"
     )
 
 
