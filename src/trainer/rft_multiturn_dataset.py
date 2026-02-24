@@ -20,28 +20,46 @@ def build_multiturn_dataset_records(
         attempt_index = _require_int(row.get("attempt_index"), label=f"{row_label}.attempt_index")
         step_index = _require_int(row.get("step_index"), label=f"{row_label}.step_index")
         turn_index = _require_int(row.get("turn_index"), label=f"{row_label}.turn_index")
+        resolved = _coerce_bool(row.get("resolved"), fallback=False)
+        format_valid = _coerce_bool(row.get("format_valid"), fallback=False)
+        final_turn_has_submit = _coerce_bool(
+            row.get("final_turn_has_submit"),
+            fallback=False,
+        )
+        final_submit_format_valid = _coerce_bool(
+            row.get("final_submit_format_valid"),
+            fallback=False,
+        )
         messages = build_multiturn_messages(row, row_index=index)
+        reward_ground_truth = {
+            "task_id": task_id,
+            "image_name": image_name,
+            "attempt_index": attempt_index,
+            "step_index": step_index,
+            "turn_index": turn_index,
+            "resolved": resolved,
+            "format_valid": format_valid,
+            "final_turn_has_submit": final_turn_has_submit,
+            "final_submit_format_valid": final_submit_format_valid,
+        }
+        data_source = _as_text(row.get("data_source")).strip() or "small_swe_phase_d"
         records.append(
             {
                 # Keep `messages` for existing MultiTurnSFT readers and add `prompt`
                 # so RLHFDataset-based SDPO runs can consume the same handoff parquet.
                 "messages": messages,
                 "prompt": messages,
+                "data_source": data_source,
+                "reward_model": {"ground_truth": reward_ground_truth},
                 "task_id": task_id,
                 "image_name": image_name,
                 "attempt_index": attempt_index,
                 "step_index": step_index,
                 "turn_index": turn_index,
-                "resolved": _coerce_bool(row.get("resolved"), fallback=False),
-                "format_valid": _coerce_bool(row.get("format_valid"), fallback=False),
-                "final_turn_has_submit": _coerce_bool(
-                    row.get("final_turn_has_submit"),
-                    fallback=False,
-                ),
-                "final_submit_format_valid": _coerce_bool(
-                    row.get("final_submit_format_valid"),
-                    fallback=False,
-                ),
+                "resolved": resolved,
+                "format_valid": format_valid,
+                "final_turn_has_submit": final_turn_has_submit,
+                "final_submit_format_valid": final_submit_format_valid,
             }
         )
     return records

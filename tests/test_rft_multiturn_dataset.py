@@ -82,6 +82,9 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
     assert records[0]["image_name"] == "img:task-1"
     assert records[0]["attempt_index"] == 7
     assert records[0]["resolved"] is True
+    assert records[0]["data_source"] == "small_swe_phase_d"
+    assert records[0]["reward_model"]["ground_truth"]["task_id"] == "task-1"
+    assert records[0]["reward_model"]["ground_truth"]["resolved"] is True
     assert records[0]["messages"][0]["role"] == "user"
     assert records[0]["prompt"] == records[0]["messages"]
 
