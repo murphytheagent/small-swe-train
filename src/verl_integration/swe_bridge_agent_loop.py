@@ -233,6 +233,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         bridge_step_index = 0
         bridge_error = ""
         timeout_error = ""
+        loop_exit_reason = "response_length_budget_exhausted"
         trajectory_steps: list[dict[str, Any]] = []
         tool_response_blocks: list[str] = []
         validation_errors: list[str] = []
@@ -260,14 +261,17 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             started_at = time.monotonic()
             while len(response_mask) < self.response_length:
                 if self.max_assistant_turns and assistant_turns >= self.max_assistant_turns:
+                    loop_exit_reason = "max_assistant_turns_reached"
                     break
                 if self.max_user_turns and user_turns >= self.max_user_turns:
+                    loop_exit_reason = "max_user_turns_reached"
                     break
                 if (time.monotonic() - started_at) > self.attempt_timeout_sec:
                     timeout_error = (
                         f"swe_bridge_agent timed out after {self.attempt_timeout_sec}s "
                         f"for task {task_context.task_id!r}."
                     )
+                    loop_exit_reason = "attempt_timeout"
                     break
 
                 generate_started = time.monotonic()
@@ -284,6 +288,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 generated_logprobs = _coerce_logprobs(getattr(generation_output, "log_probs", None))
                 if not generated_ids:
                     bridge_error = "Model returned empty token_ids in swe_bridge_agent generation."
+                    loop_exit_reason = "empty_generation"
                     break
 
                 available_tokens = max(0, self.response_length - len(response_mask))
@@ -307,6 +312,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 )
                 assistant_turns += 1
                 if reached_limit:
+                    loop_exit_reason = "response_length_budget_exhausted"
                     break
 
                 bridge_started = time.monotonic()
@@ -320,6 +326,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     )
                 except Exception as exc:
                     bridge_error = f"swe_bridge_agent bridge failure: {exc}"
+                    loop_exit_reason = "bridge_failure"
                     break
                 metrics["tool_calls"] += time.monotonic() - bridge_started
 
@@ -351,15 +358,19 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                         user_turns += 1
 
                 if bridge_result.is_terminal:
-                    logger.info(
-                        "swe_bridge_agent terminal task_id=%s assistant_turns=%d user_turns=%d",
-                        task_context.task_id,
-                        assistant_turns,
-                        user_turns,
-                    )
+                    loop_exit_reason = "terminal"
                     break
         finally:
             await asyncio.to_thread(pool.release_all)
+
+        logger.info(
+            "swe_bridge_agent stop task_id=%s reason=%s assistant_turns=%d user_turns=%d tool_response_blocks=%d",
+            task_context.task_id,
+            loop_exit_reason,
+            assistant_turns,
+            user_turns,
+            len(tool_response_blocks),
+        )
 
         response_len = len(response_mask)
         if response_len > 0:
@@ -381,6 +392,10 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             "container_id": handle.container_id if handle is not None else "",
             "trajectory_steps": trajectory_steps,
             "tool_response_blocks": tool_response_blocks,
+            "assistant_turns": assistant_turns,
+            "user_turns": user_turns,
+            "tool_response_block_count": len(tool_response_blocks),
+            "loop_exit_reason": loop_exit_reason,
             "trajectory_tool_validation_errors": _stable_unique_strings(validation_errors),
             "final_turn_has_submit": final_turn_has_submit,
             "final_submit_format_valid": final_submit_format_valid,
