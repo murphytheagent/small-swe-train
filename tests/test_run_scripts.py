@@ -68,6 +68,19 @@ def test_run_rft_script_dry_run_allows_explicit_tp_override() -> None:
     assert "--data-parallel-size" not in result.stdout
 
 
+def test_run_rft_script_dry_run_nondivisible_tp_override_falls_back_to_dp_one() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+        env_overrides={
+            "NPROC_PER_NODE": "8",
+            "RFT_VLLM_TP_SIZE": "3",
+        },
+    )
+    assert "--tensor-parallel-size 3" in result.stdout
+    assert "--data-parallel-size" not in result.stdout
+
+
 def test_run_rft_script_dry_run_propagates_collector_in_flight_override() -> None:
     result = _run_script(
         "run_rft.sh",

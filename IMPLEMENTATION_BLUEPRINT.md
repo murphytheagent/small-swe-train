@@ -1,6 +1,6 @@
 # Implementation Blueprint: step-SDPO on verl for SWE-Agent Training
 
-> **Status**: Draft v1 — 2026-02-21
+> **Status**: Active implementation snapshot — 2026-02-24 03:26 UTC
 > **Scope**: Single-node 8×GPU training of Qwen3-4B with LoRA on SWE-bench using
 > `lasgroup/SDPO` (a verl fork) as the training and rollout framework.
 
@@ -19,6 +19,7 @@
 9. [Dependency Stack](#9-dependency-stack)
 10. [Milestone Schedule](#10-milestone-schedule)
 11. [Configuration & Type Authority](#11-configuration--type-authority)
+12. [Current Build and Run Commands](#12-current-build-and-run-commands)
 
 ---
 
@@ -501,8 +502,8 @@ docker>=24.0                   # container runtime
 - [x] `configs/verl/rft_swe.yaml` finalized (done — see `configs/verl/`)
 - [x] `verl_integration/mask_injector.py` for RFT-stage masking (2026-02-21 09:55 UTC)
 - [x] Launcher dry-run path validated via `tests/test_run_scripts.py` (2026-02-21 19:03 UTC)
-- [ ] Environment executor (Docker sandbox) — prerequisite for on-policy rollouts
-- [ ] RFT rollout loop: generate N attempts per task, filter successful, train CE on masked tokens
+- [x] Environment executor (Docker sandbox) wired into on-policy collector/runtime loop (2026-02-23 10:45 UTC)
+- [x] RFT rollout loop: generate N attempts per task, filter by rejection policy, train CE on accepted trajectories, then restart vLLM from latest checkpoint (2026-02-23 10:45 UTC)
 
 ### M3: Environment Executor
 - [x] `verl_integration/env_bridge.py` — deterministic rollout bridge with executor protocol (2026-02-21 09:55 UTC)
@@ -583,6 +584,8 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-23 10:45 UTC] Updated `scripts/run_rft.sh` to use this loop by default (`RFT_RUNTIME_MODE=loop`) while preserving `RFT_RUNTIME_MODE=direct` for proof/legacy one-shot launches; updated `scripts/run_rft_onpolicy_rollout_proof.sh` to pin `direct` mode explicitly.
 - [2026-02-23 10:45 UTC] Added regression coverage in `tests/test_rft_multiturn_dataset.py` and `tests/test_rft_runtime_loop.py`, plus launcher compatibility checks in `tests/test_run_scripts.py`.
 - [2026-02-23 10:47 UTC] Grounded vLLM/verl launcher imports with explicit doc/source links in `scripts/run_rft.sh` and `src/trainer/rft_runtime_loop.py` to keep external module entrypoints tied to authoritative references.
+- [2026-02-24 03:02 UTC] Locked realistic validated defaults in `configs/runtime/training_policy_defaults.v1.json` and config resolvers: `collector_max_in_flight_tasks=32` plus 8-GPU vLLM parallelism `TP/DP=2/4`; merged collector-concurrency PR #9 into PR #8 base.
+- [2026-02-24 03:26 UTC] Hardened `scripts/run_rft.sh` TP/DP auto-resolution so non-divisible TP overrides now safely fall back to `DP=1` (instead of reusing default DP and producing invalid combinations); added regression `test_run_rft_script_dry_run_nondivisible_tp_override_falls_back_to_dp_one`.
 
 ---
 
@@ -622,3 +625,65 @@ M5 (eval) can run against either M2 or M4 checkpoints.
   - configured terminal tool is not in schema `ALLOWED_TOOLS`,
   - configured tool-call bounds are invalid (`min < 1` or `max < min`).
 - This keeps runtime config flexible while preserving schema correctness.
+
+---
+
+## 12. Current Build and Run Commands
+
+### 12.1 Build
+
+Preferred (safe compile parallelism):
+```bash
+make build-train CORES=2
+```
+
+Equivalent `uv` command:
+```bash
+MAX_JOBS=2 uv sync --python 3.13 --extra train
+```
+
+Run tests:
+```bash
+python3 -m pytest -q
+```
+
+### 12.2 Run
+
+Dry-run launcher resolution:
+```bash
+NPROC_PER_NODE=8 bash scripts/run_rft.sh --dry-run trainer.total_training_steps=1
+```
+
+Default runtime loop:
+```bash
+NPROC_PER_NODE=8 WANDB_MODE=offline bash scripts/run_rft.sh
+```
+
+Realistic 2-step profile command:
+```bash
+RFT_STEPS=2 \
+SAMPLES_PER_TASK=8 \
+RFT_TASK_BATCH_SIZE=64 \
+RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT=16 \
+SMALL_SWE_VLLM_MAX_TOKENS=512 \
+NPROC_PER_NODE=8 \
+WANDB_MODE=offline \
+bash scripts/run_rft.sh
+```
+
+Proof-mode direct path:
+```bash
+bash scripts/run_rft_onpolicy_rollout_proof.sh
+```
+
+Flash-attn constrained rebuild via Slurm:
+```bash
+bash scripts/run_flash_attn_rebuild.sh
+```
+
+### 12.3 Locked 8-GPU runtime defaults
+
+- Source of truth: `configs/runtime/training_policy_defaults.v1.json`
+- `rft_runtime.loop.collector_max_in_flight_tasks=32`
+- `rft_runtime.vllm_parallelism.by_nproc_per_node.8.tensor_parallel_size=2`
+- `rft_runtime.vllm_parallelism.by_nproc_per_node.8.data_parallel_size=4`

@@ -144,7 +144,7 @@ if [[ -z "${RFT_VLLM_DP_SIZE}" ]]; then
   if (( NPROC_PER_NODE % RFT_VLLM_TP_SIZE == 0 )); then
     RFT_VLLM_DP_SIZE="$(( NPROC_PER_NODE / RFT_VLLM_TP_SIZE ))"
   else
-    RFT_VLLM_DP_SIZE="${DEFAULT_VLLM_DP_SIZE}"
+    RFT_VLLM_DP_SIZE="1"
   fi
 fi
 

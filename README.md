@@ -41,6 +41,65 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 python -m pytest
 ```
 
+## Build and test
+
+Create or refresh the training environment:
+```bash
+make build-train CORES=2
+```
+
+Or with `uv` directly:
+```bash
+MAX_JOBS=2 uv sync --python 3.13 --extra train
+```
+
+Run the regression suite:
+```bash
+python3 -m pytest -q
+```
+
+## Run commands
+
+Dry-run the runtime loop launch:
+```bash
+NPROC_PER_NODE=8 bash scripts/run_rft.sh --dry-run trainer.total_training_steps=1
+```
+
+Run the default loop-mode RFT pipeline (collector -> rejection -> parquet handoff -> trainer -> checkpoint -> vLLM restart):
+```bash
+NPROC_PER_NODE=8 WANDB_MODE=offline bash scripts/run_rft.sh
+```
+
+Run the realistic 2-step profile settings used in recent validation:
+```bash
+RFT_STEPS=2 \
+SAMPLES_PER_TASK=8 \
+RFT_TASK_BATCH_SIZE=64 \
+RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT=16 \
+SMALL_SWE_VLLM_MAX_TOKENS=512 \
+NPROC_PER_NODE=8 \
+WANDB_MODE=offline \
+bash scripts/run_rft.sh
+```
+
+Run proof-mode direct launch (single-shot trainer invocation):
+```bash
+bash scripts/run_rft_onpolicy_rollout_proof.sh
+```
+
+Rebuild flash-attn through Slurm:
+```bash
+bash scripts/run_flash_attn_rebuild.sh
+```
+
+## Runtime defaults
+
+Centralized defaults are sourced from `configs/runtime/training_policy_defaults.v1.json`.
+For 8-GPU runs (`NPROC_PER_NODE=8`), the locked rollout defaults are:
+- `rft_runtime.loop.collector_max_in_flight_tasks=32`
+- `rft_runtime.vllm_parallelism.by_nproc_per_node.8.tensor_parallel_size=2`
+- `rft_runtime.vllm_parallelism.by_nproc_per_node.8.data_parallel_size=4`
+
 Run one deterministic Step-SDPO scaffold step from JSON/JSONL rows:
 ```bash
 python scripts/run_step_sdpo_scaffold.py \
