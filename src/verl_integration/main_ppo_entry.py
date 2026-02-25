@@ -6,8 +6,14 @@ hook for runtime registration and process-wide patching.
 
 from __future__ import annotations
 
+import os
+
 
 def _apply_local_runtime_bootstrap() -> None:
+    # Propagate runtime patch enablement into spawned worker processes where
+    # sitecustomize is imported but this wrapper module is not.
+    os.environ.setdefault("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
     from sitecustomize import apply_small_swe_runtime_patches
     from verl_integration.ppo_runtime_patch import apply_small_swe_sdpo_runtime_patch
 

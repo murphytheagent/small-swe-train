@@ -71,6 +71,14 @@ def apply_small_swe_runtime_patches() -> None:
         _clear_cached_flash_attn_modules()
         _install_flash_attn_find_spec_guard()
         _install_flash_attn_import_guard()
+    if _coerce_bool_env("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", default=False):
+        # Ray worker processes do not enter our main wrapper module, so apply
+        # the SDPO trainer patch from process-global startup when requested.
+        try:
+            from verl_integration.ppo_runtime_patch import apply_small_swe_sdpo_runtime_patch
+        except Exception:
+            return
+        apply_small_swe_sdpo_runtime_patch()
 
 
 apply_small_swe_runtime_patches()
