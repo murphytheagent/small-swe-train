@@ -41,7 +41,7 @@ actor_rollout_ref:
     lora_alpha: 128
     # Keep model.target_modules aligned with RFT defaults (attn + MLP modules)
     # so LoRA propagation is explicit in both legacy and nested config paths.
-    target_modules: "(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)"
+    target_modules: ".*(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$"
     lora:
       enable: true
       rank: 64
