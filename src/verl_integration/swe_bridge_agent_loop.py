@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from config import on_policy_runtime_defaults, resolve_on_policy_settings
 from env.container_pool import BatchContainerPool, ContainerHandle
 from env.docker_executor import DockerToolExecutor
 from env.runtime_protocol import EnvironmentStep, ToolRequest
@@ -109,6 +108,14 @@ class BridgeLoopRuntimeConfig:
     max_tool_calls_per_turn: int
 
 
+_DEFAULT_ENV_POOL_SIZE = 8
+_DEFAULT_TOOL_TIMEOUT_SEC = 60
+_DEFAULT_CONTAINER_START_TIMEOUT_SEC = 120
+_DEFAULT_CLEANUP_TIMEOUT_SEC = 30
+_DEFAULT_ATTEMPT_TIMEOUT_SEC = 300
+_DEFAULT_MAX_TOOL_CALLS_PER_TURN = 3
+
+
 def build_bridge_task_context(kwargs: Mapping[str, Any]) -> BridgeLoopTaskContext:
     task_id = _require_non_empty_text(kwargs.get("task_id"), "task_id")
     image_name = _require_non_empty_text(kwargs.get("image_name"), "image_name")
@@ -131,30 +138,27 @@ def resolve_bridge_loop_runtime_config(
     attempt_timeout_sec: int | None = None,
     max_tool_calls_per_turn: int | None = None,
 ) -> BridgeLoopRuntimeConfig:
-    on_policy_settings = resolve_on_policy_settings()
-    runtime_defaults = on_policy_settings.runtime
-    policy_defaults = on_policy_runtime_defaults()
     return BridgeLoopRuntimeConfig(
-        env_pool_size=_coerce_positive_int(env_pool_size, fallback=int(runtime_defaults.env_pool_size)),
+        env_pool_size=_coerce_positive_int(env_pool_size, fallback=_DEFAULT_ENV_POOL_SIZE),
         tool_timeout_sec=_coerce_positive_int(
             tool_timeout_sec,
-            fallback=int(runtime_defaults.tool_timeout_sec),
+            fallback=_DEFAULT_TOOL_TIMEOUT_SEC,
         ),
         container_start_timeout_sec=_coerce_positive_int(
             container_start_timeout_sec,
-            fallback=int(runtime_defaults.container_start_timeout_sec),
+            fallback=_DEFAULT_CONTAINER_START_TIMEOUT_SEC,
         ),
         cleanup_timeout_sec=_coerce_positive_int(
             cleanup_timeout_sec,
-            fallback=_coerce_positive_int(policy_defaults.get("cleanup_timeout_sec"), fallback=30),
+            fallback=_DEFAULT_CLEANUP_TIMEOUT_SEC,
         ),
         attempt_timeout_sec=_coerce_positive_int(
             attempt_timeout_sec,
-            fallback=int(runtime_defaults.attempt_timeout_sec),
+            fallback=_DEFAULT_ATTEMPT_TIMEOUT_SEC,
         ),
         max_tool_calls_per_turn=_coerce_positive_int(
             max_tool_calls_per_turn,
-            fallback=int(runtime_defaults.max_tool_calls_per_turn),
+            fallback=_DEFAULT_MAX_TOOL_CALLS_PER_TURN,
         ),
     )
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from config import on_policy_runtime_defaults, resolve_on_policy_settings
 from prompts import build_sdpo_rollout_followup_user_message
 from verl_integration.swe_bridge_agent_loop import (
     append_response_tokens,
@@ -135,17 +134,15 @@ def test_append_response_tokens_clips_to_available_budget() -> None:
     assert response_logprobs == [-1.0, -2.0]
 
 
-def test_resolve_bridge_loop_runtime_config_uses_central_defaults() -> None:
+def test_resolve_bridge_loop_runtime_config_uses_yaml_aligned_defaults() -> None:
     resolved = resolve_bridge_loop_runtime_config()
-    on_policy_runtime = resolve_on_policy_settings().runtime
-    runtime_defaults = on_policy_runtime_defaults()
 
-    assert resolved.env_pool_size == on_policy_runtime.env_pool_size
-    assert resolved.tool_timeout_sec == on_policy_runtime.tool_timeout_sec
-    assert resolved.container_start_timeout_sec == on_policy_runtime.container_start_timeout_sec
-    assert resolved.attempt_timeout_sec == on_policy_runtime.attempt_timeout_sec
-    assert resolved.max_tool_calls_per_turn == on_policy_runtime.max_tool_calls_per_turn
-    assert resolved.cleanup_timeout_sec == int(runtime_defaults.get("cleanup_timeout_sec", 30))
+    assert resolved.env_pool_size == 8
+    assert resolved.tool_timeout_sec == 60
+    assert resolved.container_start_timeout_sec == 120
+    assert resolved.cleanup_timeout_sec == 30
+    assert resolved.attempt_timeout_sec == 300
+    assert resolved.max_tool_calls_per_turn == 3
 
 
 def test_resolve_bridge_loop_runtime_config_honors_explicit_overrides() -> None:

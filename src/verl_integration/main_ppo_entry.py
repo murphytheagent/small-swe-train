@@ -9,8 +9,10 @@ from __future__ import annotations
 
 def _apply_local_runtime_bootstrap() -> None:
     from sitecustomize import apply_small_swe_runtime_patches
+    from verl_integration.ppo_runtime_patch import apply_small_swe_sdpo_runtime_patch
 
     apply_small_swe_runtime_patches()
+    apply_small_swe_sdpo_runtime_patch()
 
 
 _apply_local_runtime_bootstrap()
