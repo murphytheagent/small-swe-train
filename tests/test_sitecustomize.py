@@ -8,7 +8,7 @@ from importlib.machinery import ModuleSpec
 
 import pytest
 
-import sitecustomize
+import small_swe_runtime_patches as sitecustomize
 
 
 def test_sitecustomize_can_hide_external_flash_attn(monkeypatch) -> None:

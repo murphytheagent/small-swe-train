@@ -79,7 +79,7 @@ def _disable_flash_attn_availability(*, reason: str) -> None:
     global _FLASH_ATTN_DISABLED
     from transformers import utils as transformers_utils
     from transformers.utils import import_utils as transformers_import_utils
-    from sitecustomize import apply_small_swe_runtime_patches
+    from small_swe_runtime_patches import apply_small_swe_runtime_patches
 
     def _not_available() -> bool:
         return False

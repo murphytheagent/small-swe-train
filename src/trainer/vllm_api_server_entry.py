@@ -53,7 +53,7 @@ def _configure_flash_attn_guard_if_needed() -> None:
         return
     _clear_cached_flash_attn_modules()
     os.environ["SMALL_SWE_HIDE_EXTERNAL_FLASH_ATTN"] = "1"
-    from sitecustomize import apply_small_swe_runtime_patches
+    from small_swe_runtime_patches import apply_small_swe_runtime_patches
 
     apply_small_swe_runtime_patches()
     print(

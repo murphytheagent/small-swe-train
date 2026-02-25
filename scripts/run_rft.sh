@@ -22,6 +22,11 @@ _is_executable_cmd() {
   command -v "${candidate}" >/dev/null 2>&1
 }
 
+_to_lower_ascii() {
+  local value="${1:-}"
+  printf '%s' "${value}" | tr '[:upper:]' '[:lower:]'
+}
+
 if [[ -z "${PYTHON_BIN:-}" ]]; then
   if _is_executable_cmd "${VENV_PYTHON}"; then
     PYTHON_BIN="${VENV_PYTHON}"
@@ -358,7 +363,7 @@ if ! [[ "${RFT_LORA_ALPHA}" =~ ^[1-9][0-9]*$ ]]; then
   echo "RFT_LORA_ALPHA must be a positive integer (got: ${RFT_LORA_ALPHA})."
   exit 1
 fi
-RFT_COMPUTE_PRECISION="${RFT_COMPUTE_PRECISION,,}"
+RFT_COMPUTE_PRECISION="$(_to_lower_ascii "${RFT_COMPUTE_PRECISION}")"
 case "${RFT_COMPUTE_PRECISION}" in
   bf16|bfloat16)
     RFT_MODEL_DTYPE="bf16"

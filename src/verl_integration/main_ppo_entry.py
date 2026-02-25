@@ -14,7 +14,7 @@ def _apply_local_runtime_bootstrap() -> None:
     # sitecustomize is imported but this wrapper module is not.
     os.environ.setdefault("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
 
-    from sitecustomize import apply_small_swe_runtime_patches
+    from small_swe_runtime_patches import apply_small_swe_runtime_patches
     from verl_integration.ppo_runtime_patch import apply_small_swe_sdpo_runtime_patch
 
     apply_small_swe_runtime_patches()
