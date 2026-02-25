@@ -132,7 +132,7 @@ def test_verl_model_config_mirrors_lora_rank_alpha_and_targets(
     repo_root = Path(__file__).resolve().parents[1]
     payload = yaml.safe_load((repo_root / config_relpath).read_text(encoding="utf-8"))
     adaptation_defaults = config.adaptation_defaults()
-    expected_targets = ",".join(str(item) for item in adaptation_defaults["target_modules"])
+    expected_targets = [str(item) for item in adaptation_defaults["target_modules"]]
     model_cfg = payload["actor_rollout_ref"]["model"]
     lora_cfg = model_cfg["lora"]
 
