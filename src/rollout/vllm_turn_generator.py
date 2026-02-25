@@ -11,14 +11,13 @@ from urllib import request as urllib_request
 
 from config import rft_runtime_defaults
 from env.task_dataset import TaskSample
-from prompts.chat_contract import build_assistant_contract_prompt
+from prompts.model_delimiters import default_delimiters
+from prompts.runtime_messages import (
+    build_onpolicy_initial_user_message,
+    build_onpolicy_system_prompt,
+)
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
-_DEFAULT_SYSTEM_PROMPT = (
-    "You are an autonomous software engineering agent working in a real repository.\n"
-    "Investigate the codebase, run tools, apply targeted edits, and verify fixes with tests.\n"
-    "Return exactly one assistant turn each time and follow the tool-output contract exactly.\n"
-)
 
 
 @dataclass(frozen=True)
@@ -143,7 +142,7 @@ def load_vllm_turn_generator_config() -> VLLMTurnGeneratorConfig:
         ),
         fallback=configured_top_p,
     )
-    system_prompt = _DEFAULT_SYSTEM_PROMPT + build_assistant_contract_prompt()
+    system_prompt = build_onpolicy_system_prompt()
 
     return VLLMTurnGeneratorConfig(
         base_url=_normalize_base_url(base_url),
@@ -165,11 +164,10 @@ def _build_messages(
     step_index: int,
     history: Sequence[str],
 ) -> list[dict[str, str]]:
-    initial_user_message = _build_initial_user_message(
-        task=task,
-        attempt_index=attempt_index,
-        turn_index=turn_index,
-        step_index=step_index,
+    initial_user_message = build_onpolicy_initial_user_message(
+        problem_statement=task.problem_statement,
+        fail_to_pass=task.fail_to_pass,
+        pass_to_pass=task.pass_to_pass,
     )
 
     messages: list[dict[str, str]] = [
@@ -190,47 +188,14 @@ def _build_messages(
             continue
         messages.append({"role": "assistant", "content": text})
 
-    messages.append(
-        {
-            "role": "user",
-            "content": (
-                "Return the next assistant turn now. "
-                "Use bash/search/edit while still working. "
-                "If solved, return one submit tool call with a concise final_response."
-            ),
-        }
-    )
     return messages
-
-
-def _build_initial_user_message(
-    *,
-    task: TaskSample,
-    attempt_index: int,
-    turn_index: int,
-    step_index: int,
-) -> str:
-    fail_to_pass = _stable_json(task.fail_to_pass)
-    pass_to_pass = _stable_json(task.pass_to_pass)
-    return (
-        "You are solving one SWE task.\n"
-        "Task objective:\n"
-        f"{task.problem_statement}\n\n"
-        "Test expectations:\n"
-        "- FAIL_TO_PASS: these tests are currently failing and should pass after your fix.\n"
-        f"{fail_to_pass}\n\n"
-        "- PASS_TO_PASS: these tests currently pass and should keep passing (no regressions).\n"
-        f"{pass_to_pass}\n\n"
-        "Execution guidance:\n"
-        "- Use tool calls to inspect files, edit code, and run validation commands.\n"
-        "- Submit only when you are ready to end the attempt."
-    )
 
 
 def _parse_tool_response_block(value: str) -> Mapping[str, Any] | None:
     text = value.strip()
-    start = "<tool_response>"
-    end = "</tool_response>"
+    delimiters = default_delimiters()
+    start = delimiters.tool_response_start
+    end = delimiters.tool_response_end
     if not text.startswith(start) or not text.endswith(end):
         return None
     payload = text[len(start) : -len(end)].strip()

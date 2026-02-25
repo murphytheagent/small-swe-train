@@ -11,14 +11,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONFIG_DIR="${PROJECT_ROOT}/configs/verl"
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  if command -v python >/dev/null 2>&1; then
+VENV_PYTHON="${PROJECT_ROOT}/.venv/bin/python"
+
+_is_executable_cmd() {
+  local candidate="$1"
+  if [[ "${candidate}" == */* ]]; then
+    [[ -x "${candidate}" ]]
+    return
+  fi
+  command -v "${candidate}" >/dev/null 2>&1
+}
+
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if _is_executable_cmd "${VENV_PYTHON}"; then
+    PYTHON_BIN="${VENV_PYTHON}"
+  elif _is_executable_cmd python3; then
+    PYTHON_BIN="python3"
+  elif _is_executable_cmd python; then
     PYTHON_BIN="python"
   else
-    echo "Neither python3 nor python is available in PATH."
+    echo "No Python interpreter found. Expected ${VENV_PYTHON} or python3/python in PATH."
     exit 1
   fi
+elif ! _is_executable_cmd "${PYTHON_BIN}"; then
+  echo "PYTHON_BIN is not executable: ${PYTHON_BIN}"
+  exit 1
 fi
 
 _detect_available_gpu_count() {
@@ -81,6 +98,8 @@ RFT_VLLM_TP_SIZE="${RFT_VLLM_TP_SIZE:-}"
 RFT_VLLM_DP_SIZE="${RFT_VLLM_DP_SIZE:-}"
 RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS:-}"
 RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT="${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT:-}"
+RFT_EVAL_SPLIT_FRACTION="${RFT_EVAL_SPLIT_FRACTION:-}"
+RFT_EVAL_MIN_ROWS="${RFT_EVAL_MIN_ROWS:-}"
 RFT_DATA_CONFIG_NAME="${RFT_DATA_CONFIG_NAME:-on_policy_swe_smith}"
 RFT_TURN_GENERATOR_MODE="${RFT_TURN_GENERATOR_MODE:-default}"
 
@@ -173,6 +192,16 @@ train_batch_size = _required_positive_int(
     loop.get("train_batch_size"),
     label="rft_runtime.loop.train_batch_size",
 )
+eval_split_fraction = _required_number(
+    loop.get("eval_split_fraction", 0.1),
+    label="rft_runtime.loop.eval_split_fraction",
+)
+if eval_split_fraction < 0.0 or eval_split_fraction >= 1.0:
+    raise ValueError("`rft_runtime.loop.eval_split_fraction` must satisfy 0.0 <= value < 1.0.")
+eval_min_rows = _required_positive_int(
+    loop.get("eval_min_rows", 1),
+    label="rft_runtime.loop.eval_min_rows",
+)
 nproc_per_node = _parse_positive_int(os.environ.get("NPROC_PER_NODE"), 1)
 default_tp, default_dp = resolve_rft_vllm_parallel_defaults(nproc_per_node=nproc_per_node)
 
@@ -245,6 +274,8 @@ print(
     sft_num_epoch_per_batch,
     checkpoint_keep_last,
     train_batch_size,
+    eval_split_fraction,
+    eval_min_rows,
     default_tp,
     default_dp,
     base_url,
@@ -262,7 +293,7 @@ PY
 }
 
 RFT_DEFAULTS="$(_load_rft_runtime_defaults)"
-read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT DEFAULT_RFT_MAX_SEQUENCE_LENGTH DEFAULT_ADAPTATION_MODE DEFAULT_LORA_TARGET_MODULES <<<"${RFT_DEFAULTS}"
+read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_RFT_EVAL_SPLIT_FRACTION DEFAULT_RFT_EVAL_MIN_ROWS DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT DEFAULT_RFT_MAX_SEQUENCE_LENGTH DEFAULT_ADAPTATION_MODE DEFAULT_LORA_TARGET_MODULES <<<"${RFT_DEFAULTS}"
 
 RFT_STEPS="${RFT_STEPS:-${DEFAULT_RFT_STEPS}}"
 SAMPLES_PER_TASK="${SAMPLES_PER_TASK:-${DEFAULT_SAMPLES_PER_TASK}}"
@@ -272,11 +303,21 @@ RFT_SFT_NUM_EPOCH_PER_BATCH="${RFT_SFT_NUM_EPOCH_PER_BATCH:-${DEFAULT_RFT_SFT_NU
 RFT_CHECKPOINT_KEEP_LAST="${RFT_CHECKPOINT_KEEP_LAST:-${DEFAULT_RFT_CHECKPOINT_KEEP_LAST}}"
 RFT_BATCH_SIZE="${RFT_BATCH_SIZE:-$((SAMPLES_PER_TASK * RFT_TASK_BATCH_SIZE))}"
 RFT_TRAIN_BATCH_SIZE="${RFT_TRAIN_BATCH_SIZE:-${DEFAULT_RFT_TRAIN_BATCH_SIZE}}"
+RFT_EVAL_SPLIT_FRACTION="${RFT_EVAL_SPLIT_FRACTION:-${DEFAULT_RFT_EVAL_SPLIT_FRACTION}}"
+RFT_EVAL_MIN_ROWS="${RFT_EVAL_MIN_ROWS:-${DEFAULT_RFT_EVAL_MIN_ROWS}}"
 RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT="${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT:-${DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT}}"
 RFT_MAX_SEQUENCE_LENGTH="${RFT_MAX_SEQUENCE_LENGTH:-${DEFAULT_RFT_MAX_SEQUENCE_LENGTH}}"
 RFT_ADAPTATION_MODE="${RFT_ADAPTATION_MODE:-${DEFAULT_ADAPTATION_MODE}}"
 RFT_LORA_TARGET_MODULES="${RFT_LORA_TARGET_MODULES:-${DEFAULT_LORA_TARGET_MODULES}}"
-RFT_OUTPUT_DIR="${RFT_OUTPUT_DIR:-${PROJECT_ROOT}/outputs/rft_runtime}"
+RFT_OUTPUT_ROOT="${RFT_OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/rft_runtime}"
+RFT_RUN_TIMESTAMP="${RFT_RUN_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  DEFAULT_RFT_RUN_LABEL="${RFT_RUN_TIMESTAMP}_job${SLURM_JOB_ID}"
+else
+  DEFAULT_RFT_RUN_LABEL="${RFT_RUN_TIMESTAMP}_pid$$"
+fi
+RFT_RUN_LABEL="${RFT_RUN_LABEL:-${DEFAULT_RFT_RUN_LABEL}}"
+RFT_OUTPUT_DIR="${RFT_OUTPUT_DIR:-${RFT_OUTPUT_ROOT}/${RFT_RUN_LABEL}}"
 RFT_INITIAL_MODEL="${RFT_INITIAL_MODEL:-${DEFAULT_VLLM_MODEL}}"
 
 if [[ "${RFT_ADAPTATION_MODE}" != "lora" ]]; then
@@ -376,6 +417,8 @@ LOOP_CMD=(
   --sft-num-epoch-per-batch "${RFT_SFT_NUM_EPOCH_PER_BATCH}"
   --checkpoint-keep-last "${RFT_CHECKPOINT_KEEP_LAST}"
   --train-batch-size "${RFT_TRAIN_BATCH_SIZE}"
+  --eval-split-fraction "${RFT_EVAL_SPLIT_FRACTION}"
+  --eval-min-rows "${RFT_EVAL_MIN_ROWS}"
   --output-dir "${RFT_OUTPUT_DIR}"
   --data-config-name "${RFT_DATA_CONFIG_NAME}"
   --turn-generator-mode "${RFT_TURN_GENERATOR_MODE}"

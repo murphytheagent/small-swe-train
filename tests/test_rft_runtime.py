@@ -43,7 +43,7 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
             "selected_rows": [{"task_id": "task-1"}],
             "rejected_rows": [{"task_id": "task-2", "rft_rejection_reason": "non_terminal,unresolved"}],
             "sft_batch": {"meta_info": {"selected_count": 1}},
-            "dataproto_payload": {"meta_info": {"max_padded_length": 16}},
+            "dataproto_payload": {"meta_info": {"max_turn_level_generated_tokens": 16}},
         }
 
     monkeypatch.setattr(
@@ -92,7 +92,7 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
     assert manifest_payload["selected_count"] == 1
     assert manifest_payload["rejected_count"] == 1
     assert manifest_payload["rejection_reason_counts"] == {"non_terminal": 1, "unresolved": 1}
-    assert manifest_payload["dataproto_meta_info"] == {"max_padded_length": 16}
+    assert manifest_payload["dataproto_meta_info"] == {"max_turn_level_generated_tokens": 16}
 
 
 def test_collect_onpolicy_rft_runtime_batch_rejects_unknown_turn_generator_mode() -> None:
@@ -138,7 +138,7 @@ def test_collect_onpolicy_rft_runtime_batch_default_mode_uses_vllm_turn_generato
             "selected_rows": [{"task_id": "task-1"}],
             "rejected_rows": [],
             "sft_batch": {"meta_info": {"selected_count": 1}},
-            "dataproto_payload": {"meta_info": {"max_padded_length": 16}},
+            "dataproto_payload": {"meta_info": {"max_turn_level_generated_tokens": 16}},
         }
 
     monkeypatch.setattr(

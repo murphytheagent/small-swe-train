@@ -80,3 +80,51 @@ def test_patched_from_pretrained_replaces_flash_attn_impl_when_disabled(monkeypa
     assert captured["attn_implementation"] == "sdpa"
     assert "use_flash_attention_2" not in payload
     assert "use_flash_attention_2" not in captured
+
+
+def test_patched_from_pretrained_sets_model_dtype_for_flash_attn(monkeypatch) -> None:
+    entry = _load_entry_module()
+    torch = pytest.importorskip("torch")
+
+    captured: dict[str, object] = {}
+
+    def _fake_from_pretrained(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(entry, "_ORIGINAL_FROM_PRETRAINED", _fake_from_pretrained)
+    monkeypatch.setattr(entry, "_FLASH_ATTN_DISABLED", False)
+    monkeypatch.setenv("SMALL_SWE_RFT_MODEL_DTYPE", "bf16")
+
+    payload = entry._patched_from_pretrained(
+        "Qwen/Qwen3-4B-Instruct-2507",
+        attn_implementation="flash_attention_2",
+    )
+
+    assert payload["torch_dtype"] == torch.bfloat16
+    assert captured["torch_dtype"] == torch.bfloat16
+
+
+def test_patched_from_pretrained_does_not_override_explicit_dtype(monkeypatch) -> None:
+    entry = _load_entry_module()
+
+    captured: dict[str, object] = {}
+
+    def _fake_from_pretrained(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(entry, "_ORIGINAL_FROM_PRETRAINED", _fake_from_pretrained)
+    monkeypatch.setattr(entry, "_FLASH_ATTN_DISABLED", False)
+    monkeypatch.setenv("SMALL_SWE_RFT_MODEL_DTYPE", "bf16")
+
+    payload = entry._patched_from_pretrained(
+        "Qwen/Qwen3-4B-Instruct-2507",
+        attn_implementation="flash_attention_2",
+        torch_dtype="auto",
+    )
+
+    assert payload["torch_dtype"] == "auto"
+    assert captured["torch_dtype"] == "auto"

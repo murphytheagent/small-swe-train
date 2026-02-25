@@ -1,6 +1,6 @@
 """Prompt package."""
 
-from .chat_contract import (
+from .runtime_messages import (
     CHATML_END,
     CHATML_START,
     THINK_END,
@@ -10,6 +10,8 @@ from .chat_contract import (
     TOOL_RESPONSE_END,
     TOOL_RESPONSE_START,
     build_assistant_contract_prompt,
+    build_onpolicy_initial_user_message,
+    build_onpolicy_system_prompt,
 )
 from .model_delimiters import ModelDelimiters, default_delimiters, load_delimiters
 
@@ -24,6 +26,8 @@ __all__ = [
     "TOOL_RESPONSE_END",
     "TOOL_RESPONSE_START",
     "build_assistant_contract_prompt",
+    "build_onpolicy_initial_user_message",
+    "build_onpolicy_system_prompt",
     "default_delimiters",
     "load_delimiters",
 ]

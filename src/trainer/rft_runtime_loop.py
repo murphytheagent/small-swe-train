@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -20,7 +21,10 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from config import resolve_rft_collector_max_in_flight_default
-from trainer.rft_multiturn_dataset import write_selected_rows_to_multiturn_parquet
+from trainer.rft_multiturn_dataset import (
+    build_multiturn_messages,
+    write_selected_rows_to_multiturn_parquet,
+)
 from trainer.rft_runtime import OnPolicyRFTRuntimeRequest, collect_onpolicy_rft_runtime_batch
 
 _GLOBAL_STEP_PATTERN = re.compile(r"^global_step_(\d+)$")
@@ -34,6 +38,10 @@ _VLLM_OPENAI_SERVER_SOURCE = (
     "https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/api_server.py"
 )
 _MICRO_BATCH_SIZE_KEY = "data.micro_batch_size_per_gpu"
+_DATA_MAX_LENGTH_KEY = "data.max_length"
+# Keep periodic saves effectively disabled for inner SFT loops while still
+# allowing the trainer's end-of-run checkpoint export to materialize.
+_INNER_SFT_CHECKPOINT_DISABLED_SAVE_FREQ = 2_147_483_647
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,8 @@ class RFTLoopConfig:
     dry_run: bool
     collector_max_in_flight_tasks: int | None = None
     collector_max_turns_per_attempt: int | None = None
+    eval_split_fraction: float = 0.1
+    eval_min_rows: int = 1
 
 
 class VLLMServerController:
@@ -155,18 +165,26 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         config_name=config.config_name,
         trainer_overrides=config.trainer_overrides,
     )
+    trainer_data_max_length = resolve_data_max_length(
+        config_dir=config.config_dir,
+        config_name=config.config_name,
+        trainer_overrides=config.trainer_overrides,
+    )
     runtime_manifest: dict[str, Any] = {
         "generated_utc": _utc_now(),
         "config": {
             "rft_steps": config.rft_steps,
             "samples_per_task": config.samples_per_task,
             "task_batch_size": config.task_batch_size,
+            "eval_split_fraction": config.eval_split_fraction,
+            "eval_min_rows": config.eval_min_rows,
             "collector_max_in_flight_tasks": collector_max_in_flight_tasks,
             "collector_max_turns_per_attempt": collector_max_turns_per_attempt,
             "sft_num_epoch_per_batch": config.sft_num_epoch_per_batch,
             "checkpoint_keep_last": config.checkpoint_keep_last,
             "train_batch_size": config.train_batch_size,
             "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
+            "trainer_data_max_length": trainer_data_max_length,
             "data_config_name": config.data_config_name,
             "turn_generator_mode": config.turn_generator_mode,
             "initial_model": config.initial_model,
@@ -198,7 +216,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             step_start = time.monotonic()
             step_dir = config.output_dir / f"rft_step_{step_index:05d}"
             collector_dir = step_dir / "collector_artifacts"
-            parquet_path = step_dir / "accepted_trajectories.parquet"
+            train_parquet_path = step_dir / "accepted_trajectories.parquet"
+            eval_parquet_path = step_dir / "accepted_trajectories_eval.parquet"
             trainer_checkpoint_root = step_dir / "trainer_checkpoints"
             reset_step_artifacts(step_dir)
             step_dir.mkdir(parents=True, exist_ok=True)
@@ -228,9 +247,25 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             selected_rows = _coerce_rows(handoff.get("selected_rows"))
             rejected_rows = _coerce_rows(handoff.get("rejected_rows"))
             selected_count_raw = len(selected_rows)
+            (
+                selected_rows,
+                selected_rows_over_max_length_dropped,
+            ) = filter_selected_rows_by_token_length(
+                selected_rows=selected_rows,
+                tokenizer=tokenizer,
+                max_sequence_length=trainer_data_max_length,
+            )
+            selected_count_after_max_length_filter = len(selected_rows)
+            selected_count_for_train_raw = 0
             selected_count_for_train = 0
+            selected_count_for_eval_raw = 0
+            selected_count_for_eval = 0
             selected_rows_upsampled = 0
+            selected_rows_eval_upsampled = 0
+            eval_split_fallback_to_train = False
+            resolved_val_parquet_path = train_parquet_path
             effective_train_batch_size: int | None = None
+            effective_eval_batch_size: int | None = None
             trainer_command: list[str] | None = None
             latest_hf_checkpoint: Path | None = None
             pruned_global_step_checkpoints: list[Path] = []
@@ -238,60 +273,110 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             trainer_skipped = False
             skip_reason: str | None = None
 
-            if selected_count_raw < 1:
+            if selected_count_after_max_length_filter < 1:
                 trainer_skipped = True
-                skip_reason = "no_selected_rows"
+                skip_reason = "no_selected_rows_after_length_filter"
             else:
-                world_size = config.nnodes * config.nproc_per_node
-                selected_count_for_train = write_selected_rows_to_multiturn_parquet(
+                selected_rows_for_train, selected_rows_for_eval = split_selected_rows_for_eval(
                     selected_rows,
-                    parquet_path,
+                    eval_split_fraction=config.eval_split_fraction,
+                    min_eval_rows=config.eval_min_rows,
                 )
-                effective_train_batch_size = resolve_effective_train_batch_size(
-                    requested=config.train_batch_size,
-                    selected_count=selected_count_for_train,
-                    world_size=world_size,
-                    micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-                )
-                if effective_train_batch_size is None:
+                selected_count_for_train_raw = len(selected_rows_for_train)
+                selected_count_for_eval_raw = len(selected_rows_for_eval)
+                selected_count_for_eval = selected_count_for_eval_raw
+                if selected_count_for_train_raw < 1:
                     trainer_skipped = True
-                    skip_reason = "insufficient_selected_rows_for_batch_constraints"
-                else:
-                    trainer_command = build_trainer_step_command(
-                        python_bin=config.python_bin,
-                        nnodes=config.nnodes,
-                        nproc_per_node=config.nproc_per_node,
-                        trainer_module=config.trainer_module,
-                        config_name=config.config_name,
-                        config_dir=config.config_dir,
-                        model_path=current_model_path,
-                        train_parquet_path=parquet_path,
-                        val_parquet_path=parquet_path,
-                        trainer_output_dir=trainer_checkpoint_root,
-                        train_batch_size=effective_train_batch_size,
-                        sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
-                        trainer_overrides=config.trainer_overrides,
+                    skip_reason = "empty_train_split"
+
+                world_size = config.nnodes * config.nproc_per_node
+                if not trainer_skipped:
+                    effective_eval_batch_size = world_size * micro_batch_size_per_gpu
+                    selected_count_for_train = write_selected_rows_to_multiturn_parquet(
+                        selected_rows_for_train,
+                        train_parquet_path,
                     )
+                    if selected_rows_for_eval:
+                        selected_rows_for_eval, selected_rows_eval_upsampled = (
+                            upsample_selected_rows_to_batch_multiple(
+                                selected_rows_for_eval,
+                                global_batch_size=effective_eval_batch_size,
+                            )
+                        )
+                        selected_count_for_eval = write_selected_rows_to_multiturn_parquet(
+                            selected_rows_for_eval,
+                            eval_parquet_path,
+                        )
+                        resolved_val_parquet_path = eval_parquet_path
+                    else:
+                        eval_split_fallback_to_train = True
+                        resolved_val_parquet_path = train_parquet_path
 
-                    if config.manage_vllm:
-                        vllm_controller.stop()
-                    trainer_start = time.monotonic()
-                    _run_command(trainer_command, cwd=config.project_root)
-                    trainer_duration_sec = time.monotonic() - trainer_start
-
-                    latest_hf_checkpoint = resolve_latest_hf_checkpoint(trainer_checkpoint_root)
-                    pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
-                        checkpoint_root=trainer_checkpoint_root,
-                        keep_last=config.checkpoint_keep_last,
+                    effective_train_batch_size = resolve_effective_train_batch_size(
+                        requested=config.train_batch_size,
+                        selected_count=selected_count_for_train,
+                        world_size=world_size,
+                        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
                     )
-                    current_model_path = str(latest_hf_checkpoint)
-                    checkpoint_step_dirs.append(step_dir)
+                    if effective_train_batch_size is None:
+                        trainer_skipped = True
+                        skip_reason = "insufficient_selected_rows_for_batch_constraints"
+                    else:
+                        selected_rows_for_train, selected_rows_upsampled = (
+                            upsample_selected_rows_to_batch_multiple(
+                                selected_rows_for_train,
+                                global_batch_size=effective_train_batch_size,
+                            )
+                        )
+                        if selected_rows_upsampled > 0:
+                            selected_count_for_train = write_selected_rows_to_multiturn_parquet(
+                                selected_rows_for_train,
+                                train_parquet_path,
+                            )
+                        trainer_command = build_trainer_step_command(
+                            python_bin=config.python_bin,
+                            nnodes=config.nnodes,
+                            nproc_per_node=config.nproc_per_node,
+                            trainer_module=config.trainer_module,
+                            config_name=config.config_name,
+                            config_dir=config.config_dir,
+                            model_path=current_model_path,
+                            train_parquet_path=train_parquet_path,
+                            val_parquet_path=resolved_val_parquet_path,
+                            trainer_output_dir=trainer_checkpoint_root,
+                            train_batch_size=effective_train_batch_size,
+                            sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
+                            trainer_overrides=config.trainer_overrides,
+                        )
 
-                    # Restart vLLM only when another collection step remains.
-                    # Restarting after the final step adds unnecessary startup cost
-                    # and can surface avoidable restart-path failures.
-                    if config.manage_vllm and step_index + 1 < config.rft_steps:
-                        vllm_controller.start(model_path=current_model_path)
+                        if config.manage_vllm:
+                            vllm_controller.stop()
+                        trainer_start = time.monotonic()
+                        _run_command(trainer_command, cwd=config.project_root)
+                        trainer_duration_sec = time.monotonic() - trainer_start
+
+                        try:
+                            latest_hf_checkpoint = resolve_latest_hf_checkpoint(
+                                trainer_checkpoint_root
+                            )
+                        except FileNotFoundError as exc:
+                            raise RuntimeError(
+                                "Trainer step completed but produced no checkpoint under "
+                                f"{trainer_checkpoint_root}. Outer RFT requires one checkpoint "
+                                "per non-skipped step."
+                            ) from exc
+                        pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
+                            checkpoint_root=trainer_checkpoint_root,
+                            keep_last=config.checkpoint_keep_last,
+                        )
+                        current_model_path = str(latest_hf_checkpoint)
+                        checkpoint_step_dirs.append(step_dir)
+
+                        # Restart vLLM only when another collection step remains.
+                        # Restarting after the final step adds unnecessary startup cost
+                        # and can surface avoidable restart-path failures.
+                        if config.manage_vllm and step_index + 1 < config.rft_steps:
+                            vllm_controller.start(model_path=current_model_path)
 
             pruned_checkpoint_roots: list[Path] = []
             if latest_hf_checkpoint is not None:
@@ -307,16 +392,25 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "step_index": step_index,
                 "selected_count": selected_count_raw,
                 "selected_count_raw": selected_count_raw,
+                "selected_count_after_length_filter": selected_count_after_max_length_filter,
+                "selected_rows_over_max_length_dropped": selected_rows_over_max_length_dropped,
+                "selected_count_for_train_raw": selected_count_for_train_raw,
                 "selected_count_for_train": selected_count_for_train,
+                "selected_count_for_eval_raw": selected_count_for_eval_raw,
+                "selected_count_for_eval": selected_count_for_eval,
                 "selected_rows_upsampled": selected_rows_upsampled,
+                "selected_rows_eval_upsampled": selected_rows_eval_upsampled,
+                "eval_split_fallback_to_train": eval_split_fallback_to_train,
                 "rejected_count": len(rejected_rows),
                 "trainer_skipped": trainer_skipped,
                 "skip_reason": skip_reason,
                 "effective_train_batch_size": effective_train_batch_size,
+                "effective_eval_batch_size": effective_eval_batch_size,
                 "collector_duration_sec": collect_duration_sec,
                 "trainer_duration_sec": trainer_duration_sec,
                 "step_duration_sec": time.monotonic() - step_start,
-                "train_parquet": str(parquet_path),
+                "train_parquet": str(train_parquet_path),
+                "eval_parquet": str(resolved_val_parquet_path),
                 "trainer_checkpoint_root": str(trainer_checkpoint_root),
                 "latest_hf_checkpoint": str(latest_hf_checkpoint) if latest_hf_checkpoint else None,
                 "trainer_command": trainer_command,
@@ -364,6 +458,7 @@ def build_trainer_step_command(
         f"trainer.n_gpus_per_node={nproc_per_node}",
         "trainer.resume_mode=disable",
         f"trainer.default_local_dir={trainer_output_dir}",
+        f"trainer.save_freq={_INNER_SFT_CHECKPOINT_DISABLED_SAVE_FREQ}",
         # Runtime loop only consumes HuggingFace exports for vLLM restarts; keeping
         # checkpoint payloads hf_model-only avoids redundant dense/FSDP artifacts.
         "trainer.checkpoint.save_contents=[hf_model]",
@@ -513,7 +608,11 @@ def prune_old_step_payloads(*, step_dirs: Sequence[str | Path], keep_last: int) 
     to_prune = ordered_step_dirs[: len(ordered_step_dirs) - keep_last]
     pruned: list[Path] = []
     for step_dir in to_prune:
-        for relative in ("collector_artifacts", "accepted_trajectories.parquet"):
+        for relative in (
+            "collector_artifacts",
+            "accepted_trajectories.parquet",
+            "accepted_trajectories_eval.parquet",
+        ):
             target = step_dir / relative
             if target.is_dir():
                 shutil.rmtree(target)
@@ -531,6 +630,7 @@ def reset_step_artifacts(step_dir: str | Path) -> None:
         "collector_artifacts",
         "trainer_checkpoints",
         "accepted_trajectories.parquet",
+        "accepted_trajectories_eval.parquet",
         "rft_step_summary.json",
     ):
         target = resolved_step / relative
@@ -580,6 +680,8 @@ def _print_dry_run_plan(
         f"steps={config.rft_steps}",
         f"samples_per_task={config.samples_per_task}",
         f"task_batch_size={config.task_batch_size}",
+        f"eval_split_fraction={config.eval_split_fraction}",
+        f"eval_min_rows={config.eval_min_rows}",
         f"collector_max_in_flight_tasks={collector_max_in_flight_tasks}",
         "collector_max_turns_per_attempt="
         f"{config.collector_max_turns_per_attempt or 'default'}",
@@ -598,10 +700,13 @@ def _print_dry_run_plan(
 
     for step_index in range(preview_steps):
         step_dir = config.output_dir / f"rft_step_{step_index:05d}"
-        parquet_path = step_dir / "accepted_trajectories.parquet"
+        train_parquet_path = step_dir / "accepted_trajectories.parquet"
+        eval_parquet_path = step_dir / "accepted_trajectories_eval.parquet"
         checkpoint_root = step_dir / "trainer_checkpoints"
         print(
-            f"# [dry-run] step={step_index} collect selected trajectories -> {parquet_path}"
+            "# [dry-run] step="
+            f"{step_index} collect selected trajectories -> train:{train_parquet_path} "
+            f"eval:{eval_parquet_path}"
         )
         trainer_command = build_trainer_step_command(
             python_bin=config.python_bin,
@@ -611,8 +716,8 @@ def _print_dry_run_plan(
             config_name=config.config_name,
             config_dir=config.config_dir,
             model_path=config.initial_model,
-            train_parquet_path=parquet_path,
-            val_parquet_path=parquet_path,
+            train_parquet_path=train_parquet_path,
+            val_parquet_path=eval_parquet_path,
             trainer_output_dir=checkpoint_root,
             train_batch_size=config.train_batch_size,
             sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
@@ -726,6 +831,170 @@ def resolve_effective_train_batch_size(
     return divisible
 
 
+def upsample_selected_rows_to_batch_multiple(
+    selected_rows: Sequence[Mapping[str, Any]],
+    *,
+    global_batch_size: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Repeat rows so dataset size is divisible by global train batch size."""
+    if global_batch_size < 1:
+        raise ValueError("global_batch_size must be >= 1.")
+
+    rows: list[dict[str, Any]] = [dict(row) for row in selected_rows]
+    if not rows:
+        raise ValueError("selected_rows must be non-empty for upsampling.")
+
+    remainder = len(rows) % global_batch_size
+    if remainder == 0:
+        return rows, 0
+
+    needed = global_batch_size - remainder
+    base_rows = list(rows)
+    for index in range(needed):
+        rows.append(dict(base_rows[index % len(base_rows)]))
+    return rows, needed
+
+
+def split_selected_rows_for_eval(
+    selected_rows: Sequence[Mapping[str, Any]],
+    *,
+    eval_split_fraction: float,
+    min_eval_rows: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split selected rows into deterministic train/eval partitions."""
+    if eval_split_fraction < 0.0 or eval_split_fraction >= 1.0:
+        raise ValueError("eval_split_fraction must be in [0.0, 1.0).")
+    if min_eval_rows < 0:
+        raise ValueError("min_eval_rows must be >= 0.")
+
+    rows = [dict(row) for row in selected_rows]
+    total = len(rows)
+    if total < 1:
+        raise ValueError("selected_rows must be non-empty.")
+
+    max_eval_rows = total - 1
+    if max_eval_rows < 1 or eval_split_fraction <= 0.0:
+        return rows, []
+
+    eval_rows_target = int(total * eval_split_fraction)
+    eval_rows_target = max(eval_rows_target, min_eval_rows)
+    eval_rows_target = min(eval_rows_target, max_eval_rows)
+    if eval_rows_target < 1:
+        return rows, []
+
+    ranked_indexes = sorted(
+        range(total),
+        key=lambda row_index: _stable_split_rank(rows[row_index], row_index=row_index),
+    )
+    eval_indexes = set(ranked_indexes[:eval_rows_target])
+
+    train_rows: list[dict[str, Any]] = []
+    eval_rows: list[dict[str, Any]] = []
+    for row_index, row in enumerate(rows):
+        if row_index in eval_indexes:
+            eval_rows.append(row)
+        else:
+            train_rows.append(row)
+
+    if not train_rows:
+        train_rows.append(eval_rows.pop())
+    return train_rows, eval_rows
+
+
+def filter_selected_rows_by_token_length(
+    *,
+    selected_rows: Sequence[Mapping[str, Any]],
+    tokenizer: Any,
+    max_sequence_length: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop selected rows whose multiturn transcript exceeds trainer max token length."""
+    if max_sequence_length < 1:
+        raise ValueError("max_sequence_length must be >= 1.")
+
+    rows = [dict(row) for row in selected_rows]
+    if not rows:
+        return [], 0
+
+    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(apply_chat_template):
+        raise ValueError(
+            "Tokenizer must expose apply_chat_template so selected rows can be length-filtered "
+            "before writing multiturn parquet."
+        )
+
+    kept_rows: list[dict[str, Any]] = []
+    dropped_count = 0
+    for row_index, row in enumerate(rows):
+        messages = build_multiturn_messages(row, row_index=row_index)
+        try:
+            token_count = _multiturn_token_count(messages=messages, tokenizer=tokenizer)
+        except Exception as exc:
+            task_id = str(row.get("task_id", "")).strip() or "<unknown>"
+            raise RuntimeError(
+                f"Failed to compute multiturn token count for selected_rows[{row_index}] "
+                f"(task_id={task_id!r})."
+            ) from exc
+
+        if token_count > max_sequence_length:
+            dropped_count += 1
+            continue
+        kept_rows.append(row)
+
+    return kept_rows, dropped_count
+
+
+def _multiturn_token_count(*, messages: Sequence[Mapping[str, Any]], tokenizer: Any) -> int:
+    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(apply_chat_template):
+        raise ValueError("tokenizer must define callable apply_chat_template for multiturn token counting.")
+
+    try:
+        payload = apply_chat_template(
+            list(messages),
+            add_generation_prompt=False,
+            tokenize=True,
+            return_dict=True,
+        )
+    except TypeError:
+        payload = apply_chat_template(
+            list(messages),
+            add_generation_prompt=False,
+            tokenize=True,
+        )
+
+    input_ids = _extract_chat_template_input_ids(payload)
+    return len(input_ids)
+
+
+def _extract_chat_template_input_ids(payload: Any) -> list[int]:
+    if isinstance(payload, Mapping):
+        raw_input_ids = payload.get("input_ids")
+    else:
+        raw_input_ids = payload
+
+    if hasattr(raw_input_ids, "tolist"):
+        raw_input_ids = raw_input_ids.tolist()
+
+    if isinstance(raw_input_ids, Sequence) and not isinstance(raw_input_ids, (str, bytes)):
+        if raw_input_ids and isinstance(raw_input_ids[0], Sequence) and not isinstance(
+            raw_input_ids[0],
+            (str, bytes),
+        ):
+            raw_input_ids = raw_input_ids[0]
+        return [int(token_id) for token_id in raw_input_ids]
+
+    raise ValueError("chat template tokenization payload did not provide sequence `input_ids`.")
+
+
+def _stable_split_rank(row: Mapping[str, Any], *, row_index: int) -> str:
+    task_id = str(row.get("task_id", "")).strip()
+    step_index = row.get("step_index", "")
+    attempt_index = row.get("attempt_index", "")
+    turn_index = row.get("turn_index", "")
+    token = f"{task_id}|{step_index}|{attempt_index}|{turn_index}|{row_index}"
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def resolve_micro_batch_size_per_gpu(
     *,
     config_dir: Path,
@@ -736,6 +1005,21 @@ def resolve_micro_batch_size_per_gpu(
     resolved = _load_default_micro_batch_size_per_gpu(config_dir=config_dir, config_name=config_name)
     for override in trainer_overrides:
         parsed = _parse_positive_int_override(override, key=_MICRO_BATCH_SIZE_KEY)
+        if parsed is not None:
+            resolved = parsed
+    return resolved
+
+
+def resolve_data_max_length(
+    *,
+    config_dir: Path,
+    config_name: str,
+    trainer_overrides: Sequence[str],
+) -> int:
+    """Resolve trainer data.max_length with override precedence."""
+    resolved = _load_default_data_max_length(config_dir=config_dir, config_name=config_name)
+    for override in trainer_overrides:
+        parsed = _parse_positive_int_override(override, key=_DATA_MAX_LENGTH_KEY)
         if parsed is not None:
             resolved = parsed
     return resolved
@@ -756,6 +1040,23 @@ def _load_default_micro_batch_size_per_gpu(*, config_dir: Path, config_name: str
             return value
         break
     return 1
+
+
+def _load_default_data_max_length(*, config_dir: Path, config_name: str) -> int:
+    config_path = config_dir / f"{config_name}.yaml"
+    if not config_path.is_file():
+        return 1024
+
+    pattern = re.compile(r"^\s*max_length\s*:\s*([0-9]+)\s*(?:#.*)?$")
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line)
+        if match is None:
+            continue
+        value = int(match.group(1))
+        if value >= 1:
+            return value
+        break
+    return 1024
 
 
 def _parse_positive_int_override(override: str, *, key: str) -> int | None:
@@ -822,6 +1123,24 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
     parser.add_argument("--sft-num-epoch-per-batch", type=int, required=True)
     parser.add_argument("--checkpoint-keep-last", type=int, default=1)
     parser.add_argument("--train-batch-size", type=int, required=True)
+    parser.add_argument(
+        "--eval-split-fraction",
+        type=float,
+        default=0.1,
+        help=(
+            "fraction of selected rows to reserve for val/eval parquet in each step; "
+            "must satisfy 0.0 <= value < 1.0."
+        ),
+    )
+    parser.add_argument(
+        "--eval-min-rows",
+        type=int,
+        default=1,
+        help=(
+            "minimum number of held-out eval rows when split fraction is positive and "
+            "at least two selected rows are available."
+        ),
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--data-config-name", default="on_policy_swe_smith")
     parser.add_argument("--turn-generator-mode", default="default")
@@ -864,6 +1183,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         raise ValueError("--checkpoint-keep-last must be >= 1.")
     if args.train_batch_size < 1:
         raise ValueError("--train-batch-size must be >= 1.")
+    if args.eval_split_fraction < 0.0 or args.eval_split_fraction >= 1.0:
+        raise ValueError("--eval-split-fraction must satisfy 0.0 <= value < 1.0.")
+    if args.eval_min_rows < 0:
+        raise ValueError("--eval-min-rows must be >= 0.")
     if args.nnodes < 1:
         raise ValueError("--nnodes must be >= 1.")
     if args.nproc_per_node < 1:
@@ -906,6 +1229,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
             if args.collector_max_turns_per_attempt is not None
             else None
         ),
+        eval_split_fraction=float(args.eval_split_fraction),
+        eval_min_rows=int(args.eval_min_rows),
     )
 
 

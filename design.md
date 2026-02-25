@@ -35,7 +35,7 @@ Supersedes: v1.8 at this same path
 ## 3) Tool set and terminal action
 
 ### 3.1 Canonical tools
-`bash`, `search`, `edit`, `submit` — defined in `ALLOWED_TOOLS` ordered tuple.
+`bash`, `search`, `apply_patch`, `submit` — defined in `ALLOWED_TOOLS` ordered tuple.
 
 ### 3.2 Tool schema registry
 - `TOOL_SCHEMAS` in `contracts.py` maps each tool to its TypedDict, required fields, and constraints.
@@ -88,7 +88,7 @@ Computed from canonical feedback fields: `has_failing_artifact_identity`, `has_a
 ### 7.1 Adapter mapping (deterministic)
 - `bash` → `bash`
 - `str_replace_editor.view` → `search`
-- `str_replace_editor.create|str_replace|insert|undo_edit` → `edit`
+- `str_replace_editor.create|str_replace|insert|undo_edit` → `apply_patch`
 - `submit`/`answer` → `submit`
 
 ### 7.2 Implementation status
@@ -222,7 +222,7 @@ have regression tests (72 passed, 1 skipped).
 
 ## 12) Recommended next steps (priority order)
 
-1. **Environment executor** — Implement a concrete `ToolExecutor` class backed by Docker containers. The `env_bridge.py` interface is stable; it needs a real executor behind `executor.run(request)` that dispatches `bash`/`search`/`edit`/`submit` to per-instance containers. This is the prerequisite for both RFT and SDPO since both stages are on-policy.
+1. **Environment executor** — Implement a concrete `ToolExecutor` class backed by Docker containers. The `env_bridge.py` interface is stable; it needs a real executor behind `executor.run(request)` that dispatches `bash`/`search`/`apply_patch`/`submit` to per-instance containers. This is the prerequisite for both RFT and SDPO since both stages are on-policy.
 
 2. **RFT training loop (on-policy)** — Roll out N attempts per SWE-bench task in Docker via `env_bridge.py`, filter to successful resolutions, then train CE on masked tokens (LoRA) via verl's SFT trainer. The tokenization bridge (`data/tokenization.py`) and preprocessor (`data_preprocessor.py`) are ready to convert rollout outputs into verl `DataProto` format with real token IDs and aligned masks. Config (`rft_swe.yaml`) and LoRA settings are in place.
 

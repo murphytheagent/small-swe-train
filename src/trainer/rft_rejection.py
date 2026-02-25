@@ -83,6 +83,13 @@ def evaluate_rft_rejection_reason(
         row.get("final_submit_format_valid"),
         fallback=trajectory_format_valid and has_terminal_submit,
     )
+    container_init_succeeded = _coerce_bool(
+        row.get("container_init_succeeded"),
+        fallback=False,
+    )
+
+    if not container_init_succeeded:
+        reasons.append("container_init_failed")
 
     if selection_policy.require_terminal and not has_terminal_submit:
         reasons.append("non_terminal")

@@ -118,6 +118,7 @@ def collect_rft_sft_batch_for_steps(
         sft_batch = build_verl_sft_batch(
             selected_rows,
             handoff_settings=handoff_settings,
+            tokenizer=tokenizer,
         )
     else:
         sft_batch = _build_empty_verl_sft_batch(handoff_settings=handoff_settings)
@@ -142,7 +143,9 @@ def collect_rft_sft_batch_for_steps(
             {
                 "selected_count": len(selected_rows),
                 "rejected_count": len(rejected_rows),
-                "max_padded_length": sft_batch["meta_info"]["max_padded_length"],
+                "max_turn_level_generated_tokens": sft_batch["meta_info"][
+                    "max_turn_level_generated_tokens"
+                ],
                 "max_sequence_length_limit": sft_batch["meta_info"]["max_sequence_length_limit"],
             },
         )
@@ -198,6 +201,7 @@ def merge_rollout_and_preprocessed_rows(
                 "bridge_error": rollout_row.get("bridge_error", ""),
                 "timeout_error": rollout_row.get("timeout_error", ""),
                 "executor_error": rollout_row.get("executor_error", ""),
+                "container_init_succeeded": rollout_row.get("container_init_succeeded", False),
                 "exit_code": rollout_row.get("exit_code"),
                 "tool_name": rollout_row.get("tool_name", ""),
                 "container_id": rollout_row.get("container_id", ""),
@@ -223,6 +227,7 @@ def build_verl_sft_batch(
     rows: Sequence[Mapping[str, Any]],
     *,
     handoff_settings: RFTHandoffSettings,
+    tokenizer: SupportsOffsetsTokenizer | None = None,
 ) -> dict[str, Any]:
     """Convert selected RFT rows into verl SFT-compatible tensor + metadata payloads."""
     if not rows:
@@ -235,6 +240,7 @@ def build_verl_sft_batch(
     pad_token_id = handoff_settings.pad_token_id
     packed_rows: list[dict[str, Any]] = []
     max_length = 0
+    max_turn_level_generated_tokens = 0
 
     for index, row in enumerate(rows):
         input_ids = _coerce_int_sequence(
@@ -269,6 +275,14 @@ def build_verl_sft_batch(
 
         task_id = _require_non_empty_task_id(row.get("task_id"), index=index)
         attempt_index = _coerce_int(row.get("attempt_index"), fallback=0)
+        turn_level_generated_tokens = _resolve_turn_level_generated_token_count(
+            row=row,
+            tokenizer=tokenizer,
+        )
+        max_turn_level_generated_tokens = max(
+            max_turn_level_generated_tokens,
+            turn_level_generated_tokens,
+        )
         max_length = max(max_length, len(input_ids))
         packed_rows.append(
             {
@@ -342,7 +356,7 @@ def build_verl_sft_batch(
         },
         "meta_info": {
             "selected_count": len(padded_input_ids),
-            "max_padded_length": max_length,
+            "max_turn_level_generated_tokens": max_turn_level_generated_tokens,
             "max_sequence_length_limit": padded_limit,
         },
     }
@@ -370,7 +384,7 @@ def _build_empty_verl_sft_batch(*, handoff_settings: RFTHandoffSettings) -> dict
         },
         "meta_info": {
             "selected_count": 0,
-            "max_padded_length": 0,
+            "max_turn_level_generated_tokens": 0,
             "max_sequence_length_limit": int(handoff_settings.max_sequence_length),
         },
     }
@@ -464,6 +478,61 @@ def _coerce_token_labels(value: Any, *, length_hint: int) -> list[str]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [str(item) for item in value]
     return ["other"] * length_hint
+
+
+def _resolve_turn_level_generated_token_count(
+    *,
+    row: Mapping[str, Any],
+    tokenizer: SupportsOffsetsTokenizer | None,
+) -> int:
+    if tokenizer is not None:
+        assistant_response_raw = row.get("assistant_response")
+        assistant_response = (
+            assistant_response_raw
+            if isinstance(assistant_response_raw, str)
+            else str(assistant_response_raw or "")
+        )
+        if assistant_response:
+            tokenized = _tokenize_text(tokenizer=tokenizer, text=assistant_response)
+            if tokenized:
+                return len(tokenized)
+            # If tokenizer unexpectedly fails, do not silently drop to zero.
+            # Fall back to row-level ids to preserve monotonic diagnostics.
+
+    # Fallback for older tests/callers that do not pass tokenizer and for
+    # defensive recovery when assistant-response tokenization is unavailable.
+    input_ids = row.get("input_ids")
+    if isinstance(input_ids, Sequence) and not isinstance(input_ids, (str, bytes)):
+        return len(input_ids)
+    return 0
+
+
+def _tokenize_text(*, tokenizer: SupportsOffsetsTokenizer, text: str) -> list[int]:
+    try:
+        encoded = tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=False,
+        )
+    except TypeError:
+        encoded = tokenizer(
+            text,
+            add_special_tokens=False,
+        )
+    except Exception:
+        return []
+
+    if not isinstance(encoded, Mapping):
+        return []
+    raw_input_ids = encoded.get("input_ids")
+    if not isinstance(raw_input_ids, Sequence) or isinstance(raw_input_ids, (str, bytes)):
+        return []
+    if raw_input_ids and isinstance(raw_input_ids[0], Sequence) and not isinstance(
+        raw_input_ids[0],
+        (str, bytes),
+    ):
+        raw_input_ids = raw_input_ids[0]
+    return [int(token_id) for token_id in raw_input_ids]
 
 
 def _build_group_id(*, task_id: str, attempt_index: int) -> str:

@@ -8,10 +8,11 @@ from data.feedback_canonicalizer import build_feedback_packet
 from metrics.contracts import FormatMetrics, rate
 from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
 from config import MAX_TOOL_CALLS_PER_TURN
-from schemas import ActionEnvelope, validate_tool_call
+from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME, ActionEnvelope, validate_tool_call
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
+_ALLOWED_TOOLS_SET = set(ALLOWED_TOOLS)
 
 
 def _parse_response_text(response_text: str, *, max_tool_calls: int) -> ActionEnvelope:
@@ -91,6 +92,7 @@ def reward_fn(
     submit_singleton_flags: list[bool] = []
     allowed_tool_flags: list[bool] = []
     required_arg_flags: list[bool] = []
+    terminal_submission_flags: list[bool] = []
     think_balance_flags: list[bool] = []
     validation_errors: list[list[str]] = []
 
@@ -107,6 +109,7 @@ def reward_fn(
         submit_singleton_ok = False
         allowed_tools_ok = False
         required_args_ok = False
+        terminal_submission_ok = False
         envelope: ActionEnvelope | None = None
 
         try:
@@ -124,8 +127,11 @@ def reward_fn(
 
             call_error_lists = [validate_tool_call(call) for call in tool_calls]
             sample_errors.extend(error for errors in call_error_lists for error in errors)
-            allowed_tools_ok = all(call.tool in {"bash", "search", "edit", "submit"} for call in tool_calls)
+            allowed_tools_ok = all(call.tool in _ALLOWED_TOOLS_SET for call in tool_calls)
             required_args_ok = all(not errors for errors in call_error_lists)
+            terminal_submission_ok = (
+                len(tool_calls) == 1 and tool_calls[0].tool == TERMINAL_TOOL_NAME
+            )
 
         step_index_warning = ""
         try:
@@ -144,6 +150,7 @@ def reward_fn(
         submit_singleton_flags.append(submit_singleton_ok)
         allowed_tool_flags.append(allowed_tools_ok)
         required_arg_flags.append(required_args_ok)
+        terminal_submission_flags.append(terminal_submission_ok)
         think_balance_flags.append(_thinking_delimiters_balanced(response_text))
         validation_errors.append(sample_errors)
 
@@ -178,6 +185,7 @@ def reward_fn(
         thinking_delimiter_balance_rate=rate(think_balance_flags),
         allowed_tool_rate=rate(allowed_tool_flags),
         required_arg_presence=rate(required_arg_flags),
+        terminal_submission_rate=rate(terminal_submission_flags),
     )
 
     info: dict[str, list[Any]] = {
@@ -189,6 +197,7 @@ def reward_fn(
         "thinking_delimiter_balance": think_balance_flags,
         "allowed_tool": allowed_tool_flags,
         "required_arg_presence": required_arg_flags,
+        "terminal_submission": terminal_submission_flags,
         "validation_errors": validation_errors,
         "step_index_warnings": step_index_warnings,
         "format_metrics": [metrics.__dict__],

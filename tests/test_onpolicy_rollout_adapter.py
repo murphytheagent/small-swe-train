@@ -15,6 +15,7 @@ from verl_integration.onpolicy_rollout_adapter import (
     build_verl_sft_batch,
     collect_rft_sft_batch_for_steps,
     collect_rollouts_for_steps,
+    evaluate_rft_rejection_reason,
     merge_rollout_and_preprocessed_rows,
     select_rft_attempt_rows,
 )
@@ -160,24 +161,27 @@ def test_collect_rollouts_for_steps_applies_start_step_offset() -> None:
 
 def test_select_rft_attempt_rows_relabels_deterministically() -> None:
     selection = resolve_rft_handoff_settings().selection
+    rows = [
+        {
+            "is_terminal": True,
+            "format_valid": True,
+            "resolved": True,
+            "container_init_succeeded": True,
+            "action_mask_rft": [1, 1],
+            "input_ids": [1, 2],
+        },
+        {
+            "is_terminal": False,
+            "format_valid": False,
+            "resolved": False,
+            "timeout_error": "timed out",
+            "container_init_succeeded": True,
+            "action_mask_rft": [1, 1],
+            "input_ids": [1, 2],
+        },
+    ]
     selected, rejected = select_rft_attempt_rows(
-        [
-            {
-                "is_terminal": True,
-                "format_valid": True,
-                "resolved": True,
-                "action_mask_rft": [1, 1],
-                "input_ids": [1, 2],
-            },
-            {
-                "is_terminal": False,
-                "format_valid": False,
-                "resolved": False,
-                "timeout_error": "timed out",
-                "action_mask_rft": [1, 1],
-                "input_ids": [1, 2],
-            },
-        ],
+        rows,
         selection_policy=selection,
     )
 
@@ -185,7 +189,9 @@ def test_select_rft_attempt_rows_relabels_deterministically() -> None:
     assert selected[0]["rft_label"] == "accept"
     assert len(rejected) == 1
     assert rejected[0]["rft_label"] == "reject"
-    assert rejected[0]["rft_rejection_reason"] == "non_terminal,format_invalid"
+    expected_reason = evaluate_rft_rejection_reason(rows[1], selection_policy=selection)
+    assert expected_reason is not None
+    assert rejected[0]["rft_rejection_reason"] == expected_reason
 
 
 def test_build_verl_sft_batch_masks_last_token_and_pads() -> None:
@@ -238,6 +244,7 @@ def test_select_rft_attempt_rows_rejects_invalid_final_submit_even_when_format_f
                 "trajectory_format_valid": True,
                 "format_valid": True,
                 "resolved": True,
+                "container_init_succeeded": True,
                 "action_mask_rft": [1, 1],
                 "input_ids": [1, 2],
             }
@@ -248,6 +255,53 @@ def test_select_rft_attempt_rows_rejects_invalid_final_submit_even_when_format_f
     assert selected == []
     assert len(rejected) == 1
     assert rejected[0]["rft_rejection_reason"] == "final_submit_invalid"
+
+
+def test_select_rft_attempt_rows_rejects_container_init_failed_even_if_valid() -> None:
+    selection = resolve_rft_handoff_settings().selection
+    selected, rejected = select_rft_attempt_rows(
+        [
+            {
+                "is_terminal": True,
+                "final_turn_has_submit": True,
+                "final_submit_format_valid": True,
+                "trajectory_format_valid": True,
+                "format_valid": True,
+                "resolved": True,
+                "container_init_succeeded": False,
+                "action_mask_rft": [1, 1],
+                "input_ids": [1, 2],
+            }
+        ],
+        selection_policy=selection,
+    )
+
+    assert selected == []
+    assert len(rejected) == 1
+    assert rejected[0]["rft_rejection_reason"] == "container_init_failed"
+
+
+def test_select_rft_attempt_rows_rejects_missing_container_init_status() -> None:
+    selection = resolve_rft_handoff_settings().selection
+    selected, rejected = select_rft_attempt_rows(
+        [
+            {
+                "is_terminal": True,
+                "final_turn_has_submit": True,
+                "final_submit_format_valid": True,
+                "trajectory_format_valid": True,
+                "format_valid": True,
+                "resolved": True,
+                "action_mask_rft": [1, 1],
+                "input_ids": [1, 2],
+            }
+        ],
+        selection_policy=selection,
+    )
+
+    assert selected == []
+    assert len(rejected) == 1
+    assert rejected[0]["rft_rejection_reason"] == "container_init_failed"
 
 
 def test_collect_rft_sft_batch_for_steps_filters_failed_attempts(tmp_path: Path) -> None:
@@ -427,7 +481,7 @@ def test_collect_rft_sft_batch_for_steps_all_rejected_returns_empty_selected_bat
     assert len(result["selected_rows"]) == 0
     assert len(result["rejected_rows"]) == 2
     assert result["sft_batch"]["meta_info"]["selected_count"] == 0
-    assert result["sft_batch"]["meta_info"]["max_padded_length"] == 0
+    assert result["sft_batch"]["meta_info"]["max_turn_level_generated_tokens"] == 0
     assert result["dataproto_payload"]["meta_info"]["selected_count"] == 0
     assert (tmp_path / "rejected_rows.jsonl").exists()
     meta = json.loads((tmp_path / "rft_sft_meta.json").read_text(encoding="utf-8"))

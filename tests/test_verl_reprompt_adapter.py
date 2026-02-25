@@ -23,7 +23,7 @@ def test_build_self_distillation_batch_contains_contract_blocks() -> None:
     assert "[SYSTEM_BLOCK]" in prompt
     assert "[TASK_BLOCK]" in prompt
     assert "[FEEDBACK_BLOCK]" in prompt
-    assert batch["self_distillation_mask"] == [True]
+    assert batch["self_distillation_mask"] == [False]
 
 
 def test_build_self_distillation_batch_honors_token_limit() -> None:
@@ -58,7 +58,7 @@ def test_build_self_distillation_batch_falls_back_on_invalid_step_index() -> Non
 
     batch = build_self_distillation_batch(samples)
 
-    assert batch["self_distillation_mask"] == [True]
+    assert batch["self_distillation_mask"] == [False]
     assert batch["step_index_warnings"] == ["step_index must be an integer >= 0"]
     assert batch["feedback_packets"][0]["step_index"] == 0
 

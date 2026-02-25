@@ -178,7 +178,7 @@ def _proof_tool_chain_turn_generator(
     if turn_index == 2:
         return (
             "<tool_call>"
-            '{"tool":"edit","args":{"path":"'
+            '{"tool":"apply_patch","args":{"path":"'
             + path
             + '","patch":"proof_patch"}}'
             "</tool_call>"
