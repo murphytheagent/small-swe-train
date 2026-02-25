@@ -93,7 +93,7 @@
   "on_policy": {
     "enabled": true,
     "rollout_only": true,
-    "max_turns_per_attempt": 8,
+    "max_turns_per_attempt": 16,
     "tool_timeout_sec": 60,
     "container_start_timeout_sec": 120,
     "attempt_timeout_sec": 300,
@@ -121,8 +121,8 @@
     "loop": {
       "sft_num_epoch_per_batch": 1,
       "steps": 2,
-      "samples_per_task": 2,
-      "task_batch_size": 128,
+      "samples_per_task": 8,
+      "task_batch_size": 256,
       "collector_max_in_flight_tasks": 32,
       "train_batch_size": 8,
       "eval_split_fraction": 0.1,

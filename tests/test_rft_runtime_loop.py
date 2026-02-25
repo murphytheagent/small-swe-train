@@ -718,7 +718,7 @@ def test_run_loop_uses_vllm_compatible_checkpoint_for_followup_steps(
         }
 
     def _fake_load_tokenizer(_model_path: str):
-        return object()
+        return _StubTokenizer()
 
     def _fake_collect(*, request, tokenizer):
         del tokenizer
@@ -1649,3 +1649,48 @@ def test_resolve_vllm_api_key_prefers_small_swe_env(monkeypatch) -> None:
     monkeypatch.setenv("SMALL_SWE_VLLM_API_KEY", "small-swe-value")
 
     assert rft_runtime_loop._resolve_vllm_api_key() == "small-swe-value"
+
+
+def test_load_model_from_config_uses_dtype_when_supported() -> None:
+    captured: dict[str, object] = {}
+
+    class _AutoModel:
+        @staticmethod
+        def from_config(model_config, trust_remote_code=False, **kwargs):
+            del model_config
+            assert trust_remote_code is False
+            captured.update(kwargs)
+            return kwargs
+
+    payload = rft_runtime_loop._load_model_from_config_with_dtype_fallback(
+        auto_model_cls=_AutoModel,
+        model_config=object(),
+        model_kwargs={"dtype": "bfloat16"},
+    )
+
+    assert payload["dtype"] == "bfloat16"
+    assert captured["dtype"] == "bfloat16"
+
+
+def test_load_model_from_config_falls_back_to_torch_dtype_for_legacy_api() -> None:
+    captured: dict[str, object] = {}
+
+    class _AutoModel:
+        @staticmethod
+        def from_config(model_config, trust_remote_code=False, **kwargs):
+            del model_config
+            assert trust_remote_code is False
+            if "dtype" in kwargs:
+                raise TypeError("got an unexpected keyword argument 'dtype'")
+            captured.update(kwargs)
+            return kwargs
+
+    payload = rft_runtime_loop._load_model_from_config_with_dtype_fallback(
+        auto_model_cls=_AutoModel,
+        model_config=object(),
+        model_kwargs={"dtype": "bfloat16"},
+    )
+
+    assert "dtype" not in payload
+    assert payload["torch_dtype"] == "bfloat16"
+    assert captured["torch_dtype"] == "bfloat16"

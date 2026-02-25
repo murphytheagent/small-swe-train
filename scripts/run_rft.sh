@@ -78,6 +78,16 @@ if ! [[ "${NPROC_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 export NPROC_PER_NODE
+if [[ -z "${OMP_NUM_THREADS:-}" ]]; then
+  OMP_NUM_THREADS=1
+  if [[ "${SLURM_CPUS_PER_TASK:-}" =~ ^[1-9][0-9]*$ ]]; then
+    OMP_NUM_THREADS="$(( SLURM_CPUS_PER_TASK / NPROC_PER_NODE ))"
+    if (( OMP_NUM_THREADS < 1 )); then
+      OMP_NUM_THREADS=1
+    fi
+  fi
+  export OMP_NUM_THREADS
+fi
 NNODES="${NNODES:-1}"
 # Grounded defaults:
 # - verl SFT trainer entrypoint: https://github.com/lasgroup/SDPO/blob/main/verl/trainer/fsdp_sft_trainer.py

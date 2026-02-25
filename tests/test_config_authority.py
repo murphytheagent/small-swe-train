@@ -194,7 +194,7 @@ def test_resolve_rft_handoff_settings_loads_selection_policy() -> None:
     assert settings.max_sequence_length >= 2
     assert settings.pad_token_id >= 0
     assert settings.selection.require_format_valid is True
-    assert settings.selection.require_terminal is False
+    assert settings.selection.require_terminal is True
     assert settings.selection.require_resolved is False
     assert settings.selection.require_zero_exit_code is False
     assert settings.selection.reject_on_collector_error is False

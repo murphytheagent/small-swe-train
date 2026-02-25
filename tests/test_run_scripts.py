@@ -77,7 +77,7 @@ def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topo
             "100 8 64 32 1 1 512 0.1 1 2 2 "
             "http://127.0.0.1:8000/v1 "
             "Qwen/Qwen3-4B-Instruct-2507 90 1024 0.0 1.0 8 12288 "
-            "lora q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+            "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
         ),
     )
     result = _run_script(
@@ -101,7 +101,7 @@ def test_run_rft_script_dry_run_defaults_nproc_to_detected_gpu_count(
             "100 8 64 32 1 1 512 0.1 1 2 4 "
             "http://127.0.0.1:8000/v1 "
             "Qwen/Qwen3-4B-Instruct-2507 90 1024 0.0 1.0 8 12288 "
-            "lora q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+            "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
         ),
     )
     result = _run_script(
@@ -185,16 +185,18 @@ def test_run_rft_script_dry_run_respects_explicit_vllm_extra_args() -> None:
 
 
 def test_run_rft_script_dry_run_uses_centralized_sequence_length_overrides() -> None:
+    expected_max_length = config.resolve_rft_handoff_settings().max_sequence_length
     result = _run_script(
         "run_rft.sh",
         "trainer.total_training_steps=1",
     )
-    assert "data.max_length=12288" in result.stdout
+    assert f"max_model_len={expected_max_length}" in result.stdout
 
 
 def test_run_rft_script_dry_run_direct_mode_uses_centralized_runtime_overrides() -> None:
     on_policy_defaults = config.on_policy_runtime_defaults()
     expected_max_turns = on_policy_defaults["max_turns_per_attempt"]
+    expected_max_length = config.resolve_rft_handoff_settings().max_sequence_length
     result = _run_script(
         "run_rft.sh",
         env_overrides={
@@ -208,7 +210,7 @@ def test_run_rft_script_dry_run_direct_mode_uses_centralized_runtime_overrides()
         "\\[q_proj\\,k_proj\\,v_proj\\,o_proj\\,gate_proj\\,up_proj\\,down_proj\\]"
     ) in result.stdout
     assert f"+data.on_policy.runtime_overrides.max_turns_per_attempt={expected_max_turns}" in result.stdout
-    assert "data.max_length=12288" in result.stdout
+    assert f"max_model_len={expected_max_length}" in result.stdout
 
 
 def test_run_sdft_script_dry_run_includes_loss_mode_override() -> None:

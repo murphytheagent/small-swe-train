@@ -710,9 +710,13 @@ def _merge_lora_checkpoint_to_dense(
     model_kwargs: dict[str, Any] = {}
     resolved_dtype = _resolve_torch_dtype_from_config(model_config=model_config, torch_module=torch)
     if resolved_dtype is not None:
-        model_kwargs["torch_dtype"] = resolved_dtype
+        model_kwargs["dtype"] = resolved_dtype
 
-    base_model = AutoModelForCausalLM.from_config(model_config, trust_remote_code=False, **model_kwargs)
+    base_model = _load_model_from_config_with_dtype_fallback(
+        auto_model_cls=AutoModelForCausalLM,
+        model_config=model_config,
+        model_kwargs=model_kwargs,
+    )
     lora_config = LoraConfig(
         r=merge_spec.rank,
         lora_alpha=merge_spec.alpha,
@@ -764,6 +768,29 @@ def _resolve_torch_dtype_from_config(*, model_config: Any, torch_module: Any) ->
     if dtype_type is not None and isinstance(raw, dtype_type):
         return raw
     return None
+
+
+def _load_model_from_config_with_dtype_fallback(
+    *,
+    auto_model_cls: Any,
+    model_config: Any,
+    model_kwargs: Mapping[str, Any],
+) -> Any:
+    kwargs = dict(model_kwargs)
+    try:
+        return auto_model_cls.from_config(model_config, trust_remote_code=False, **kwargs)
+    except TypeError as exc:
+        if "dtype" in kwargs and "torch_dtype" not in kwargs:
+            message = str(exc)
+            if "unexpected keyword argument 'dtype'" in message:
+                fallback_kwargs = dict(kwargs)
+                fallback_kwargs["torch_dtype"] = fallback_kwargs.pop("dtype")
+                return auto_model_cls.from_config(
+                    model_config,
+                    trust_remote_code=False,
+                    **fallback_kwargs,
+                )
+        raise
 
 
 def _copy_non_model_hf_artifacts(*, source_dir: Path, destination_dir: Path) -> None:
