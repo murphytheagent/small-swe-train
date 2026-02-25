@@ -21,7 +21,10 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from config import resolve_rft_collector_max_in_flight_default
-from trainer.rft_multiturn_dataset import write_selected_rows_to_multiturn_parquet
+from trainer.rft_multiturn_dataset import (
+    build_multiturn_messages,
+    write_selected_rows_to_multiturn_parquet,
+)
 from trainer.rft_runtime import OnPolicyRFTRuntimeRequest, collect_onpolicy_rft_runtime_batch
 
 _GLOBAL_STEP_PATTERN = re.compile(r"^global_step_(\d+)$")
@@ -35,6 +38,7 @@ _VLLM_OPENAI_SERVER_SOURCE = (
     "https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/api_server.py"
 )
 _MICRO_BATCH_SIZE_KEY = "data.micro_batch_size_per_gpu"
+_DATA_MAX_LENGTH_KEY = "data.max_length"
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,11 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         config_name=config.config_name,
         trainer_overrides=config.trainer_overrides,
     )
+    trainer_data_max_length = resolve_data_max_length(
+        config_dir=config.config_dir,
+        config_name=config.config_name,
+        trainer_overrides=config.trainer_overrides,
+    )
     runtime_manifest: dict[str, Any] = {
         "generated_utc": _utc_now(),
         "config": {
@@ -172,6 +181,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             "checkpoint_keep_last": config.checkpoint_keep_last,
             "train_batch_size": config.train_batch_size,
             "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
+            "trainer_data_max_length": trainer_data_max_length,
             "data_config_name": config.data_config_name,
             "turn_generator_mode": config.turn_generator_mode,
             "initial_model": config.initial_model,
@@ -234,6 +244,15 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             selected_rows = _coerce_rows(handoff.get("selected_rows"))
             rejected_rows = _coerce_rows(handoff.get("rejected_rows"))
             selected_count_raw = len(selected_rows)
+            (
+                selected_rows,
+                selected_rows_over_max_length_dropped,
+            ) = filter_selected_rows_by_token_length(
+                selected_rows=selected_rows,
+                tokenizer=tokenizer,
+                max_sequence_length=trainer_data_max_length,
+            )
+            selected_count_after_max_length_filter = len(selected_rows)
             selected_count_for_train_raw = 0
             selected_count_for_train = 0
             selected_count_for_eval = 0
@@ -248,9 +267,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             trainer_skipped = False
             skip_reason: str | None = None
 
-            if selected_count_raw < 1:
+            if selected_count_after_max_length_filter < 1:
                 trainer_skipped = True
-                skip_reason = "no_selected_rows"
+                skip_reason = "no_selected_rows_after_length_filter"
             else:
                 selected_rows_for_train, selected_rows_for_eval = split_selected_rows_for_eval(
                     selected_rows,
@@ -350,6 +369,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "step_index": step_index,
                 "selected_count": selected_count_raw,
                 "selected_count_raw": selected_count_raw,
+                "selected_count_after_length_filter": selected_count_after_max_length_filter,
+                "selected_rows_over_max_length_dropped": selected_rows_over_max_length_dropped,
                 "selected_count_for_train_raw": selected_count_for_train_raw,
                 "selected_count_for_train": selected_count_for_train,
                 "selected_count_for_eval": selected_count_for_eval,
@@ -853,6 +874,91 @@ def split_selected_rows_for_eval(
     return train_rows, eval_rows
 
 
+def filter_selected_rows_by_token_length(
+    *,
+    selected_rows: Sequence[Mapping[str, Any]],
+    tokenizer: Any,
+    max_sequence_length: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop selected rows whose multiturn transcript exceeds trainer max token length."""
+    if max_sequence_length < 1:
+        raise ValueError("max_sequence_length must be >= 1.")
+
+    rows = [dict(row) for row in selected_rows]
+    if not rows:
+        return [], 0
+
+    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(apply_chat_template):
+        raise ValueError(
+            "Tokenizer must expose apply_chat_template so selected rows can be length-filtered "
+            "before writing multiturn parquet."
+        )
+
+    kept_rows: list[dict[str, Any]] = []
+    dropped_count = 0
+    for row_index, row in enumerate(rows):
+        messages = build_multiturn_messages(row, row_index=row_index)
+        try:
+            token_count = _multiturn_token_count(messages=messages, tokenizer=tokenizer)
+        except Exception as exc:
+            task_id = str(row.get("task_id", "")).strip() or "<unknown>"
+            raise RuntimeError(
+                f"Failed to compute multiturn token count for selected_rows[{row_index}] "
+                f"(task_id={task_id!r})."
+            ) from exc
+
+        if token_count > max_sequence_length:
+            dropped_count += 1
+            continue
+        kept_rows.append(row)
+
+    return kept_rows, dropped_count
+
+
+def _multiturn_token_count(*, messages: Sequence[Mapping[str, Any]], tokenizer: Any) -> int:
+    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(apply_chat_template):
+        raise ValueError("tokenizer must define callable apply_chat_template for multiturn token counting.")
+
+    try:
+        payload = apply_chat_template(
+            list(messages),
+            add_generation_prompt=False,
+            tokenize=True,
+            return_dict=True,
+        )
+    except TypeError:
+        payload = apply_chat_template(
+            list(messages),
+            add_generation_prompt=False,
+            tokenize=True,
+        )
+
+    input_ids = _extract_chat_template_input_ids(payload)
+    return len(input_ids)
+
+
+def _extract_chat_template_input_ids(payload: Any) -> list[int]:
+    if isinstance(payload, Mapping):
+        raw_input_ids = payload.get("input_ids")
+    else:
+        raw_input_ids = payload
+
+    if hasattr(raw_input_ids, "tolist"):
+        raw_input_ids = raw_input_ids.tolist()
+
+    if isinstance(raw_input_ids, Sequence) and not isinstance(raw_input_ids, (str, bytes)):
+        if raw_input_ids and isinstance(raw_input_ids[0], Sequence) and not isinstance(
+            raw_input_ids[0],
+            (str, bytes),
+        ):
+            raw_input_ids = raw_input_ids[0]
+        return [int(token_id) for token_id in raw_input_ids]
+
+    raise ValueError("chat template tokenization payload did not provide sequence `input_ids`.")
+
+
 def _stable_split_rank(row: Mapping[str, Any], *, row_index: int) -> str:
     task_id = str(row.get("task_id", "")).strip()
     step_index = row.get("step_index", "")
@@ -877,6 +983,21 @@ def resolve_micro_batch_size_per_gpu(
     return resolved
 
 
+def resolve_data_max_length(
+    *,
+    config_dir: Path,
+    config_name: str,
+    trainer_overrides: Sequence[str],
+) -> int:
+    """Resolve trainer data.max_length with override precedence."""
+    resolved = _load_default_data_max_length(config_dir=config_dir, config_name=config_name)
+    for override in trainer_overrides:
+        parsed = _parse_positive_int_override(override, key=_DATA_MAX_LENGTH_KEY)
+        if parsed is not None:
+            resolved = parsed
+    return resolved
+
+
 def _load_default_micro_batch_size_per_gpu(*, config_dir: Path, config_name: str) -> int:
     config_path = config_dir / f"{config_name}.yaml"
     if not config_path.is_file():
@@ -892,6 +1013,23 @@ def _load_default_micro_batch_size_per_gpu(*, config_dir: Path, config_name: str
             return value
         break
     return 1
+
+
+def _load_default_data_max_length(*, config_dir: Path, config_name: str) -> int:
+    config_path = config_dir / f"{config_name}.yaml"
+    if not config_path.is_file():
+        return 1024
+
+    pattern = re.compile(r"^\s*max_length\s*:\s*([0-9]+)\s*(?:#.*)?$")
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line)
+        if match is None:
+            continue
+        value = int(match.group(1))
+        if value >= 1:
+            return value
+        break
+    return 1024
 
 
 def _parse_positive_int_override(override: str, *, key: str) -> int | None:

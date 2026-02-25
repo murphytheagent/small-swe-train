@@ -13,16 +13,35 @@ from trainer.rft_runtime_loop import (
     _is_http_endpoint_ready,
     build_trainer_step_command,
     build_vllm_server_command,
+    filter_selected_rows_by_token_length,
     prune_old_global_step_checkpoints,
     prune_old_step_checkpoints,
     prune_old_step_payloads,
     reset_step_artifacts,
+    resolve_data_max_length,
     resolve_effective_train_batch_size,
     resolve_micro_batch_size_per_gpu,
     resolve_latest_hf_checkpoint,
     split_selected_rows_for_eval,
     upsample_selected_rows_to_batch_multiple,
 )
+
+
+class _StubTokenizer:
+    def apply_chat_template(
+        self,
+        messages,
+        *,
+        add_generation_prompt: bool = False,
+        tokenize: bool = True,
+        return_dict: bool = True,
+    ):
+        del add_generation_prompt, tokenize
+        token_count = sum(len(str(message.get("content", ""))) for message in messages)
+        input_ids = list(range(token_count))
+        if return_dict:
+            return {"input_ids": input_ids}
+        return input_ids
 
 
 def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_overrides(
@@ -150,7 +169,7 @@ def test_run_loop_skips_checkpoint_root_prune_when_trainer_is_skipped(
     call_state = {"collect_calls": 0, "prune_calls": 0}
 
     def _fake_load_tokenizer(_model_path: str):
-        return object()
+        return _StubTokenizer()
 
     def _fake_collect(*, request, tokenizer):
         del tokenizer
@@ -286,7 +305,7 @@ def test_run_loop_checkpoint_pruning_tracks_only_checkpoint_steps(
     call_state = {"collect_calls": 0, "prune_calls": 0, "step_dir_args": []}
 
     def _fake_load_tokenizer(_model_path: str):
-        return object()
+        return _StubTokenizer()
 
     def _selected_row(step_index: int) -> dict[str, object]:
         return {
@@ -439,7 +458,7 @@ def test_run_loop_does_not_restart_vllm_after_final_step(
                 self._active = False
 
     def _fake_load_tokenizer(_model_path: str):
-        return object()
+        return _StubTokenizer()
 
     def _fake_collect(*, request, tokenizer):
         del tokenizer
@@ -583,7 +602,7 @@ def test_run_loop_upsamples_selected_rows_to_effective_batch_multiple(
         }
 
     def _fake_load_tokenizer(_model_path: str):
-        return object()
+        return _StubTokenizer()
 
     def _fake_collect(*, request, tokenizer):
         del tokenizer
@@ -717,7 +736,7 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
         }
 
     def _fake_load_tokenizer(_model_path: str):
-        return object()
+        return _StubTokenizer()
 
     def _fake_collect(*, request, tokenizer):
         del tokenizer
@@ -1053,6 +1072,85 @@ def test_resolve_micro_batch_size_per_gpu_prefers_override(tmp_path: Path) -> No
         trainer_overrides=("+data.micro_batch_size_per_gpu=2",),
     )
     assert resolved_override == 2
+
+
+def test_resolve_data_max_length_prefers_override(tmp_path: Path) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(parents=True)
+    (config_dir / "rft_swe.yaml").write_text(
+        "data:\n  max_length: 256\n",
+        encoding="utf-8",
+    )
+
+    resolved_default = resolve_data_max_length(
+        config_dir=config_dir,
+        config_name="rft_swe",
+        trainer_overrides=(),
+    )
+    assert resolved_default == 256
+
+    resolved_override = resolve_data_max_length(
+        config_dir=config_dir,
+        config_name="rft_swe",
+        trainer_overrides=("+data.max_length=128",),
+    )
+    assert resolved_override == 128
+
+
+def test_filter_selected_rows_by_token_length_drops_overlength_rows() -> None:
+    class _FakeTokenizer:
+        def apply_chat_template(
+            self,
+            messages,
+            *,
+            add_generation_prompt: bool = False,
+            tokenize: bool = True,
+            return_dict: bool = True,
+        ):
+            del add_generation_prompt, tokenize
+            token_count = sum(len(str(message.get("content", ""))) for message in messages)
+            input_ids = list(range(token_count))
+            if return_dict:
+                return {"input_ids": input_ids}
+            return input_ids
+
+    selected_rows = [
+        {
+            "task_id": "task-short",
+            "prompt": "Fix bug",
+            "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"ok"}}</tool_call>',
+        },
+        {
+            "task_id": "task-long",
+            "prompt": "Fix bug",
+            "assistant_response": "x" * 500,
+        },
+    ]
+
+    kept_rows, dropped_count = filter_selected_rows_by_token_length(
+        selected_rows=selected_rows,
+        tokenizer=_FakeTokenizer(),
+        max_sequence_length=200,
+    )
+
+    assert dropped_count == 1
+    assert len(kept_rows) == 1
+    assert kept_rows[0]["task_id"] == "task-short"
+
+
+def test_filter_selected_rows_by_token_length_requires_chat_template_tokenizer() -> None:
+    with pytest.raises(ValueError, match="apply_chat_template"):
+        filter_selected_rows_by_token_length(
+            selected_rows=[
+                {
+                    "task_id": "task-1",
+                    "prompt": "Fix bug",
+                    "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"ok"}}</tool_call>',
+                }
+            ],
+            tokenizer=object(),
+            max_sequence_length=128,
+        )
 
 
 def test_reset_step_artifacts_removes_mutable_outputs(tmp_path: Path) -> None:
