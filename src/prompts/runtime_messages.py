@@ -27,6 +27,10 @@ _DEFAULT_SYSTEM_PROMPT_PREFIX = (
     "Inspect code, run tools, apply targeted patches, and validate behavior with tests.\n"
     "Return one assistant turn at a time and follow the tool-output contract exactly.\n"
 )
+_SDPO_ROLLOUT_FOLLOWUP_USER_MESSAGE = (
+    "Return the next assistant turn now. Use bash/search/edit while still working. "
+    "If solved, return one submit tool call with a concise final_response."
+)
 
 
 def _type_label(annotation: Any) -> str:
@@ -177,6 +181,11 @@ def build_assistant_contract_prompt(
 def build_onpolicy_system_prompt() -> str:
     """Build the default system prompt for on-policy runtime rollouts."""
     return _DEFAULT_SYSTEM_PROMPT_PREFIX + build_assistant_contract_prompt()
+
+
+def build_sdpo_rollout_followup_user_message() -> str:
+    """Build the continuation nudge for bridge-loop SDPO rollouts."""
+    return _SDPO_ROLLOUT_FOLLOWUP_USER_MESSAGE
 
 
 def build_onpolicy_initial_user_message(

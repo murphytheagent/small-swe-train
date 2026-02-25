@@ -11,27 +11,17 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from config import on_policy_runtime_defaults
+from config import on_policy_runtime_defaults, resolve_on_policy_settings
 from env.container_pool import BatchContainerPool, ContainerHandle
 from env.docker_executor import DockerToolExecutor
 from env.runtime_protocol import EnvironmentStep, ToolRequest
 from env.task_dataset import TaskSample
-from prompts.chat_contract import build_assistant_contract_prompt
+from prompts import build_onpolicy_system_prompt, build_sdpo_rollout_followup_user_message
 from rollout.onpolicy_collector import _build_patch_apply_command
 from verl_integration.env_bridge import run_env_bridge_step
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-_SYSTEM_PROMPT_PREFIX = (
-    "You are an autonomous software engineering agent working in a real repository.\n"
-    "Investigate the codebase, run tools, apply targeted edits, and verify fixes with tests.\n"
-    "Return exactly one assistant turn each time and follow the tool-output contract exactly.\n"
-)
-_ROLLOUT_NUDGE = (
-    "Return the next assistant turn now. Use bash/search/edit while still working. "
-    "If solved, return one submit tool call with a concise final_response."
-)
 
 try:  # pragma: no cover - exercised in train runtime
     from verl.experimental.agent_loop.agent_loop import (
@@ -109,6 +99,16 @@ class BridgeLoopTaskContext:
     patch: str | None
 
 
+@dataclass(frozen=True)
+class BridgeLoopRuntimeConfig:
+    env_pool_size: int
+    tool_timeout_sec: int
+    container_start_timeout_sec: int
+    cleanup_timeout_sec: int
+    attempt_timeout_sec: int
+    max_tool_calls_per_turn: int
+
+
 def build_bridge_task_context(kwargs: Mapping[str, Any]) -> BridgeLoopTaskContext:
     task_id = _require_non_empty_text(kwargs.get("task_id"), "task_id")
     image_name = _require_non_empty_text(kwargs.get("image_name"), "image_name")
@@ -119,6 +119,43 @@ def build_bridge_task_context(kwargs: Mapping[str, Any]) -> BridgeLoopTaskContex
         image_name=image_name,
         prompt_text=prompt_text,
         patch=patch,
+    )
+
+
+def resolve_bridge_loop_runtime_config(
+    *,
+    env_pool_size: int | None = None,
+    tool_timeout_sec: int | None = None,
+    container_start_timeout_sec: int | None = None,
+    cleanup_timeout_sec: int | None = None,
+    attempt_timeout_sec: int | None = None,
+    max_tool_calls_per_turn: int | None = None,
+) -> BridgeLoopRuntimeConfig:
+    on_policy_settings = resolve_on_policy_settings()
+    runtime_defaults = on_policy_settings.runtime
+    policy_defaults = on_policy_runtime_defaults()
+    return BridgeLoopRuntimeConfig(
+        env_pool_size=_coerce_positive_int(env_pool_size, fallback=int(runtime_defaults.env_pool_size)),
+        tool_timeout_sec=_coerce_positive_int(
+            tool_timeout_sec,
+            fallback=int(runtime_defaults.tool_timeout_sec),
+        ),
+        container_start_timeout_sec=_coerce_positive_int(
+            container_start_timeout_sec,
+            fallback=int(runtime_defaults.container_start_timeout_sec),
+        ),
+        cleanup_timeout_sec=_coerce_positive_int(
+            cleanup_timeout_sec,
+            fallback=_coerce_positive_int(policy_defaults.get("cleanup_timeout_sec"), fallback=30),
+        ),
+        attempt_timeout_sec=_coerce_positive_int(
+            attempt_timeout_sec,
+            fallback=int(runtime_defaults.attempt_timeout_sec),
+        ),
+        max_tool_calls_per_turn=_coerce_positive_int(
+            max_tool_calls_per_turn,
+            fallback=int(runtime_defaults.max_tool_calls_per_turn),
+        ),
     )
 
 
@@ -143,7 +180,7 @@ def build_agent_loop_messages(kwargs: Mapping[str, Any]) -> list[dict[str, str]]
     if not parsed_messages:
         raise ValueError("swe_bridge_agent requires at least one prompt message.")
 
-    system_contract = _SYSTEM_PROMPT_PREFIX + build_assistant_contract_prompt()
+    system_contract = build_onpolicy_system_prompt()
     if parsed_messages[0]["role"] == "system":
         parsed_messages[0] = {
             "role": "system",
@@ -153,7 +190,12 @@ def build_agent_loop_messages(kwargs: Mapping[str, Any]) -> list[dict[str, str]]
         parsed_messages.insert(0, {"role": "system", "content": system_contract})
 
     if parsed_messages[-1]["role"] != "user":
-        parsed_messages.append({"role": "user", "content": _ROLLOUT_NUDGE})
+        parsed_messages.append(
+            {
+                "role": "user",
+                "content": build_sdpo_rollout_followup_user_message(),
+            }
+        )
 
     return parsed_messages
 
@@ -219,38 +261,35 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         tokenizer: Any,
         processor: Any,
         *,
-        tool_timeout_sec: int = 60,
-        container_start_timeout_sec: int = 120,
-        cleanup_timeout_sec: int = 30,
-        attempt_timeout_sec: int = 300,
-        max_tool_calls_per_turn: int = 3,
+        tool_timeout_sec: int | None = None,
+        container_start_timeout_sec: int | None = None,
+        cleanup_timeout_sec: int | None = None,
+        attempt_timeout_sec: int | None = None,
+        max_tool_calls_per_turn: int | None = None,
+        env_pool_size: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(trainer_config, server_manager, tokenizer, processor, **kwargs)
         config = trainer_config.config
-        defaults = on_policy_runtime_defaults()
+        runtime_config = resolve_bridge_loop_runtime_config(
+            env_pool_size=env_pool_size,
+            tool_timeout_sec=tool_timeout_sec,
+            container_start_timeout_sec=container_start_timeout_sec,
+            cleanup_timeout_sec=cleanup_timeout_sec,
+            attempt_timeout_sec=attempt_timeout_sec,
+            max_tool_calls_per_turn=max_tool_calls_per_turn,
+        )
 
         self.max_user_turns = int(config.actor_rollout_ref.rollout.multi_turn.max_user_turns)
         self.max_assistant_turns = int(config.actor_rollout_ref.rollout.multi_turn.max_assistant_turns)
         self.prompt_length = int(config.actor_rollout_ref.rollout.prompt_length)
         self.response_length = int(config.actor_rollout_ref.rollout.response_length)
-        self.tool_timeout_sec = _coerce_positive_int(
-            tool_timeout_sec,
-            fallback=_coerce_positive_int(defaults.get("tool_timeout_sec"), fallback=60),
-        )
-        self.container_start_timeout_sec = _coerce_positive_int(
-            container_start_timeout_sec,
-            fallback=_coerce_positive_int(defaults.get("container_start_timeout_sec"), fallback=120),
-        )
-        self.cleanup_timeout_sec = _coerce_positive_int(cleanup_timeout_sec, fallback=30)
-        self.attempt_timeout_sec = _coerce_positive_int(
-            attempt_timeout_sec,
-            fallback=_coerce_positive_int(defaults.get("attempt_timeout_sec"), fallback=300),
-        )
-        self.max_tool_calls_per_turn = _coerce_positive_int(
-            max_tool_calls_per_turn,
-            fallback=_coerce_positive_int(defaults.get("max_tool_calls_per_turn"), fallback=3),
-        )
+        self.env_pool_size = runtime_config.env_pool_size
+        self.tool_timeout_sec = runtime_config.tool_timeout_sec
+        self.container_start_timeout_sec = runtime_config.container_start_timeout_sec
+        self.cleanup_timeout_sec = runtime_config.cleanup_timeout_sec
+        self.attempt_timeout_sec = runtime_config.attempt_timeout_sec
+        self.max_tool_calls_per_turn = runtime_config.max_tool_calls_per_turn
 
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
         messages = build_agent_loop_messages(kwargs)
@@ -288,7 +327,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         final_submit_format_valid = False
 
         pool = BatchContainerPool(
-            env_pool_size=1,
+            env_pool_size=self.env_pool_size,
             container_start_timeout_sec=self.container_start_timeout_sec,
             cleanup_timeout_sec=self.cleanup_timeout_sec,
             name_prefix="sdpo-swe-bridge",

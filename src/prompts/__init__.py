@@ -12,6 +12,7 @@ from .runtime_messages import (
     build_assistant_contract_prompt,
     build_onpolicy_initial_user_message,
     build_onpolicy_system_prompt,
+    build_sdpo_rollout_followup_user_message,
 )
 from .model_delimiters import ModelDelimiters, default_delimiters, load_delimiters
 
@@ -28,6 +29,7 @@ __all__ = [
     "build_assistant_contract_prompt",
     "build_onpolicy_initial_user_message",
     "build_onpolicy_system_prompt",
+    "build_sdpo_rollout_followup_user_message",
     "default_delimiters",
     "load_delimiters",
 ]
