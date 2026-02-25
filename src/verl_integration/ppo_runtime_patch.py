@@ -59,7 +59,7 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
         sum_reward: bool = False,
     ) -> Any:
         original = getattr(type(self), _ORIGINAL_REWARD_ATTR)
-        if not _is_swe_bridge_loop_enabled(self):
+        if not (_is_swe_bridge_loop_enabled(self) or _batch_looks_like_swe_bridge(batch)):
             return original(self, batch, reward_fn=reward_fn, return_dict=return_dict, sum_reward=sum_reward)
 
         batch_tensors = getattr(batch, "batch", {})
@@ -102,7 +102,7 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
         reward_extra_infos_dict: dict[str, list[Any]] | None = None,
     ) -> Any:
         original = getattr(type(self), _ORIGINAL_DISTILL_ATTR)
-        if not _is_swe_bridge_loop_enabled(self):
+        if not (_is_swe_bridge_loop_enabled(self) or _batch_looks_like_swe_bridge(batch)):
             return original(self, batch, reward_tensor, reward_extra_infos_dict)
 
         self_distillation_cfg = _resolve_self_distillation_cfg(self)
@@ -230,6 +230,20 @@ def _is_swe_bridge_loop_enabled(trainer: Any) -> bool:
     agent_cfg = _cfg_get(rollout_cfg, "agent")
     default_agent_loop = _cfg_get(agent_cfg, "default_agent_loop", "")
     return str(default_agent_loop).strip() == "swe_bridge_agent"
+
+
+def _batch_looks_like_swe_bridge(batch: Any) -> bool:
+    non_tensor_batch = getattr(batch, "non_tensor_batch", {}) or {}
+    if not hasattr(non_tensor_batch, "keys"):
+        return False
+    keys = set(non_tensor_batch.keys())
+    swe_keys = {
+        "trajectory_steps",
+        "tool_response_blocks",
+        "loop_exit_reason",
+        "trajectory_tool_validation_errors",
+    }
+    return bool(keys.intersection(swe_keys))
 
 
 def _cfg_get(container: Any, key: str, default: Any = None) -> Any:
