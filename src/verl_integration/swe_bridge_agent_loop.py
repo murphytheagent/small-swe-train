@@ -6,6 +6,7 @@ import asyncio
 import logging
 import numbers
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ from env.task_dataset import TaskSample
 from prompts import build_onpolicy_system_prompt, build_sdpo_rollout_followup_user_message
 from rollout.onpolicy_collector import _build_patch_apply_command
 from verl_integration.env_bridge import run_env_bridge_step
+from verl_integration.submission_verifier import run_submission_verifier
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -112,6 +114,7 @@ class BridgeLoopRuntimeSettings:
     cleanup_timeout_sec: int
     attempt_timeout_sec: int
     max_tool_calls_per_turn: int
+    verifier_timeout_sec: int
 
 
 _FALLBACK_RUNTIME_DEFAULTS: dict[str, int] = {
@@ -121,8 +124,11 @@ _FALLBACK_RUNTIME_DEFAULTS: dict[str, int] = {
     "cleanup_timeout_sec": 30,
     "attempt_timeout_sec": 300,
     "max_tool_calls_per_turn": 3,
+    "verifier_timeout_sec": 600,
 }
 _DEFAULT_LOOP_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs/verl/agent_loops/swe_bridge_agent.yaml"
+_CONTAINER_SLOT_LOCK = threading.Lock()
+_CONTAINER_SLOT_GATES: dict[int, threading.BoundedSemaphore] = {}
 
 
 def _load_runtime_defaults_from_yaml() -> dict[str, int]:
@@ -186,6 +192,7 @@ _DEFAULT_CONTAINER_START_TIMEOUT_SEC = _RUNTIME_DEFAULTS["container_start_timeou
 _DEFAULT_CLEANUP_TIMEOUT_SEC = _RUNTIME_DEFAULTS["cleanup_timeout_sec"]
 _DEFAULT_ATTEMPT_TIMEOUT_SEC = _RUNTIME_DEFAULTS["attempt_timeout_sec"]
 _DEFAULT_MAX_TOOL_CALLS_PER_TURN = _RUNTIME_DEFAULTS["max_tool_calls_per_turn"]
+_DEFAULT_VERIFIER_TIMEOUT_SEC = _RUNTIME_DEFAULTS["verifier_timeout_sec"]
 
 
 def build_bridge_task_context(kwargs: Mapping[str, Any]) -> BridgeLoopTaskContext:
@@ -209,6 +216,7 @@ def resolve_bridge_loop_runtime_config(
     cleanup_timeout_sec: int | None = None,
     attempt_timeout_sec: int | None = None,
     max_tool_calls_per_turn: int | None = None,
+    verifier_timeout_sec: int | None = None,
 ) -> BridgeLoopRuntimeSettings:
     return BridgeLoopRuntimeSettings(
         env_pool_size=_coerce_positive_int(env_pool_size, fallback=_DEFAULT_ENV_POOL_SIZE),
@@ -231,6 +239,10 @@ def resolve_bridge_loop_runtime_config(
         max_tool_calls_per_turn=_coerce_positive_int(
             max_tool_calls_per_turn,
             fallback=_DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+        ),
+        verifier_timeout_sec=_coerce_positive_int(
+            verifier_timeout_sec,
+            fallback=_DEFAULT_VERIFIER_TIMEOUT_SEC,
         ),
     )
 
@@ -343,6 +355,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         attempt_timeout_sec: int | None = None,
         max_tool_calls_per_turn: int | None = None,
         env_pool_size: int | None = None,
+        verifier_timeout_sec: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(trainer_config, server_manager, tokenizer, processor, **kwargs)
@@ -354,6 +367,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             cleanup_timeout_sec=cleanup_timeout_sec,
             attempt_timeout_sec=attempt_timeout_sec,
             max_tool_calls_per_turn=max_tool_calls_per_turn,
+            verifier_timeout_sec=verifier_timeout_sec,
         )
 
         self.max_user_turns = int(config.actor_rollout_ref.rollout.multi_turn.max_user_turns)
@@ -366,6 +380,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         self.cleanup_timeout_sec = runtime_config.cleanup_timeout_sec
         self.attempt_timeout_sec = runtime_config.attempt_timeout_sec
         self.max_tool_calls_per_turn = runtime_config.max_tool_calls_per_turn
+        self.verifier_timeout_sec = runtime_config.verifier_timeout_sec
 
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
         messages = build_agent_loop_messages(kwargs)
@@ -401,9 +416,14 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         validation_errors: list[str] = []
         final_turn_has_submit = False
         final_submit_format_valid = False
+        verification_metadata: dict[str, Any] = {}
 
+        container_slot_gate = _get_container_slot_gate(self.env_pool_size)
+        await asyncio.to_thread(container_slot_gate.acquire)
         pool = BatchContainerPool(
-            env_pool_size=self.env_pool_size,
+            # One loop invocation operates on one task sample; shared slot gating
+            # enforces global env_pool_size concurrency across concurrent loop runs.
+            env_pool_size=1,
             container_start_timeout_sec=self.container_start_timeout_sec,
             cleanup_timeout_sec=self.cleanup_timeout_sec,
             name_prefix="sdpo-swe-bridge",
@@ -500,13 +520,27 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 metrics["tool_calls"] += time.monotonic() - bridge_started
 
                 bridge_step_index += len(bridge_result.steps)
-                trajectory_steps.extend(_serialize_environment_steps(bridge_result.steps))
+                serialized_steps = _serialize_environment_steps(bridge_result.steps)
+                trajectory_steps.extend(serialized_steps)
                 turn_validation_errors = _collect_validation_errors(bridge_result.steps)
                 if turn_validation_errors:
                     validation_errors.extend(turn_validation_errors)
                 if bridge_result.is_terminal:
                     final_turn_has_submit = True
                     final_submit_format_valid = not bool(turn_validation_errors)
+                    final_response_text = _extract_final_submit_text(bridge_result.steps)
+                    verification_metadata = await asyncio.to_thread(
+                        _verify_terminal_submission,
+                        executor,
+                        task_sample,
+                        self.verifier_timeout_sec,
+                        final_submit_format_valid,
+                        final_response_text,
+                    )
+                    if serialized_steps:
+                        metadata = serialized_steps[-1].setdefault("metadata", {})
+                        if isinstance(metadata, dict):
+                            metadata.update(verification_metadata)
 
                 if bridge_result.tool_response_blocks:
                     tool_response_blocks.extend(str(block) for block in bridge_result.tool_response_blocks)
@@ -531,6 +565,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     break
         finally:
             await asyncio.to_thread(pool.release_all)
+            container_slot_gate.release()
 
         logger.info(
             "swe_bridge_agent stop task_id=%s reason=%s assistant_turns=%d user_turns=%d tool_response_blocks=%d",
@@ -573,6 +608,20 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             extra_fields["bridge_error"] = bridge_error
         if timeout_error:
             extra_fields["timeout_error"] = timeout_error
+        if verification_metadata:
+            extra_fields.update(
+                {
+                    "verification_feedback": verification_metadata.get("verification_feedback", ""),
+                    "fail_to_pass_results": verification_metadata.get("fail_to_pass_results", {}),
+                    "pass_to_pass_results": verification_metadata.get("pass_to_pass_results", {}),
+                    "fail_to_pass_verified": verification_metadata.get("fail_to_pass_verified"),
+                    "pass_to_pass_verified": verification_metadata.get("pass_to_pass_verified"),
+                    "verification_missing": verification_metadata.get("verification_missing"),
+                    "verification_error": verification_metadata.get("verification_error", ""),
+                    "submission_final_response": verification_metadata.get("submission_final_response", ""),
+                    "resolved": verification_metadata.get("resolved", False),
+                }
+            )
 
         return AgentLoopOutput(
             prompt_ids=prompt_ids,
@@ -595,6 +644,89 @@ def _build_task_sample(*, task_context: BridgeLoopTaskContext, raw_kwargs: Mappi
         pass_to_pass=raw_kwargs.get("pass_to_pass"),
         raw=dict(raw_kwargs),
     )
+
+
+def _verify_terminal_submission(
+    executor: DockerToolExecutor,
+    task_sample: TaskSample,
+    verifier_timeout_sec: int,
+    final_submit_format_valid: bool,
+    final_response: str,
+) -> dict[str, Any]:
+    if not final_submit_format_valid:
+        return {
+            "submission_final_response": final_response,
+            "fail_to_pass": _coerce_test_targets(task_sample.fail_to_pass),
+            "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
+            "fail_to_pass_results": {},
+            "pass_to_pass_results": {},
+            "fail_to_pass_verified": False,
+            "pass_to_pass_verified": False,
+            "verification_missing": False,
+            "verification_error": "terminal submit failed tool-argument validation",
+            "verification_feedback": "Verifier skipped: terminal submit format was invalid.",
+            "resolved": False,
+        }
+    try:
+        return run_submission_verifier(
+            executor=executor,
+            fail_to_pass=task_sample.fail_to_pass,
+            pass_to_pass=task_sample.pass_to_pass,
+            verifier_timeout_sec=verifier_timeout_sec,
+            final_response=final_response,
+        )
+    except Exception as exc:  # pragma: no cover - defensive runtime fallback
+        return {
+            "submission_final_response": final_response,
+            "fail_to_pass": _coerce_test_targets(task_sample.fail_to_pass),
+            "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
+            "fail_to_pass_results": {},
+            "pass_to_pass_results": {},
+            "fail_to_pass_verified": False,
+            "pass_to_pass_verified": False,
+            "verification_missing": False,
+            "verification_error": f"terminal verifier execution failed: {exc}",
+            "verification_feedback": "",
+            "resolved": False,
+        }
+
+
+def _extract_final_submit_text(steps: Sequence[EnvironmentStep]) -> str:
+    for step in reversed(steps):
+        if step.request.tool != "submit":
+            continue
+        value = step.request.args.get("final_response")
+        if isinstance(value, str):
+            return value
+        if value is None:
+            return ""
+        return str(value)
+    return ""
+
+
+def _coerce_test_targets(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        targets: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                targets.append(text)
+        return targets
+    text = str(value).strip()
+    if not text:
+        return []
+    return [text]
+
+
+def _get_container_slot_gate(env_pool_size: int) -> threading.BoundedSemaphore:
+    with _CONTAINER_SLOT_LOCK:
+        gate = _CONTAINER_SLOT_GATES.get(env_pool_size)
+        if gate is None:
+            gate = threading.BoundedSemaphore(value=env_pool_size)
+            _CONTAINER_SLOT_GATES[env_pool_size] = gate
+        return gate
 
 
 def _extract_prompt_text(kwargs: Mapping[str, Any]) -> str:

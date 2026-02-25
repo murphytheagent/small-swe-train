@@ -1,14 +1,13 @@
-"""Reward-function adapter for step-SDPO style rollout records."""
+"""Reward-function adapter for step-SDPO SWE rollout records."""
 
 from __future__ import annotations
 
 import json
 from typing import Any, Mapping, Sequence
 
-from data.feedback_canonicalizer import build_feedback_packet
+from config import MAX_TOOL_CALLS_PER_TURN
 from metrics.contracts import FormatMetrics, rate
 from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
-from config import MAX_TOOL_CALLS_PER_TURN
 from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME, ActionEnvelope, validate_tool_call
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
@@ -25,33 +24,6 @@ def _parse_response_text(response_text: str, *, max_tool_calls: int) -> ActionEn
 
 def _thinking_delimiters_balanced(response_text: str) -> bool:
     return response_text.count("<think>") == response_text.count("</think>")
-
-
-def _coerce_step_index(value: Any, *, fallback: int) -> int:
-    if value is None:
-        return fallback
-    if isinstance(value, bool):
-        raise ValueError("step_index must be an integer >= 0")
-    if isinstance(value, int):
-        coerced = value
-    elif isinstance(value, float):
-        if not value.is_integer():
-            raise ValueError("step_index must be an integer >= 0")
-        coerced = int(value)
-    elif isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return fallback
-        try:
-            coerced = int(stripped)
-        except ValueError as exc:
-            raise ValueError("step_index must be an integer >= 0") from exc
-    else:
-        raise ValueError("step_index must be an integer >= 0")
-
-    if coerced < 0:
-        raise ValueError("step_index must be an integer >= 0")
-    return coerced
 
 
 def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
@@ -101,19 +73,11 @@ def _coerce_test_name_set(value: Any) -> set[str]:
     if value is None:
         return set()
     if isinstance(value, Mapping):
-        names = []
-        for key in value:
-            text = str(key).strip()
-            if text:
-                names.append(text)
-        return set(names)
+        names = [str(key).strip() for key in value]
+        return {name for name in names if name}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        names = []
-        for item in value:
-            text = str(item).strip()
-            if text:
-                names.append(text)
-        return set(names)
+        names = [str(item).strip() for item in value]
+        return {name for name in names if name}
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:
@@ -127,6 +91,8 @@ def _coerce_test_name_set(value: Any) -> set[str]:
                 return _coerce_test_name_set(parsed)
         if "," in stripped:
             return {chunk.strip() for chunk in stripped.split(",") if chunk.strip()}
+        if "\n" in stripped:
+            return {chunk.strip() for chunk in stripped.splitlines() if chunk.strip()}
         return {stripped}
     return set()
 
@@ -166,9 +132,7 @@ def _resolve_test_group_verification(
     *,
     key_root: str,
 ) -> tuple[set[str], bool | None, bool]:
-    expected_tests = _coerce_test_name_set(
-        _lookup_verification_value(sample, key_root, key_root.upper())
-    )
+    expected_tests = _coerce_test_name_set(_lookup_verification_value(sample, key_root, key_root.upper()))
 
     all_passed_raw = _lookup_verification_value(
         sample,
@@ -249,27 +213,39 @@ def _resolve_verifiable_resolution(sample: Mapping[str, Any]) -> dict[str, Any]:
     if not has_any_signal:
         return {
             "resolved": None,
+            "has_expected_tests": has_expected_tests,
             "fail_to_pass_verified": fail_verified,
             "pass_to_pass_verified": pass_verified,
             "verification_missing": has_expected_tests,
         }
 
-    fail_result = (
-        fail_verified
-        if fail_verified is not None
-        else (False if fail_expected else True)
-    )
-    pass_result = (
-        pass_verified
-        if pass_verified is not None
-        else (False if pass_expected else True)
-    )
+    fail_result = fail_verified if fail_verified is not None else (False if fail_expected else True)
+    pass_result = pass_verified if pass_verified is not None else (False if pass_expected else True)
     return {
         "resolved": bool(fail_result and pass_result),
-        "fail_to_pass_verified": fail_result,
-        "pass_to_pass_verified": pass_result,
+        "has_expected_tests": has_expected_tests,
+        "fail_to_pass_verified": bool(fail_result),
+        "pass_to_pass_verified": bool(pass_result),
         "verification_missing": False,
     }
+
+
+def _verification_feedback(sample: Mapping[str, Any], *, verification: Mapping[str, Any]) -> str:
+    explicit_feedback = _lookup_verification_value(sample, "verification_feedback", "reward_feedback", "feedback")
+    if isinstance(explicit_feedback, str) and explicit_feedback.strip():
+        return explicit_feedback.strip()
+    if bool(verification.get("resolved", False)):
+        return "Verifier: all FAIL_TO_PASS and PASS_TO_PASS tests passed."
+
+    fail_verified = verification.get("fail_to_pass_verified")
+    pass_verified = verification.get("pass_to_pass_verified")
+    lines: list[str] = [
+        f"Verifier resolution: fail_to_pass={bool(fail_verified)} pass_to_pass={bool(pass_verified)}"
+    ]
+    verification_error = _lookup_verification_value(sample, "verification_error")
+    if isinstance(verification_error, str) and verification_error.strip():
+        lines.append(f"Verifier error: {verification_error.strip()}")
+    return "\n".join(lines)
 
 
 def reward_fn(
@@ -277,13 +253,7 @@ def reward_fn(
     *,
     max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
 ) -> tuple[list[float], dict[str, list[Any]]]:
-    """Compute per-sample binary rewards and rollout diagnostics.
-
-    Expected sample keys:
-    - ``response_text`` (or alias ``assistant_response``): assistant output text
-    - ``resolved``: bool-like outcome flag from external evaluator
-    - ``tool_output``: optional mapping for canonicalized feedback extraction
-    """
+    """Compute binary rewards from verifiable test outcomes plus terminal submit."""
     rewards: list[float] = []
     feedback: list[str] = []
 
@@ -297,27 +267,15 @@ def reward_fn(
     think_balance_flags: list[bool] = []
     validation_errors: list[list[str]] = []
     resolved_sources: list[str] = []
-    fail_to_pass_verified: list[bool | None] = []
-    pass_to_pass_verified: list[bool | None] = []
+    fail_to_pass_verified: list[bool] = []
+    pass_to_pass_verified: list[bool] = []
     reward_verification_missing: list[bool] = []
+    terminal_submit_content: list[str] = []
 
     step_index_warnings: list[str] = []
 
-    for index, sample in enumerate(data):
+    for sample in data:
         response_text = str(sample.get("response_text") or sample.get("assistant_response") or "")
-        resolved_from_flag = _coerce_bool_flag(sample.get("resolved"), fallback=False)
-        verification = _resolve_verifiable_resolution(sample)
-        resolved_from_verification = _coerce_optional_bool_flag(verification.get("resolved"))
-        if resolved_from_verification is None:
-            resolved = resolved_from_flag
-            resolved_sources.append("resolved_flag")
-        else:
-            resolved = resolved_from_verification
-            resolved_sources.append("verifiable_tests")
-        fail_to_pass_verified.append(bool(_coerce_optional_bool_flag(verification.get("fail_to_pass_verified"))))
-        pass_to_pass_verified.append(bool(_coerce_optional_bool_flag(verification.get("pass_to_pass_verified"))))
-        reward_verification_missing.append(bool(verification.get("verification_missing", False)))
-
         sample_errors: list[str] = []
         parse_valid = True
         tool_presence = False
@@ -326,6 +284,7 @@ def reward_fn(
         allowed_tools_ok = False
         required_args_ok = False
         terminal_submission_ok = False
+        final_submit_text = ""
         envelope: ActionEnvelope | None = None
 
         try:
@@ -338,27 +297,46 @@ def reward_fn(
             tool_calls = envelope.tool_calls
             tool_presence = bool(tool_calls)
             tool_count_valid = 1 <= len(tool_calls) <= max_tool_calls
-            submit_count = sum(1 for call in tool_calls if call.tool == "submit")
+            submit_count = sum(1 for call in tool_calls if call.tool == TERMINAL_TOOL_NAME)
             submit_singleton_ok = submit_count in {0, 1} and not (submit_count == 1 and len(tool_calls) != 1)
 
             call_error_lists = [validate_tool_call(call) for call in tool_calls]
             sample_errors.extend(error for errors in call_error_lists for error in errors)
             allowed_tools_ok = all(call.tool in _ALLOWED_TOOLS_SET for call in tool_calls)
             required_args_ok = all(not errors for errors in call_error_lists)
-            terminal_submission_ok = (
-                len(tool_calls) == 1 and tool_calls[0].tool == TERMINAL_TOOL_NAME
-            )
+            if len(tool_calls) == 1 and tool_calls[0].tool == TERMINAL_TOOL_NAME:
+                terminal_submission_ok = required_args_ok
+                raw_final_response = tool_calls[0].args.get("final_response")
+                if isinstance(raw_final_response, str):
+                    final_submit_text = raw_final_response.strip()
+                elif raw_final_response is None:
+                    final_submit_text = ""
+                else:
+                    final_submit_text = str(raw_final_response).strip()
+                if not final_submit_text:
+                    terminal_submission_ok = False
 
-        step_index_warning = ""
-        try:
-            step_index = _coerce_step_index(sample.get("step_index"), fallback=index)
-        except ValueError as exc:
-            step_index = index
-            step_index_warning = str(exc)
-        step_index_warnings.append(step_index_warning)
+        verification = _resolve_verifiable_resolution(sample)
+        resolved_from_verification = _coerce_optional_bool_flag(verification.get("resolved"))
+        has_expected_tests = bool(verification.get("has_expected_tests", False))
+        if resolved_from_verification is None:
+            if has_expected_tests:
+                resolved = False
+                resolved_sources.append("missing_verifier")
+            else:
+                resolved = _coerce_bool_flag(sample.get("resolved"), fallback=False)
+                resolved_sources.append("resolved_flag_no_tests")
+        else:
+            resolved = bool(resolved_from_verification)
+            resolved_sources.append("verifiable_tests")
 
-        reward_value = 1.0 if resolved and parse_valid and not sample_errors else 0.0
+        fail_to_pass_verified.append(bool(verification.get("fail_to_pass_verified", False)))
+        pass_to_pass_verified.append(bool(verification.get("pass_to_pass_verified", False)))
+        reward_verification_missing.append(bool(verification.get("verification_missing", False)))
+
+        reward_value = 1.0 if terminal_submission_ok and resolved else 0.0
         rewards.append(reward_value)
+        feedback.append(_verification_feedback(sample, verification=verification))
 
         parse_valid_flags.append(parse_valid)
         tool_presence_flags.append(tool_presence)
@@ -369,29 +347,8 @@ def reward_fn(
         terminal_submission_flags.append(terminal_submission_ok)
         think_balance_flags.append(_thinking_delimiters_balanced(response_text))
         validation_errors.append(sample_errors)
-
-        tool_output = sample.get("tool_output")
-        if sample_errors:
-            feedback.append("; ".join(sample_errors))
-        elif isinstance(tool_output, Mapping) and envelope is not None:
-            first_call = envelope.tool_calls[0]
-            packet = build_feedback_packet(
-                step_index=step_index,
-                tool=first_call.tool,
-                tool_input=first_call.args,
-                tool_output=tool_output,
-                include_student_attempt_for_teacher=_coerce_bool_flag(
-                    sample.get("include_student_attempt_for_teacher"),
-                    fallback=True,
-                ),
-            )
-            feedback_text = (
-                packet.canonical_feedback.actionable_error_text
-                or packet.canonical_feedback.normalized_text
-            )
-            feedback.append(feedback_text)
-        else:
-            feedback.append("")
+        terminal_submit_content.append(final_submit_text)
+        step_index_warnings.append("")
 
     metrics = FormatMetrics(
         parse_valid_rate=rate(parse_valid_flags),
@@ -417,6 +374,7 @@ def reward_fn(
         "validation_errors": validation_errors,
         "step_index_warnings": step_index_warnings,
         "resolved_source": resolved_sources,
+        "terminal_submit_content": terminal_submit_content,
         "fail_to_pass_verified": fail_to_pass_verified,
         "pass_to_pass_verified": pass_to_pass_verified,
         "reward_verification_missing": reward_verification_missing,

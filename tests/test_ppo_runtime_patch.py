@@ -233,26 +233,43 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
             "prompt_truncated": [False, True],
         }
 
-    def _fake_tokenize_teacher_prompts(
-        *,
-        tokenizer,
-        rows,
-        teacher_prompts,
-        max_reprompt_len,
-        enable_thinking,
-        device,
-    ):
-        _ = tokenizer, rows, teacher_prompts, max_reprompt_len, enable_thinking
-        return {
-            "input_ids": torch.tensor([[10, 11, 0], [20, 21, 22]], dtype=torch.long, device=device),
-            "attention_mask": torch.tensor([[1, 1, 0], [1, 1, 1]], dtype=torch.long, device=device),
-        }
-
     monkeypatch.setattr(runtime_patch, "dataproto_to_rows", _fake_rows)
     monkeypatch.setattr(runtime_patch, "build_self_distillation_batch", _fake_build_self_distillation_batch)
-    monkeypatch.setattr(runtime_patch, "_tokenize_teacher_prompts", _fake_tokenize_teacher_prompts)
 
     trainer = trainer_cls()
+    class _FakeTokenizer:
+        def apply_chat_template(
+            self,
+            messages,
+            *,
+            tokenize,
+            return_tensors,
+            return_dict,
+            continue_final_message,
+            add_generation_prompt,
+            enable_thinking,
+            max_length,
+            padding,
+            truncation,
+        ):
+            _ = (
+                continue_final_message,
+                add_generation_prompt,
+                enable_thinking,
+                max_length,
+                padding,
+                truncation,
+            )
+            assert tokenize is True
+            assert return_tensors == "pt"
+            assert return_dict is True
+            assert len(messages) == 2
+            return {
+                "input_ids": torch.tensor([[10, 11, 0], [20, 21, 22]], dtype=torch.long),
+                "attention_mask": torch.tensor([[1, 1, 0], [1, 1, 1]], dtype=torch.long),
+            }
+
+    trainer.tokenizer = _FakeTokenizer()
     responses = torch.tensor([[1, 2], [3, 4]], dtype=torch.long)
     response_mask = torch.tensor([[1, 1], [1, 0]], dtype=torch.long)
     batch = SimpleNamespace(
@@ -268,9 +285,18 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     distill_batch, metrics = output
     assert captured["resolved"] == [True, False]
     assert list(distill_batch.tensors["self_distillation_mask"].tolist()) == [1.0, 0.0]
-    assert distill_batch.tensors["teacher_input_ids"].shape == (2, 5)
-    assert distill_batch.tensors["teacher_attention_mask"].shape == (2, 5)
-    assert distill_batch.tensors["teacher_position_ids"].shape == (2, 5)
+    assert distill_batch.tensors["teacher_input_ids"].tolist() == [
+        [10, 11, 0, 1, 2],
+        [20, 21, 22, 3, 4],
+    ]
+    assert distill_batch.tensors["teacher_attention_mask"].tolist() == [
+        [1, 1, 0, 1, 1],
+        [1, 1, 1, 1, 0],
+    ]
+    assert distill_batch.tensors["teacher_position_ids"].tolist() == [
+        [0, 1, 1, 2, 3],
+        [0, 1, 2, 3, 3],
+    ]
 
     assert metrics["self_distillation/success_sample_fraction"] == pytest.approx(0.5)
     assert metrics["self_distillation/feedback_available_fraction"] == pytest.approx(0.5)

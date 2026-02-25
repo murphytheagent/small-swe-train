@@ -100,7 +100,22 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
             ),
         }
 
-        for key in ("fail_to_pass", "pass_to_pass", "data_source"):
+        for key in (
+            "fail_to_pass",
+            "pass_to_pass",
+            "data_source",
+            "fail_to_pass_results",
+            "pass_to_pass_results",
+            "fail_to_pass_all_passed",
+            "pass_to_pass_all_passed",
+            "fail_to_pass_verified",
+            "pass_to_pass_verified",
+            "verification_missing",
+            "verification_error",
+            "verification_feedback",
+            "submission_final_response",
+            "resolved",
+        ):
             value = _select_non_tensor(non_tensor_batch, key, index)
             if value is None and key in reward_ground_truth:
                 value = reward_ground_truth.get(key)

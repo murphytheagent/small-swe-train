@@ -131,7 +131,7 @@ def test_run_sdpo_step_uses_reward_fn_metrics() -> None:
     batch = [
         {
             "response_text": (
-                "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"foo\"}}</tool_call>"
+                "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
             ),
             "resolved": True,
         }
@@ -151,7 +151,7 @@ def test_run_end_to_end_global_step_exposes_reprompt_and_ema_artifacts() -> None
         {
             "prompt": "Fix test failure",
             "response_text": (
-                "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"tests/test_math.py::test_add\"}}</tool_call>"
+                "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
             ),
             "resolved": True,
         }
@@ -165,7 +165,7 @@ def test_run_end_to_end_global_step_exposes_reprompt_and_ema_artifacts() -> None
     assert artifacts.teacher_ema_proxy == 0.5
     assert artifacts.loss_history == (0.0,)
     assert artifacts.rollout_tool_response_blocks
-    assert executor.requests[0].tool == "search"
+    assert executor.requests == []
 
 
 def test_evaluate_format_gates_requires_all_thresholds() -> None:

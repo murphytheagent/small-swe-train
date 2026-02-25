@@ -6,6 +6,7 @@ import pytest
 
 from prompts import build_sdpo_rollout_followup_user_message
 from verl_integration.swe_bridge_agent_loop import (
+    _get_container_slot_gate,
     append_response_tokens,
     build_agent_loop_messages,
     build_bridge_task_context,
@@ -28,6 +29,7 @@ def _load_yaml_runtime_defaults() -> dict[str, int]:
         "cleanup_timeout_sec": int(config["cleanup_timeout_sec"]),
         "attempt_timeout_sec": int(config["attempt_timeout_sec"]),
         "max_tool_calls_per_turn": int(config["max_tool_calls_per_turn"]),
+        "verifier_timeout_sec": int(config["verifier_timeout_sec"]),
     }
 
 
@@ -163,6 +165,7 @@ def test_resolve_bridge_loop_runtime_config_uses_yaml_aligned_defaults() -> None
     assert resolved.cleanup_timeout_sec == yaml_defaults["cleanup_timeout_sec"]
     assert resolved.attempt_timeout_sec == yaml_defaults["attempt_timeout_sec"]
     assert resolved.max_tool_calls_per_turn == yaml_defaults["max_tool_calls_per_turn"]
+    assert resolved.verifier_timeout_sec == yaml_defaults["verifier_timeout_sec"]
 
 
 def test_resolve_bridge_loop_runtime_config_honors_explicit_overrides() -> None:
@@ -173,6 +176,7 @@ def test_resolve_bridge_loop_runtime_config_honors_explicit_overrides() -> None:
         cleanup_timeout_sec=13,
         attempt_timeout_sec=91,
         max_tool_calls_per_turn=2,
+        verifier_timeout_sec=444,
     )
 
     assert resolved.env_pool_size == 8
@@ -181,3 +185,23 @@ def test_resolve_bridge_loop_runtime_config_honors_explicit_overrides() -> None:
     assert resolved.cleanup_timeout_sec == 13
     assert resolved.attempt_timeout_sec == 91
     assert resolved.max_tool_calls_per_turn == 2
+    assert resolved.verifier_timeout_sec == 444
+
+
+def test_container_slot_gate_reuses_instances_per_pool_size() -> None:
+    gate_a = _get_container_slot_gate(3)
+    gate_b = _get_container_slot_gate(3)
+    gate_c = _get_container_slot_gate(4)
+
+    assert gate_a is gate_b
+    assert gate_a is not gate_c
+
+
+def test_container_slot_gate_enforces_capacity() -> None:
+    gate = _get_container_slot_gate(1)
+    acquired = gate.acquire(blocking=False)
+    assert acquired is True
+    try:
+        assert gate.acquire(blocking=False) is False
+    finally:
+        gate.release()

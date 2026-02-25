@@ -20,7 +20,7 @@ def test_run_step_sdpo_scaffold_script_writes_expected_artifacts(tmp_path: Path)
                 json.dumps(
                     {
                         "prompt": "Fix failing unit test.",
-                        "response_text": '<tool_call>{"tool":"search","args":{"query":"tests/test_math.py::test_add"}}</tool_call>',
+                        "response_text": '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
                         "resolved": True,
                     },
                     ensure_ascii=True,
