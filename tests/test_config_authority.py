@@ -35,6 +35,7 @@ def test_default_training_model_name_is_loaded_from_shared_verl_config() -> None
 def test_phase_transition_gates_defaults_load() -> None:
     gates = config.phase_transition_gates_defaults()
     assert "entry_gate_for_main_sdpo" in gates
+    assert "terminal_submission_rate_min" in gates["entry_gate_for_main_sdpo"]
 
 
 def test_tool_call_bounds_are_valid() -> None:

@@ -137,7 +137,13 @@ class DockerToolExecutor:
 
         resolved_path = path_hint if path_hint else "."
         search_cmd = (
-            'status=0; grep -R -n -F -m "$TOP_K" -- "$QUERY" "$PATH_HINT" || status=$?; '
+            'SEARCH_PATH="$PATH_HINT"; '
+            'if [ -z "$SEARCH_PATH" ]; then SEARCH_PATH="."; fi; '
+            'if [ ! -e "$SEARCH_PATH" ]; then '
+            'printf "search path_hint not found: %s; falling back to .\\n" "$SEARCH_PATH" >&2; '
+            'SEARCH_PATH="."; '
+            "fi; "
+            'status=0; grep -R -n -F -m "$TOP_K" -- "$QUERY" "$SEARCH_PATH" || status=$?; '
             'if [ "$status" -eq 0 ] || [ "$status" -eq 1 ]; then exit 0; fi; exit "$status"'
         )
         docker_cmd = [

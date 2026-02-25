@@ -179,6 +179,7 @@ def test_evaluate_format_gates_requires_all_thresholds() -> None:
             "tool_call_count_valid_rate": 1.0,
             "submit_singleton_rule_rate": 1.0,
             "thinking_delimiter_balance_rate": 1.0,
+            "terminal_submission_rate": 1.0,
         }
     )
 
@@ -191,6 +192,20 @@ def test_evaluate_format_gates_requires_all_thresholds() -> None:
             "tool_call_count_valid_rate": 1.0,
             "submit_singleton_rule_rate": 1.0,
             "thinking_delimiter_balance_rate": 1.0,
+            "terminal_submission_rate": 1.0,
+        }
+    )
+
+    assert not trainer.evaluate_format_gates(
+        {
+            "parse_valid_rate": 1.0,
+            "allowed_tool_rate": 1.0,
+            "required_arg_presence": 1.0,
+            "tool_call_block_presence_rate": 1.0,
+            "tool_call_count_valid_rate": 1.0,
+            "submit_singleton_rule_rate": 1.0,
+            "thinking_delimiter_balance_rate": 1.0,
+            "terminal_submission_rate": 0.5,
         }
     )
 

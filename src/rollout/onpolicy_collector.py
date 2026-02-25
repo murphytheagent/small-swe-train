@@ -242,7 +242,9 @@ class OnPolicyRolloutCollector:
             task_patch_applied = True
 
         for turn_index in range(runtime.max_turns_per_attempt):
-            if executor_error:
+            # Keep rollouts alive after non-zero tool exits so the model can recover
+            # and still emit a terminal submit. Only task-init failures are fatal.
+            if executor_error and not container_init_succeeded:
                 break
 
             elapsed_sec = self._monotonic_clock() - attempt_start
@@ -304,7 +306,7 @@ class OnPolicyRolloutCollector:
                     (step for step in bridge_result.steps if step.response.exit_code != 0),
                     None,
                 )
-                if failing_step is not None:
+                if failing_step is not None and not executor_error:
                     executor_error = failing_step.response.stderr or (
                         f"Tool {failing_step.request.tool!r} failed with exit code {failing_step.response.exit_code}."
                     )

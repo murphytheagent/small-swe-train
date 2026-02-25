@@ -808,3 +808,51 @@ def test_onpolicy_collector_default_turn_generator_produces_resolved_attempt() -
     assert rows[0]["final_turn_has_submit"] is True
     assert rows[0]["final_submit_format_valid"] is True
     assert [request.tool for request in executor.requests] == ["bash"]
+
+
+def test_onpolicy_collector_continues_after_nonzero_tool_exit_until_submit() -> None:
+    pool = _FakePool()
+
+    class _NonZeroSearchExecutor:
+        def __init__(self) -> None:
+            self.requests: list[ToolRequest] = []
+
+        def run(self, request: ToolRequest) -> ToolResponse:
+            self.requests.append(request)
+            if request.tool == "search":
+                return ToolResponse(
+                    stdout="",
+                    stderr="simulated lookup failure",
+                    exit_code=2,
+                )
+            return ToolResponse(stdout=f"ran:{request.tool}", stderr="", exit_code=0)
+
+    executor = _NonZeroSearchExecutor()
+
+    def turn_generator(**kwargs: object) -> str:
+        turn_index = int(kwargs["turn_index"])
+        if turn_index == 0:
+            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+        return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+
+    collector = OnPolicyRolloutCollector(
+        settings=_settings(),
+        turn_generator=turn_generator,
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["is_terminal"] is True
+    assert row["final_turn_has_submit"] is True
+    assert row["final_submit_format_valid"] is True
+    assert row["resolved"] is False
+    assert "executor_error" in row
+    assert "simulated lookup failure" in str(row["executor_error"])
+    assert len(row["trajectory_steps"]) == 1
+    assert row["trajectory_steps"][0]["tool"] == "search"
+    assert [request.tool for request in executor.requests] == ["search"]

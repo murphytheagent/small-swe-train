@@ -188,7 +188,10 @@ def test_docker_executor_search_command_does_not_suppress_errors() -> None:
     script = commands[0][-1]
     assert "2>/dev/null" not in script
     assert "|| true" not in script
-    assert 'status=0; grep -R -n -F -m "$TOP_K"' in script
+    assert 'if [ ! -e "$SEARCH_PATH" ]; then ' in script
+    assert 'search path_hint not found: %s; falling back to .\\n' in script
+    assert 'SEARCH_PATH="."; ' in script
+    assert 'status=0; grep -R -n -F -m "$TOP_K" -- "$QUERY" "$SEARCH_PATH"' in script
     assert 'if [ "$status" -eq 0 ] || [ "$status" -eq 1 ]; then exit 0; fi;' in script
 
 

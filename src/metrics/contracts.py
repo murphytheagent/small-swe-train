@@ -15,6 +15,7 @@ class FormatMetrics:
     thinking_delimiter_balance_rate: float
     allowed_tool_rate: float
     required_arg_presence: float
+    terminal_submission_rate: float
 
 
 def rate(flags: Iterable[bool]) -> float:

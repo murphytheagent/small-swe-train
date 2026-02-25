@@ -172,6 +172,7 @@ class SDPOTrainerScaffold:
             "tool_call_count_valid_rate": 0.98,
             "submit_singleton_rule_rate": 0.995,
             "thinking_delimiter_balance_rate": 0.995,
+            "terminal_submission_rate": 0.98,
         }
         for metric_name, threshold in required.items():
             if rollout_stats.get(metric_name, 0.0) < threshold:
