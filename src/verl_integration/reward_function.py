@@ -314,8 +314,8 @@ def reward_fn(
         else:
             resolved = resolved_from_verification
             resolved_sources.append("verifiable_tests")
-        fail_to_pass_verified.append(_coerce_optional_bool_flag(verification.get("fail_to_pass_verified")))
-        pass_to_pass_verified.append(_coerce_optional_bool_flag(verification.get("pass_to_pass_verified")))
+        fail_to_pass_verified.append(bool(_coerce_optional_bool_flag(verification.get("fail_to_pass_verified"))))
+        pass_to_pass_verified.append(bool(_coerce_optional_bool_flag(verification.get("pass_to_pass_verified"))))
         reward_verification_missing.append(bool(verification.get("verification_missing", False)))
 
         sample_errors: list[str] = []
