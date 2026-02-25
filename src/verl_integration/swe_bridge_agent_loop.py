@@ -105,7 +105,7 @@ class BridgeLoopTaskContext:
 
 
 @dataclass(frozen=True)
-class BridgeLoopRuntimeConfig:
+class BridgeLoopRuntimeSettings:
     env_pool_size: int
     tool_timeout_sec: int
     container_start_timeout_sec: int
@@ -209,8 +209,8 @@ def resolve_bridge_loop_runtime_config(
     cleanup_timeout_sec: int | None = None,
     attempt_timeout_sec: int | None = None,
     max_tool_calls_per_turn: int | None = None,
-) -> BridgeLoopRuntimeConfig:
-    return BridgeLoopRuntimeConfig(
+) -> BridgeLoopRuntimeSettings:
+    return BridgeLoopRuntimeSettings(
         env_pool_size=_coerce_positive_int(env_pool_size, fallback=_DEFAULT_ENV_POOL_SIZE),
         tool_timeout_sec=_coerce_positive_int(
             tool_timeout_sec,
