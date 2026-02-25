@@ -11,7 +11,6 @@ from __future__ import annotations
 import functools
 import json
 import re
-from typing import Iterable
 
 from prompts.model_delimiters import ModelDelimiters, default_delimiters
 from config import MAX_TOOL_CALLS_PER_TURN
@@ -20,20 +19,6 @@ from schemas import ActionEnvelope, ToolCall, make_tool_call
 
 class TurnParseError(ValueError):
     """Raised when assistant-turn payload cannot be parsed safely."""
-
-
-# ------------------------------------------------------------------
-# Internal helper
-# ------------------------------------------------------------------
-
-def _strip_spans(text: str, spans: Iterable[tuple[int, int]]) -> str:
-    cursor = 0
-    chunks: list[str] = []
-    for start, end in spans:
-        chunks.append(text[cursor:start])
-        cursor = end
-    chunks.append(text[cursor:])
-    return "".join(chunks)
 
 
 # ------------------------------------------------------------------
@@ -102,11 +87,9 @@ class TurnParser:
             )
 
         thinking: str | None = None
-        spans_to_strip: list[tuple[int, int]] = []
         if think_matches:
             match = think_matches[0]
             thinking = match.group(1).strip() or None
-            spans_to_strip.append((match.start(), match.end()))
 
         tool_matches = list(self._tool_call_pattern.finditer(payload))
         if not tool_matches:
@@ -120,7 +103,6 @@ class TurnParser:
 
         tool_calls: list[ToolCall] = []
         for match in tool_matches:
-            spans_to_strip.append((match.start(), match.end()))
             raw_json = match.group(1).strip()
             try:
                 payload_obj = json.loads(raw_json)
@@ -131,15 +113,6 @@ class TurnParser:
                     f"Each {d.tool_call_start} payload must decode to a JSON object."
                 )
             tool_calls.append(make_tool_call(payload_obj))
-
-        leftover = _strip_spans(
-            payload, sorted(spans_to_strip, key=lambda span: span[0])
-        )
-        if leftover.strip():
-            raise TurnParseError(
-                "Assistant payload contains text outside "
-                f"{d.think_start}/{d.tool_call_start} blocks."
-            )
 
         try:
             return ActionEnvelope(tool_calls=tuple(tool_calls), thinking=thinking)

@@ -10,18 +10,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, TypedDict, cast, get_type_hints
 
-AllowedTool = Literal["bash", "search", "edit", "submit"]
+AllowedTool = Literal["bash", "search", "apply_patch", "submit"]
 # NOTE: AllowedTool above must remain a Literal for static type narrowing.
 BASH_TOOL_NAME: str = "bash"
 SEARCH_TOOL_NAME: str = "search"
-EDIT_TOOL_NAME: str = "edit"
+APPLY_PATCH_TOOL_NAME: str = "apply_patch"
 TERMINAL_TOOL_NAME: str = "submit"
 LEGACY_TERMINAL_TOOL_ALIAS: str = "answer"
+LEGACY_EDIT_TOOL_ALIAS: str = "edit"
+# Backward-compatibility constant for older imports.
+EDIT_TOOL_NAME: str = APPLY_PATCH_TOOL_NAME
 
 ALLOWED_TOOLS: tuple[str, ...] = (
     BASH_TOOL_NAME,
     SEARCH_TOOL_NAME,
-    EDIT_TOOL_NAME,
+    APPLY_PATCH_TOOL_NAME,
     TERMINAL_TOOL_NAME,
 )
 _ALLOWED_TOOLS = set(ALLOWED_TOOLS)
@@ -38,16 +41,15 @@ class SearchArgs(TypedDict, total=False):
     top_k: int
 
 
-class EditArgs(TypedDict, total=False):
-    path: str
+class ApplyPatchArgs(TypedDict, total=False):
     patch: str
+    path: str
     description: str
 
 
 class SubmitArgs(TypedDict, total=False):
     final_response: str
     changed_paths: list[str]
-    confidence: float
 
 
 class ToolOutput(TypedDict, total=False):
@@ -69,6 +71,14 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     BASH_TOOL_NAME: {
         "source": BashArgs,
         "required": ["command"],
+        "prompt_example": {
+            "tool": BASH_TOOL_NAME,
+            "args": {
+                "command": "python -m pytest -q",
+                "cwd": "/workspace/project",
+                "timeout_sec": 120,
+            },
+        },
         "constraints": {
             "command": {"min_length": 1},
             "cwd": {"min_length": 1},
@@ -78,25 +88,49 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     SEARCH_TOOL_NAME: {
         "source": SearchArgs,
         "required": ["query"],
+        "prompt_example": {
+            "tool": SEARCH_TOOL_NAME,
+            "args": {
+                "query": "load_config",
+                "path_hint": "src",
+                "top_k": 5,
+            },
+        },
         "constraints": {
             "query": {"min_length": 1},
             "top_k": {"minimum": 1, "maximum": 50},
         },
     },
-    EDIT_TOOL_NAME: {
-        "source": EditArgs,
-        "required": ["path", "patch"],
+    APPLY_PATCH_TOOL_NAME: {
+        "source": ApplyPatchArgs,
+        "required": ["patch"],
+        "prompt_example": {
+            "tool": APPLY_PATCH_TOOL_NAME,
+            "args": {
+                "path": "src/app.py",
+                "patch": "@@ -12,1 +12,1 @@\n-return False\n+return True",
+            },
+        },
         "constraints": {
-            "path": {"min_length": 1},
             "patch": {"min_length": 1},
+            "path": {"min_length": 1},
         },
     },
     TERMINAL_TOOL_NAME: {
         "source": SubmitArgs,
         "required": ["final_response"],
+        "prompt_example": {
+            "tool": TERMINAL_TOOL_NAME,
+            "args": {
+                "final_response": "Implemented the fix and verified tests pass.",
+                "changed_paths": [
+                    "src/app.py",
+                    "tests/test_app.py",
+                ],
+            },
+        },
         "constraints": {
             "final_response": {"min_length": 1},
-            "confidence": {"minimum": 0.0, "maximum": 1.0},
         },
     },
 }
@@ -114,6 +148,8 @@ def canonical_tool_name(tool: str) -> AllowedTool:
     normalized = tool.strip().lower()
     if normalized == LEGACY_TERMINAL_TOOL_ALIAS:
         normalized = TERMINAL_TOOL_NAME
+    if normalized == LEGACY_EDIT_TOOL_ALIAS:
+        normalized = APPLY_PATCH_TOOL_NAME
     if normalized not in _ALLOWED_TOOLS:
         raise ValueError(f"Unsupported tool: {tool!r}")
     return cast(AllowedTool, normalized)

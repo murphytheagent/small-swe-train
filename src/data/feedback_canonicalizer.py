@@ -5,8 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
+from config import (
+    resolve_feedback_deterministic_truncation_settings,
+    resolve_feedback_self_containment_signals_enabled,
+)
 from schemas import (
     CanonicalFeedback,
     FeedbackPacket,
@@ -69,6 +73,36 @@ def truncate_head_tail_tokens(
     return " ".join(truncated_tokens), True
 
 
+def truncate_tool_output_payload(
+    tool_output: Mapping[str, Any],
+    *,
+    head_tokens: int = 768,
+    tail_tokens: int = 768,
+) -> tuple[dict[str, Any], bool]:
+    """Apply deterministic truncation to string fields in a tool-output payload."""
+    truncated = False
+
+    def _truncate_value(value: Any) -> Any:
+        nonlocal truncated
+        if isinstance(value, str):
+            text, did_truncate = truncate_head_tail_tokens(
+                value,
+                head_tokens=head_tokens,
+                tail_tokens=tail_tokens,
+            )
+            if did_truncate:
+                truncated = True
+            return text
+        if isinstance(value, Mapping):
+            return {key: _truncate_value(nested) for key, nested in value.items()}
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return [_truncate_value(item) for item in value]
+        return value
+
+    normalized = {key: _truncate_value(value) for key, value in tool_output.items()}
+    return normalized, truncated
+
+
 def extract_artifact_identities(text: str) -> tuple[str, ...]:
     """Extract deterministic artifact identities from canonicalized text."""
     identities: set[str] = set()
@@ -110,15 +144,24 @@ def canonicalize_tool_feedback(
         head_tokens=head_tokens,
         tail_tokens=tail_tokens,
     )
+    include_self_containment_signals = resolve_feedback_self_containment_signals_enabled()
+    if include_self_containment_signals:
+        artifact_identities = extract_artifact_identities(truncated_text)
+        actionable_error_text = extract_actionable_error_text(truncated_text)
+        localization_hints = extract_localization_hints(truncated_text)
+    else:
+        artifact_identities = ()
+        actionable_error_text = None
+        localization_hints = ()
 
     return CanonicalFeedback(
         normalization_version=normalization_version,
         normalized_text=truncated_text,
         truncated=truncated,
         raw_sha256=hashlib.sha256(raw_payload.encode("utf-8")).hexdigest(),
-        artifact_identities=extract_artifact_identities(truncated_text),
-        actionable_error_text=extract_actionable_error_text(truncated_text),
-        localization_hints=extract_localization_hints(truncated_text),
+        artifact_identities=artifact_identities,
+        actionable_error_text=actionable_error_text,
+        localization_hints=localization_hints,
     )
 
 
@@ -129,10 +172,16 @@ def build_feedback_packet(
     tool_input: Mapping[str, Any],
     tool_output: Mapping[str, Any],
     include_student_attempt_for_teacher: bool = True,
-    head_tokens: int = 768,
-    tail_tokens: int = 768,
+    head_tokens: int | None = None,
+    tail_tokens: int | None = None,
 ) -> FeedbackPacket:
     """Build schema-aligned feedback packet with derived diagnostics."""
+    truncation_settings = resolve_feedback_deterministic_truncation_settings()
+    if head_tokens is None:
+        head_tokens = truncation_settings.head_tokens
+    if tail_tokens is None:
+        tail_tokens = truncation_settings.tail_tokens
+
     canonical_feedback = canonicalize_tool_feedback(
         tool_output,
         head_tokens=head_tokens,

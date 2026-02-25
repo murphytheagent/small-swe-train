@@ -23,7 +23,7 @@ def map_external_tool(tool_name: str, *, subcommand: str | None = None) -> str:
         if normalized_subcommand in _STR_REPLACE_VIEW_COMMANDS:
             return "search"
         if normalized_subcommand in _STR_REPLACE_EDIT_COMMANDS:
-            return "edit"
+            return "apply_patch"
         raise ValueError(f"Unsupported str_replace_editor subcommand: {subcommand!r}")
 
     raise ValueError(f"Unsupported external tool: {tool_name!r}")
@@ -46,14 +46,14 @@ def adapt_external_tool_call(tool_name: str, args: Mapping[str, Any]) -> ToolCal
             raise ValueError("search adapter requires a query/path-like source field")
         return ToolCall(tool="search", args={"query": query, "path_hint": args.get("path", "")})
 
-    if canonical_tool == "edit":
+    if canonical_tool == "apply_patch":
         path = args.get("path")
         if not isinstance(path, str) or not path.strip():
-            raise ValueError("edit adapter requires non-empty 'path' field")
+            raise ValueError("apply_patch adapter requires non-empty 'path' field")
         patch = args.get("patch") or args.get("new_str") or args.get("content")
         if not isinstance(patch, str) or not patch.strip():
-            raise ValueError("edit adapter requires patch/new_str/content payload")
-        return ToolCall(tool="edit", args={"path": path, "patch": patch})
+            raise ValueError("apply_patch adapter requires patch/new_str/content payload")
+        return ToolCall(tool="apply_patch", args={"path": path, "patch": patch})
 
     final_response = args.get("final_response") or args.get("answer") or ""
     if not isinstance(final_response, str) or not final_response.strip():

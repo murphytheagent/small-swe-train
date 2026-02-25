@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PARTITION="${FLASH_ATTN_BUILD_PARTITION:-gpu}"
-GRES="${FLASH_ATTN_BUILD_GRES:-gpu:1}"
+GRES="${FLASH_ATTN_BUILD_GRES:-0}"
 CPUS_PER_TASK="${FLASH_ATTN_BUILD_CPUS_PER_TASK:-8}"
 MEMORY="${FLASH_ATTN_BUILD_MEM:-128G}"
 TIME_LIMIT="${FLASH_ATTN_BUILD_TIME:-03:00:00}"
@@ -33,7 +33,6 @@ SBATCH_CMD=(
   sbatch
   --parsable
   --partition "${PARTITION}"
-  --gres "${GRES}"
   --cpus-per-task "${CPUS_PER_TASK}"
   --mem "${MEMORY}"
   --time "${TIME_LIMIT}"
@@ -42,6 +41,10 @@ SBATCH_CMD=(
   --error "${LOG_DIR}/slurm-%j.err"
   --wrap "$(IFS='; '; echo "${WRAP_CMD[*]}")"
 )
+
+if [[ -n "${GRES}" && "${GRES}" != "0" && "${GRES}" != "gpu:0" && "${GRES}" != "none" ]]; then
+  SBATCH_CMD+=(--gres "${GRES}")
+fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   printf '%q ' "${SBATCH_CMD[@]}"

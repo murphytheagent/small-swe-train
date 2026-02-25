@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
+from typing import Mapping
 
 import pytest
 
 import config
-from prompts.chat_contract import build_assistant_contract_prompt
+from prompts.runtime_messages import build_assistant_contract_prompt
 from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME, TOOL_SCHEMAS
 
 
@@ -33,6 +35,7 @@ def test_default_training_model_name_is_loaded_from_shared_verl_config() -> None
 def test_phase_transition_gates_defaults_load() -> None:
     gates = config.phase_transition_gates_defaults()
     assert "entry_gate_for_main_sdpo" in gates
+    assert "terminal_submission_rate_min" in gates["entry_gate_for_main_sdpo"]
 
 
 def test_tool_call_bounds_are_valid() -> None:
@@ -43,7 +46,33 @@ def test_tool_call_bounds_are_valid() -> None:
 def test_prompt_contract_uses_centralized_terminal_tool_default() -> None:
     prompt = build_assistant_contract_prompt()
     assert f"Terminal tool is '{config.TERMINAL_TOOL_NAME}'" in prompt
-    assert "Allowed tools are exactly: bash, search, edit, submit." in prompt
+    assert f"4) Allowed tools: {', '.join(ALLOWED_TOOLS)}." in prompt
+    required_fields: list[str] = []
+    for tool_name in ALLOWED_TOOLS:
+        schema = TOOL_SCHEMAS.get(tool_name)
+        if not isinstance(schema, dict):
+            continue
+        required_raw = schema.get("required")
+        if not isinstance(required_raw, (list, tuple, set)):
+            continue
+        for field_name in required_raw:
+            if isinstance(field_name, str):
+                required_fields.append(f"{tool_name}.{field_name}")
+    required_args_text = ", ".join(required_fields) if required_fields else "-"
+    assert f"5) Required args by tool: {required_args_text}." in prompt
+
+
+def test_prompt_contract_renders_tool_examples_from_tool_schemas() -> None:
+    prompt = build_assistant_contract_prompt()
+    assert "9) Realistic examples (one tool call each):" in prompt
+    for tool_name in ALLOWED_TOOLS:
+        schema = TOOL_SCHEMAS.get(tool_name)
+        if not isinstance(schema, Mapping):
+            continue
+        example_raw = schema.get("prompt_example")
+        if isinstance(example_raw, Mapping):
+            serialized = json.dumps(dict(example_raw), ensure_ascii=True, sort_keys=True)
+            assert f"   - {tool_name}: {serialized}" in prompt
 
 
 def test_prompt_contract_schema_text_is_rendered_from_tool_schemas(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,6 +169,8 @@ def test_rft_runtime_defaults_load_loop_and_vllm_config() -> None:
     assert runtime_defaults["loop"]["task_batch_size"] >= 1
     assert runtime_defaults["loop"]["collector_max_in_flight_tasks"] >= 1
     assert runtime_defaults["loop"]["train_batch_size"] >= 1
+    assert 0.0 <= float(runtime_defaults["loop"]["eval_split_fraction"]) < 1.0
+    assert runtime_defaults["loop"]["eval_min_rows"] >= 1
     assert runtime_defaults["loop"]["checkpoint_keep_last"] >= 1
     assert runtime_defaults["vllm"]["base_url"].startswith("http://")
     assert runtime_defaults["vllm_parallelism"]["default_tensor_parallel_size"] == 2
@@ -163,7 +194,7 @@ def test_resolve_rft_handoff_settings_loads_selection_policy() -> None:
     assert settings.max_sequence_length >= 2
     assert settings.pad_token_id >= 0
     assert settings.selection.require_format_valid is True
-    assert settings.selection.require_terminal is True
+    assert settings.selection.require_terminal is False
     assert settings.selection.require_resolved is False
     assert settings.selection.require_zero_exit_code is False
     assert settings.selection.reject_on_collector_error is False

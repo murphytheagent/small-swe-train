@@ -74,7 +74,7 @@ def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topo
     fake_python = _write_python_defaults_stub(
         tmp_path,
         (
-            "100 8 64 32 1 1 512 2 2 "
+            "100 8 64 32 1 1 512 0.1 1 2 2 "
             "http://127.0.0.1:8000/v1 "
             "Qwen/Qwen3-4B-Instruct-2507 90 1024 0.0 1.0 8 12288 "
             "lora q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
@@ -98,7 +98,7 @@ def test_run_rft_script_dry_run_defaults_nproc_to_detected_gpu_count(
     fake_python = _write_python_defaults_stub(
         tmp_path,
         (
-            "100 8 64 32 1 1 512 2 4 "
+            "100 8 64 32 1 1 512 0.1 1 2 4 "
             "http://127.0.0.1:8000/v1 "
             "Qwen/Qwen3-4B-Instruct-2507 90 1024 0.0 1.0 8 12288 "
             "lora q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
@@ -280,7 +280,7 @@ def test_run_rft_onpolicy_rollout_proof_script_honors_explicit_batch_overrides()
 def test_run_flash_attn_rebuild_script_dry_run_uses_safe_defaults() -> None:
     result = _run_script("run_flash_attn_rebuild.sh")
     assert "--partition gpu" in result.stdout
-    assert "--gres gpu:1" in result.stdout
+    assert "--gres" not in result.stdout
     assert "--cpus-per-task 8" in result.stdout
     assert "--mem 128G" in result.stdout
     assert "rebuild-flash-attn" in result.stdout

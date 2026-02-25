@@ -7,8 +7,10 @@ and validation constraints.  Use ``validate_tool_call()`` to check a parsed
 
 from .contracts import (
     ALLOWED_TOOLS,
+    APPLY_PATCH_TOOL_NAME,
     BASH_TOOL_NAME,
     EDIT_TOOL_NAME,
+    LEGACY_EDIT_TOOL_ALIAS,
     LEGACY_TERMINAL_TOOL_ALIAS,
     SEARCH_TOOL_NAME,
     TERMINAL_TOOL_NAME,
@@ -27,8 +29,10 @@ from .rollout_records import RolloutRow, RolloutRowRequired
 
 __all__ = [
     "ALLOWED_TOOLS",
+    "APPLY_PATCH_TOOL_NAME",
     "BASH_TOOL_NAME",
     "EDIT_TOOL_NAME",
+    "LEGACY_EDIT_TOOL_ALIAS",
     "LEGACY_TERMINAL_TOOL_ALIAS",
     "SEARCH_TOOL_NAME",
     "TERMINAL_TOOL_NAME",

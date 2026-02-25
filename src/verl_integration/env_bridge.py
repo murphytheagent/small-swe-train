@@ -6,10 +6,11 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from config import MAX_TOOL_CALLS_PER_TURN, resolve_feedback_deterministic_truncation_settings
+from data.feedback_canonicalizer import truncate_tool_output_payload
 from env.runtime_protocol import EnvironmentStep, ToolRequest, ToolResponse
 from prompts.model_delimiters import default_delimiters
 from rollout.turn_parser import parse_assistant_turn_payload, parse_chatml_assistant_turn
-from config import MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, ToolCall, validate_tool_call
 
 
@@ -35,15 +36,28 @@ def _parse_assistant_text(assistant_text: str, *, max_tool_calls: int) -> Action
     return parse_assistant_turn_payload(stripped, max_tool_calls=max_tool_calls)
 
 
-def _format_tool_response_block(response: ToolResponse) -> str:
-    delimiters = default_delimiters()
-    payload = {
+def build_tool_response_payload(response: ToolResponse) -> dict[str, Any]:
+    """Build deterministic serialized payload for environment tool responses."""
+    payload: dict[str, Any] = {
         "stdout": response.stdout,
         "stderr": response.stderr,
         "exit_code": response.exit_code,
     }
     if response.metadata:
         payload["metadata"] = response.metadata
+
+    truncation_settings = resolve_feedback_deterministic_truncation_settings()
+    truncated_payload, _ = truncate_tool_output_payload(
+        payload,
+        head_tokens=truncation_settings.head_tokens,
+        tail_tokens=truncation_settings.tail_tokens,
+    )
+    return truncated_payload
+
+
+def _format_tool_response_block(response: ToolResponse) -> str:
+    delimiters = default_delimiters()
+    payload = build_tool_response_payload(response)
     serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True)
     return f"{delimiters.tool_response_start}{serialized}{delimiters.tool_response_end}"
 

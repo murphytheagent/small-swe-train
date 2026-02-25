@@ -10,9 +10,9 @@ def test_map_str_replace_editor_view_to_search() -> None:
     assert tool == "search"
 
 
-def test_map_str_replace_editor_edit_commands_to_edit() -> None:
+def test_map_str_replace_editor_edit_commands_to_apply_patch() -> None:
     tool = map_external_tool("str_replace_editor", subcommand="insert")
-    assert tool == "edit"
+    assert tool == "apply_patch"
 
 
 def test_adapt_answer_alias_to_submit() -> None:

@@ -69,6 +69,9 @@ Run the default loop-mode RFT pipeline (collector -> rejection -> parquet handof
 ```bash
 NPROC_PER_NODE=8 WANDB_MODE=offline bash scripts/run_rft.sh
 ```
+By default, loop artifacts now write to a unique run directory:
+`outputs/rft_runtime/<UTC_TIMESTAMP>_job<SLURM_JOB_ID>` (or `_pid<PID>` outside Slurm).
+Set `RFT_OUTPUT_DIR` explicitly if you want a fixed path.
 
 Run the realistic 2-step profile settings used in recent validation:
 ```bash

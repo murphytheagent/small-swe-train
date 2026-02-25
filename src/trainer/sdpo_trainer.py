@@ -10,7 +10,11 @@ from data.tokenization import SupportsOffsetsTokenizer
 from rollout.onpolicy_collector import OnPolicyRolloutCollector
 from trainer.common import SDPOTrainerConfig, TrainingStepStats
 from trainer.rft_trainer import OnPolicyRFTStepArtifacts, RFTTrainerScaffold
-from verl_integration.env_bridge import ToolExecutor, run_env_bridge_step
+from verl_integration.env_bridge import (
+    ToolExecutor,
+    build_tool_response_payload,
+    run_env_bridge_step,
+)
 from verl_integration.reprompt_adapter import build_self_distillation_batch
 from verl_integration.reward_function import reward_fn
 
@@ -116,13 +120,7 @@ class SDPOTrainerScaffold:
                     )
                     tool_blocks = bridge_result.tool_response_blocks
                     if "tool_output" not in row and bridge_result.steps:
-                        first_response = bridge_result.steps[0].response
-                        row["tool_output"] = {
-                            "stdout": first_response.stdout,
-                            "stderr": first_response.stderr,
-                            "exit_code": first_response.exit_code,
-                            "metadata": dict(first_response.metadata),
-                        }
+                        row["tool_output"] = build_tool_response_payload(bridge_result.steps[0].response)
                 except ValueError as exc:
                     row["bridge_error"] = str(exc)
 
@@ -174,6 +172,7 @@ class SDPOTrainerScaffold:
             "tool_call_count_valid_rate": 0.98,
             "submit_singleton_rule_rate": 0.995,
             "thinking_delimiter_balance_rate": 0.995,
+            "terminal_submission_rate": 0.98,
         }
         for metric_name, threshold in required.items():
             if rollout_stats.get(metric_name, 0.0) < threshold:

@@ -9,14 +9,31 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  if command -v python >/dev/null 2>&1; then
+VENV_PYTHON="${PROJECT_ROOT}/.venv/bin/python"
+
+_is_executable_cmd() {
+  local candidate="$1"
+  if [[ "${candidate}" == */* ]]; then
+    [[ -x "${candidate}" ]]
+    return
+  fi
+  command -v "${candidate}" >/dev/null 2>&1
+}
+
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if _is_executable_cmd "${VENV_PYTHON}"; then
+    PYTHON_BIN="${VENV_PYTHON}"
+  elif _is_executable_cmd python3; then
+    PYTHON_BIN="python3"
+  elif _is_executable_cmd python; then
     PYTHON_BIN="python"
   else
-    echo "Neither python3 nor python is available in PATH."
+    echo "No Python interpreter found. Expected ${VENV_PYTHON} or python3/python in PATH."
     exit 1
   fi
+elif ! _is_executable_cmd "${PYTHON_BIN}"; then
+  echo "PYTHON_BIN is not executable: ${PYTHON_BIN}"
+  exit 1
 fi
 
 _detect_available_gpu_count() {
@@ -82,6 +99,7 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   RFT_RUNTIME_MODE="direct" \
   RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE}" \
   WANDB_MODE="${WANDB_MODE}" \
+  PYTHON_BIN="${PYTHON_BIN}" \
   NPROC_PER_NODE="${NPROC_PER_NODE}" "${SCRIPT_DIR}/run_rft.sh" \
     --dry-run \
     model.partial_pretrain="${MODEL_PATH}" \
@@ -111,6 +129,7 @@ SMALL_SWE_RFT_ATTN_IMPL="${RFT_ATTN_IMPLEMENTATION}" \
 RFT_RUNTIME_MODE="direct" \
 RFT_TRAINER_MODULE="${RFT_TRAINER_MODULE}" \
 WANDB_MODE="${WANDB_MODE}" \
+PYTHON_BIN="${PYTHON_BIN}" \
 NPROC_PER_NODE="${NPROC_PER_NODE}" "${SCRIPT_DIR}/run_rft.sh" \
   model.partial_pretrain="${MODEL_PATH}" \
   trainer.total_epochs=1 \

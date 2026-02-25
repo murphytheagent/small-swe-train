@@ -26,7 +26,9 @@ def test_reward_fn_scores_resolved_and_valid_response() -> None:
     assert rewards == [1.0]
     assert info["parse_valid"] == [True]
     assert info["required_arg_presence"] == [True]
+    assert info["terminal_submission"] == [False]
     assert info["format_metrics"][0]["parse_valid_rate"] == 1.0
+    assert info["format_metrics"][0]["terminal_submission_rate"] == 0.0
 
 
 def test_reward_fn_returns_zero_for_invalid_payload() -> None:
@@ -83,3 +85,22 @@ def test_reward_fn_treats_string_false_resolved_as_unresolved() -> None:
     assert rewards == [0.0]
     assert info["parse_valid"] == [True]
     assert info["validation_errors"] == [[]]
+
+
+def test_reward_fn_tracks_terminal_submission_rate() -> None:
+    data = [
+        {
+            "response_text": "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>",
+            "resolved": True,
+        },
+        {
+            "response_text": "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"needle\"}}</tool_call>",
+            "resolved": True,
+        },
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [1.0, 1.0]
+    assert info["terminal_submission"] == [True, False]
+    assert info["format_metrics"][0]["terminal_submission_rate"] == 0.5
