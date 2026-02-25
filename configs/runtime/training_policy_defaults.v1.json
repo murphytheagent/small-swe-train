@@ -86,19 +86,21 @@
       "up_proj",
       "down_proj"
     ],
+    "lora_rank": 16,
+    "lora_alpha": 32,
     "compute_precision": "bf16"
   },
   "on_policy": {
     "enabled": true,
     "rollout_only": true,
-    "max_turns_per_attempt": 16,
+    "max_turns_per_attempt": 8,
     "tool_timeout_sec": 60,
     "container_start_timeout_sec": 120,
     "attempt_timeout_sec": 300,
     "max_tool_calls_per_turn": 3
   },
   "rft_handoff": {
-    "max_sequence_length": 12288,
+    "max_sequence_length": 8192,
     "pad_token_id": 0,
     "selection": {
       "require_terminal": true,
@@ -117,12 +119,12 @@
   },
   "rft_runtime": {
     "loop": {
-      "sft_num_epoch_per_batch": 2,
-      "steps": 10,
-      "samples_per_task": 8,
-      "task_batch_size": 256,
+      "sft_num_epoch_per_batch": 1,
+      "steps": 2,
+      "samples_per_task": 2,
+      "task_batch_size": 128,
       "collector_max_in_flight_tasks": 32,
-      "train_batch_size": 32,
+      "train_batch_size": 8,
       "eval_split_fraction": 0.1,
       "eval_min_rows": 1,
       "checkpoint_keep_last": 1
