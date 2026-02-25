@@ -32,6 +32,41 @@ def _resolved_attn_implementation() -> str | None:
     return normalized
 
 
+def _normalize_dtype_name(value: str) -> str | None:
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    aliases = {
+        "bf16": "bfloat16",
+        "bfloat16": "bfloat16",
+        "fp16": "float16",
+        "float16": "float16",
+        "half": "float16",
+        "fp32": "float32",
+        "float32": "float32",
+    }
+    return aliases.get(normalized)
+
+
+def _resolved_model_dtype():
+    """Resolve the model load dtype used for FlashAttention2 compatibility."""
+    requested = os.environ.get("SMALL_SWE_RFT_MODEL_DTYPE", "").strip()
+    normalized = _normalize_dtype_name(requested) if requested else None
+    try:
+        import torch
+    except Exception:
+        return None
+
+    if normalized is not None:
+        return getattr(torch, normalized)
+
+    # When FlashAttention2 is active and dtype is unspecified, default to AMP-safe
+    # precision instead of float32 to avoid runtime warnings and fallback behavior.
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
 def _coerce_bool_env(name: str, *, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -89,6 +124,15 @@ def _patched_from_pretrained(*args: Any, **kwargs: Any):
             attn_implementation = fallback
     if attn_implementation is not None:
         kwargs["attn_implementation"] = attn_implementation
+    effective_attn_impl = str(kwargs.get("attn_implementation", "")).strip().lower()
+    if (
+        "torch_dtype" not in kwargs
+        and "dtype" not in kwargs
+        and effective_attn_impl in {"", "flash_attention_2"}
+    ):
+        model_dtype = _resolved_model_dtype()
+        if model_dtype is not None:
+            kwargs["torch_dtype"] = model_dtype
     return _ORIGINAL_FROM_PRETRAINED(*args, **kwargs)
 
 

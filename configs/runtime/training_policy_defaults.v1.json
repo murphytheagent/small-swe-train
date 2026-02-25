@@ -56,8 +56,8 @@
   "feedback_processing": {
     "canonicalization_version": "v1",
     "deterministic_truncation": {
-      "head_tokens": 768,
-      "tail_tokens": 768,
+      "head_tokens": 368,
+      "tail_tokens": 368,
       "apply_after_payload_canonicalization": true,
       "apply_before_teacher_prompt_wrapping": true
     },

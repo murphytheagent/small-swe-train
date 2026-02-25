@@ -39,6 +39,9 @@ _VLLM_OPENAI_SERVER_SOURCE = (
 )
 _MICRO_BATCH_SIZE_KEY = "data.micro_batch_size_per_gpu"
 _DATA_MAX_LENGTH_KEY = "data.max_length"
+# Keep periodic saves effectively disabled for inner SFT loops while still
+# allowing the trainer's end-of-run checkpoint export to materialize.
+_INNER_SFT_CHECKPOINT_DISABLED_SAVE_FREQ = 2_147_483_647
 
 
 @dataclass(frozen=True)
@@ -255,11 +258,14 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             selected_count_after_max_length_filter = len(selected_rows)
             selected_count_for_train_raw = 0
             selected_count_for_train = 0
+            selected_count_for_eval_raw = 0
             selected_count_for_eval = 0
             selected_rows_upsampled = 0
+            selected_rows_eval_upsampled = 0
             eval_split_fallback_to_train = False
             resolved_val_parquet_path = train_parquet_path
             effective_train_batch_size: int | None = None
+            effective_eval_batch_size: int | None = None
             trainer_command: list[str] | None = None
             latest_hf_checkpoint: Path | None = None
             pruned_global_step_checkpoints: list[Path] = []
@@ -277,18 +283,26 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                     min_eval_rows=config.eval_min_rows,
                 )
                 selected_count_for_train_raw = len(selected_rows_for_train)
-                selected_count_for_eval = len(selected_rows_for_eval)
+                selected_count_for_eval_raw = len(selected_rows_for_eval)
+                selected_count_for_eval = selected_count_for_eval_raw
                 if selected_count_for_train_raw < 1:
                     trainer_skipped = True
                     skip_reason = "empty_train_split"
 
                 world_size = config.nnodes * config.nproc_per_node
                 if not trainer_skipped:
+                    effective_eval_batch_size = world_size * micro_batch_size_per_gpu
                     selected_count_for_train = write_selected_rows_to_multiturn_parquet(
                         selected_rows_for_train,
                         train_parquet_path,
                     )
                     if selected_rows_for_eval:
+                        selected_rows_for_eval, selected_rows_eval_upsampled = (
+                            upsample_selected_rows_to_batch_multiple(
+                                selected_rows_for_eval,
+                                global_batch_size=effective_eval_batch_size,
+                            )
+                        )
                         selected_count_for_eval = write_selected_rows_to_multiturn_parquet(
                             selected_rows_for_eval,
                             eval_parquet_path,
@@ -341,7 +355,16 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                         _run_command(trainer_command, cwd=config.project_root)
                         trainer_duration_sec = time.monotonic() - trainer_start
 
-                        latest_hf_checkpoint = resolve_latest_hf_checkpoint(trainer_checkpoint_root)
+                        try:
+                            latest_hf_checkpoint = resolve_latest_hf_checkpoint(
+                                trainer_checkpoint_root
+                            )
+                        except FileNotFoundError as exc:
+                            raise RuntimeError(
+                                "Trainer step completed but produced no checkpoint under "
+                                f"{trainer_checkpoint_root}. Outer RFT requires one checkpoint "
+                                "per non-skipped step."
+                            ) from exc
                         pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
                             checkpoint_root=trainer_checkpoint_root,
                             keep_last=config.checkpoint_keep_last,
@@ -373,13 +396,16 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "selected_rows_over_max_length_dropped": selected_rows_over_max_length_dropped,
                 "selected_count_for_train_raw": selected_count_for_train_raw,
                 "selected_count_for_train": selected_count_for_train,
+                "selected_count_for_eval_raw": selected_count_for_eval_raw,
                 "selected_count_for_eval": selected_count_for_eval,
                 "selected_rows_upsampled": selected_rows_upsampled,
+                "selected_rows_eval_upsampled": selected_rows_eval_upsampled,
                 "eval_split_fallback_to_train": eval_split_fallback_to_train,
                 "rejected_count": len(rejected_rows),
                 "trainer_skipped": trainer_skipped,
                 "skip_reason": skip_reason,
                 "effective_train_batch_size": effective_train_batch_size,
+                "effective_eval_batch_size": effective_eval_batch_size,
                 "collector_duration_sec": collect_duration_sec,
                 "trainer_duration_sec": trainer_duration_sec,
                 "step_duration_sec": time.monotonic() - step_start,
@@ -432,6 +458,7 @@ def build_trainer_step_command(
         f"trainer.n_gpus_per_node={nproc_per_node}",
         "trainer.resume_mode=disable",
         f"trainer.default_local_dir={trainer_output_dir}",
+        f"trainer.save_freq={_INNER_SFT_CHECKPOINT_DISABLED_SAVE_FREQ}",
         # Runtime loop only consumes HuggingFace exports for vLLM restarts; keeping
         # checkpoint payloads hf_model-only avoids redundant dense/FSDP artifacts.
         "trainer.checkpoint.save_contents=[hf_model]",
