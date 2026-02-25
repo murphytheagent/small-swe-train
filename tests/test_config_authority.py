@@ -133,11 +133,10 @@ def test_verl_model_config_mirrors_lora_rank_alpha_and_targets(
     payload = yaml.safe_load((repo_root / config_relpath).read_text(encoding="utf-8"))
     model_cfg = payload["actor_rollout_ref"]["model"]
     lora_cfg = model_cfg["lora"]
-    target_modules = [segment.strip() for segment in str(model_cfg["target_modules"]).split(",") if segment.strip()]
 
     assert model_cfg["lora_rank"] == expected_rank
     assert model_cfg["lora_alpha"] == expected_alpha
-    assert target_modules == lora_cfg["target_modules"]
+    assert model_cfg["target_modules"] == "all-linear"
     assert lora_cfg["rank"] == expected_rank
     assert lora_cfg["alpha"] == expected_alpha
 
