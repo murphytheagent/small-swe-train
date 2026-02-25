@@ -99,5 +99,5 @@ def test_reward_fn_returns_zero_for_invalid_payload() -> None:
     assert rewards == [0.0]
     assert info["parse_valid"] == [True]
     assert info["required_arg_presence"] == [False]
-    assert info["validation_errors"][0]
-
+    assert info["validation_errors"] == [True]
+    assert "final_response" in info["validation_error_messages"][0]

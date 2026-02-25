@@ -265,7 +265,8 @@ def reward_fn(
     required_arg_flags: list[bool] = []
     terminal_submission_flags: list[bool] = []
     think_balance_flags: list[bool] = []
-    validation_errors: list[list[str]] = []
+    validation_errors: list[bool] = []
+    validation_error_messages: list[str] = []
     resolved_sources: list[str] = []
     fail_to_pass_verified: list[bool] = []
     pass_to_pass_verified: list[bool] = []
@@ -346,7 +347,8 @@ def reward_fn(
         required_arg_flags.append(required_args_ok)
         terminal_submission_flags.append(terminal_submission_ok)
         think_balance_flags.append(_thinking_delimiters_balanced(response_text))
-        validation_errors.append(sample_errors)
+        validation_errors.append(bool(sample_errors))
+        validation_error_messages.append("; ".join(sample_errors))
         terminal_submit_content.append(final_submit_text)
         step_index_warnings.append("")
 
@@ -372,6 +374,7 @@ def reward_fn(
         "required_arg_presence": required_arg_flags,
         "terminal_submission": terminal_submission_flags,
         "validation_errors": validation_errors,
+        "validation_error_messages": validation_error_messages,
         "step_index_warnings": step_index_warnings,
         "resolved_source": resolved_sources,
         "terminal_submit_content": terminal_submit_content,
