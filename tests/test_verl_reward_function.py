@@ -104,3 +104,45 @@ def test_reward_fn_tracks_terminal_submission_rate() -> None:
     assert rewards == [1.0, 1.0]
     assert info["terminal_submission"] == [True, False]
     assert info["format_metrics"][0]["terminal_submission_rate"] == 0.5
+
+
+def test_reward_fn_prefers_verifiable_fail_pass_signals_when_available() -> None:
+    data = [
+        {
+            "response_text": "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"needle\"}}</tool_call>",
+            "resolved": False,
+            "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+            "tool_output": {
+                "metadata": {
+                    "fail_to_pass_results": {"tests/test_bug.py::test_bugfix": "passed"},
+                    "pass_to_pass_results": {"tests/test_ok.py::test_regression": True},
+                }
+            },
+        }
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [1.0]
+    assert info["resolved_source"] == ["verifiable_tests"]
+    assert info["fail_to_pass_verified"] == [True]
+    assert info["pass_to_pass_verified"] == [True]
+    assert info["reward_verification_missing"] == [False]
+
+
+def test_reward_fn_falls_back_to_resolved_flag_without_verification_signals() -> None:
+    data = [
+        {
+            "response_text": "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"needle\"}}</tool_call>",
+            "resolved": True,
+            "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+        }
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [1.0]
+    assert info["resolved_source"] == ["resolved_flag"]
+    assert info["reward_verification_missing"] == [True]

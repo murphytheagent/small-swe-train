@@ -102,6 +102,8 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
 
         for key in ("fail_to_pass", "pass_to_pass", "data_source"):
             value = _select_non_tensor(non_tensor_batch, key, index)
+            if value is None and key in reward_ground_truth:
+                value = reward_ground_truth.get(key)
             if value is not None:
                 row[key] = value
         rows.append(row)

@@ -35,6 +35,11 @@ actor_rollout_ref:
     trust_remote_code: false
     external_lib: null
     override_config: {}
+    # Mirror LoRA knobs into legacy HFModelConfig fields consumed by verl
+    # workers, so runtime always receives explicit adapter parameters.
+    lora_rank: 64
+    lora_alpha: 128
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     lora:
       enable: true
       rank: 64

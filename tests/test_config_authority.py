@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 import pytest
+import yaml
 
 import config
 from prompts.runtime_messages import build_assistant_contract_prompt
@@ -114,6 +115,30 @@ def test_adaptation_defaults_load_from_central_json() -> None:
         "down_proj",
     ]
     assert adaptation["compute_precision"] == "bf16"
+
+
+@pytest.mark.parametrize(
+    ("config_relpath", "expected_rank", "expected_alpha"),
+    [
+        ("configs/verl/rft_swe.yaml", 16, 32),
+        ("configs/verl/sdpo_swe.yaml", 64, 128),
+    ],
+)
+def test_verl_model_config_mirrors_lora_rank_alpha_and_targets(
+    config_relpath: str,
+    expected_rank: int,
+    expected_alpha: int,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    payload = yaml.safe_load((repo_root / config_relpath).read_text(encoding="utf-8"))
+    model_cfg = payload["actor_rollout_ref"]["model"]
+    lora_cfg = model_cfg["lora"]
+
+    assert model_cfg["lora_rank"] == expected_rank
+    assert model_cfg["lora_alpha"] == expected_alpha
+    assert model_cfg["target_modules"] == lora_cfg["target_modules"]
+    assert lora_cfg["rank"] == expected_rank
+    assert lora_cfg["alpha"] == expected_alpha
 
 
 def test_on_policy_data_defaults_load_from_configs_data() -> None:

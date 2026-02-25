@@ -54,7 +54,13 @@ def test_dataproto_to_rows_extracts_metadata_and_tool_outputs() -> None:
                 [],
             ],
             "reward_model": [
-                {"ground_truth": {"resolved": True}},
+                {
+                    "ground_truth": {
+                        "resolved": True,
+                        "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+                        "pass_to_pass": ["tests/test_ok.py::test_regression"],
+                    }
+                },
                 {"ground_truth": {"resolved": False}},
             ],
             "tool_response_blocks": [["<tool_response>{}</tool_response>"], []],
@@ -70,6 +76,8 @@ def test_dataproto_to_rows_extracts_metadata_and_tool_outputs() -> None:
     assert rows[0]["response_text"] == "11 12 13"
     assert rows[0]["tool_output"]["exit_code"] == 0
     assert rows[0]["resolved"] is True
+    assert rows[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
+    assert rows[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
     assert rows[0]["_response_mask"] == [1, 1, 1]
     assert rows[1]["prompt"] == "Fix task two"
     assert rows[1]["tool_output"] == {}
