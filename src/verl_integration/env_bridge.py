@@ -74,6 +74,19 @@ def _validate_or_build_error_response(call: ToolCall) -> ToolResponse | None:
     )
 
 
+def _build_parse_error_response(error: Exception) -> ToolResponse:
+    message = str(error).strip() or "assistant tool-call payload parsing failed"
+    return ToolResponse(
+        stdout="",
+        stderr=message,
+        exit_code=2,
+        metadata={
+            "parse_error": True,
+            "validation_errors": [message],
+        },
+    )
+
+
 def run_env_bridge_step(
     assistant_text: str,
     *,
@@ -82,7 +95,22 @@ def run_env_bridge_step(
     step_index_start: int = 0,
 ) -> BridgeResult:
     """Parse one assistant turn and execute its non-terminal tool calls in order."""
-    envelope = _parse_assistant_text(assistant_text, max_tool_calls=max_tool_calls)
+    try:
+        envelope = _parse_assistant_text(assistant_text, max_tool_calls=max_tool_calls)
+    except Exception as exc:
+        parse_response = _build_parse_error_response(exc)
+        parse_step = EnvironmentStep(
+            step_index=step_index_start,
+            request=ToolRequest(tool="bash", args={"command": "", "timeout_sec": 0}),
+            response=parse_response,
+            thinking=None,
+        )
+        return BridgeResult(
+            envelope=ActionEnvelope(tool_calls=(ToolCall(tool="bash", args={"command": ""}),), thinking=None),
+            steps=(parse_step,),
+            tool_response_blocks=(_format_tool_response_block(parse_response),),
+            is_terminal=False,
+        )
 
     if envelope.tool_calls[0].tool == "submit":
         submit_call = envelope.tool_calls[0]
@@ -99,7 +127,7 @@ def run_env_bridge_step(
                 envelope=envelope,
                 steps=(step,),
                 tool_response_blocks=(_format_tool_response_block(error_response),),
-                is_terminal=True,
+                is_terminal=False,
             )
         return BridgeResult(
             envelope=envelope,

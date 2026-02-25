@@ -50,10 +50,26 @@ def test_run_env_bridge_step_invalid_submit_surfaces_validation_errors() -> None
 
     result = run_env_bridge_step(assistant_text, executor=executor)
 
-    assert result.is_terminal is True
+    assert result.is_terminal is False
     assert len(result.steps) == 1
     assert result.steps[0].response.exit_code == 2
     assert "final_response" in result.steps[0].response.stderr
+    assert len(result.tool_response_blocks) == 1
+    assert executor.requests == []
+
+
+def test_run_env_bridge_step_parse_error_returns_non_terminal_feedback_block() -> None:
+    executor = FakeExecutor(requests=[])
+    assistant_text = "this is not a valid tool-call payload"
+
+    result = run_env_bridge_step(assistant_text, executor=executor)
+
+    assert result.is_terminal is False
+    assert len(result.steps) == 1
+    assert result.steps[0].request.tool == "bash"
+    assert result.steps[0].response.exit_code == 2
+    assert result.steps[0].response.metadata.get("parse_error") is True
+    assert result.steps[0].response.metadata.get("validation_errors")
     assert len(result.tool_response_blocks) == 1
     assert executor.requests == []
 
