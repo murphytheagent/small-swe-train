@@ -8,6 +8,7 @@ import numbers
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
@@ -21,6 +22,11 @@ from verl_integration.env_bridge import run_env_bridge_step
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - runtime env should include train deps
+    yaml = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - exercised in train runtime
     from verl.experimental.agent_loop.agent_loop import (
@@ -108,12 +114,78 @@ class BridgeLoopRuntimeConfig:
     max_tool_calls_per_turn: int
 
 
-_DEFAULT_ENV_POOL_SIZE = 8
-_DEFAULT_TOOL_TIMEOUT_SEC = 60
-_DEFAULT_CONTAINER_START_TIMEOUT_SEC = 120
-_DEFAULT_CLEANUP_TIMEOUT_SEC = 30
-_DEFAULT_ATTEMPT_TIMEOUT_SEC = 300
-_DEFAULT_MAX_TOOL_CALLS_PER_TURN = 3
+_FALLBACK_RUNTIME_DEFAULTS: dict[str, int] = {
+    "env_pool_size": 8,
+    "tool_timeout_sec": 60,
+    "container_start_timeout_sec": 120,
+    "cleanup_timeout_sec": 30,
+    "attempt_timeout_sec": 300,
+    "max_tool_calls_per_turn": 3,
+}
+_DEFAULT_LOOP_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs/verl/agent_loops/swe_bridge_agent.yaml"
+
+
+def _load_runtime_defaults_from_yaml() -> dict[str, int]:
+    defaults = dict(_FALLBACK_RUNTIME_DEFAULTS)
+
+    def _parse_positive_int(raw_value: Any, *, fallback: int) -> int:
+        if isinstance(raw_value, bool):
+            return fallback
+        if isinstance(raw_value, numbers.Number):
+            candidate = int(raw_value)
+            return candidate if candidate > 0 else fallback
+        if isinstance(raw_value, str):
+            stripped = raw_value.strip()
+            if not stripped:
+                return fallback
+            try:
+                candidate = int(stripped)
+            except ValueError:
+                return fallback
+            return candidate if candidate > 0 else fallback
+        return fallback
+
+    if yaml is None:
+        logger.warning("PyYAML unavailable; using fallback SWE bridge runtime defaults.")
+        return defaults
+    try:
+        parsed = yaml.safe_load(_DEFAULT_LOOP_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover - fallback for non-standard runtime packaging
+        logger.warning(
+            "Failed to read SWE bridge runtime defaults from %s; using fallback defaults: %s",
+            _DEFAULT_LOOP_CONFIG_PATH,
+            exc,
+        )
+        return defaults
+
+    config_entry: Mapping[str, Any] | None = None
+    if isinstance(parsed, Sequence) and not isinstance(parsed, (str, bytes)) and parsed:
+        first_item = parsed[0]
+        if isinstance(first_item, Mapping):
+            config_entry = first_item
+    elif isinstance(parsed, Mapping):
+        config_entry = parsed
+
+    if config_entry is None:
+        logger.warning(
+            "Unexpected swe_bridge_agent config shape in %s; using fallback defaults.",
+            _DEFAULT_LOOP_CONFIG_PATH,
+        )
+        return defaults
+
+    for key, fallback in _FALLBACK_RUNTIME_DEFAULTS.items():
+        value = config_entry.get(key)
+        defaults[key] = _parse_positive_int(value, fallback=fallback)
+    return defaults
+
+
+_RUNTIME_DEFAULTS = _load_runtime_defaults_from_yaml()
+_DEFAULT_ENV_POOL_SIZE = _RUNTIME_DEFAULTS["env_pool_size"]
+_DEFAULT_TOOL_TIMEOUT_SEC = _RUNTIME_DEFAULTS["tool_timeout_sec"]
+_DEFAULT_CONTAINER_START_TIMEOUT_SEC = _RUNTIME_DEFAULTS["container_start_timeout_sec"]
+_DEFAULT_CLEANUP_TIMEOUT_SEC = _RUNTIME_DEFAULTS["cleanup_timeout_sec"]
+_DEFAULT_ATTEMPT_TIMEOUT_SEC = _RUNTIME_DEFAULTS["attempt_timeout_sec"]
+_DEFAULT_MAX_TOOL_CALLS_PER_TURN = _RUNTIME_DEFAULTS["max_tool_calls_per_turn"]
 
 
 def build_bridge_task_context(kwargs: Mapping[str, Any]) -> BridgeLoopTaskContext:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from prompts import build_sdpo_rollout_followup_user_message
@@ -10,6 +12,23 @@ from verl_integration.swe_bridge_agent_loop import (
     build_tool_response_messages,
     resolve_bridge_loop_runtime_config,
 )
+
+yaml = pytest.importorskip("yaml")
+
+
+def _load_yaml_runtime_defaults() -> dict[str, int]:
+    config_path = Path(__file__).resolve().parents[1] / "configs/verl/agent_loops/swe_bridge_agent.yaml"
+    parsed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert isinstance(parsed, list) and parsed and isinstance(parsed[0], dict)
+    config = parsed[0]
+    return {
+        "env_pool_size": int(config["env_pool_size"]),
+        "tool_timeout_sec": int(config["tool_timeout_sec"]),
+        "container_start_timeout_sec": int(config["container_start_timeout_sec"]),
+        "cleanup_timeout_sec": int(config["cleanup_timeout_sec"]),
+        "attempt_timeout_sec": int(config["attempt_timeout_sec"]),
+        "max_tool_calls_per_turn": int(config["max_tool_calls_per_turn"]),
+    }
 
 
 def test_build_bridge_task_context_requires_task_metadata() -> None:
@@ -135,14 +154,15 @@ def test_append_response_tokens_clips_to_available_budget() -> None:
 
 
 def test_resolve_bridge_loop_runtime_config_uses_yaml_aligned_defaults() -> None:
+    yaml_defaults = _load_yaml_runtime_defaults()
     resolved = resolve_bridge_loop_runtime_config()
 
-    assert resolved.env_pool_size == 8
-    assert resolved.tool_timeout_sec == 60
-    assert resolved.container_start_timeout_sec == 120
-    assert resolved.cleanup_timeout_sec == 30
-    assert resolved.attempt_timeout_sec == 300
-    assert resolved.max_tool_calls_per_turn == 3
+    assert resolved.env_pool_size == yaml_defaults["env_pool_size"]
+    assert resolved.tool_timeout_sec == yaml_defaults["tool_timeout_sec"]
+    assert resolved.container_start_timeout_sec == yaml_defaults["container_start_timeout_sec"]
+    assert resolved.cleanup_timeout_sec == yaml_defaults["cleanup_timeout_sec"]
+    assert resolved.attempt_timeout_sec == yaml_defaults["attempt_timeout_sec"]
+    assert resolved.max_tool_calls_per_turn == yaml_defaults["max_tool_calls_per_turn"]
 
 
 def test_resolve_bridge_loop_runtime_config_honors_explicit_overrides() -> None:
