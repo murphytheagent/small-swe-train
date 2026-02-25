@@ -56,8 +56,11 @@ actor_rollout_ref:
     max_num_seqs: 64
     max_num_batched_tokens: 262144
 
+max_model_len: 8192
+
 data:
-  micro_batch_size_per_gpu: 4
+  micro_batch_size_per_gpu: 1
+  max_length: ${max_model_len}
   train_files: /tmp/onpolicy-rft-train.parquet
   val_files: /tmp/onpolicy-rft-val.parquet
   custom_cls:

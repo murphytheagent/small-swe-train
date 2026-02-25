@@ -671,6 +671,177 @@ def test_run_loop_does_not_restart_vllm_after_final_step(
     assert controller.stop_calls == 1
 
 
+def test_run_loop_uses_vllm_compatible_checkpoint_for_followup_steps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_state: dict[str, object] = {
+        "controllers": [],
+        "collect_calls": 0,
+        "trainer_model_paths": [],
+    }
+
+    class _FakeVLLMController:
+        def __init__(self, *, config, log_path: Path) -> None:
+            del config, log_path
+            self.start_calls: list[str] = []
+            self.stop_calls = 0
+            self._active = False
+            controllers = call_state["controllers"]
+            assert isinstance(controllers, list)
+            controllers.append(self)
+
+        def start(self, *, model_path: str) -> None:
+            self.start_calls.append(model_path)
+            self._active = True
+
+        def stop(self) -> None:
+            if self._active:
+                self.stop_calls += 1
+                self._active = False
+
+    def _selected_row(step_index: int) -> dict[str, object]:
+        return {
+            "task_id": f"task-{step_index}",
+            "attempt_index": 0,
+            "step_index": step_index,
+            "turn_index": 0,
+            "resolved": False,
+            "format_valid": True,
+            "final_turn_has_submit": True,
+            "final_submit_format_valid": True,
+            "prompt": "Fix bug",
+            "assistant_response": "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>",
+            "trajectory_history": [
+                "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
+            ],
+        }
+
+    def _fake_load_tokenizer(_model_path: str):
+        return _StubTokenizer()
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        step = call_state["collect_calls"]
+        assert isinstance(step, int)
+        call_state["collect_calls"] = step + 1
+        assert request.start_step_index == step
+        return {"selected_rows": [_selected_row(step)], "rejected_rows": []}
+
+    def _fake_write_selected_rows(_rows, parquet_path: Path):
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        parquet_path.write_text("stub", encoding="utf-8")
+        return 1
+
+    def _fake_build_trainer_step_command(**kwargs):
+        trainer_model_paths = call_state["trainer_model_paths"]
+        assert isinstance(trainer_model_paths, list)
+        trainer_model_paths.append(str(kwargs["model_path"]))
+        trainer_output_dir = Path(kwargs["trainer_output_dir"])
+        return ["fake-trainer", str(trainer_output_dir)]
+
+    def _fake_run_command(command, *, cwd: Path):
+        del cwd
+        trainer_output_dir = Path(command[1])
+        (trainer_output_dir / "global_step_1" / "huggingface").mkdir(parents=True, exist_ok=True)
+
+    def _fake_resolve_latest_hf_checkpoint(checkpoint_root: Path):
+        target = Path(checkpoint_root) / "global_step_1" / "huggingface"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def _fake_materialize_vllm_compatible_checkpoint(*, checkpoint_dir: Path, trainer_overrides):
+        del trainer_overrides
+        merged = Path(checkpoint_dir).parent / "huggingface_vllm_merged"
+        merged.mkdir(parents=True, exist_ok=True)
+        return merged
+
+    monkeypatch.setattr(rft_runtime_loop, "VLLMServerController", _FakeVLLMController)
+    monkeypatch.setattr(rft_runtime_loop, "_load_tokenizer", _fake_load_tokenizer)
+    monkeypatch.setattr(rft_runtime_loop, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "write_selected_rows_to_multiturn_parquet",
+        _fake_write_selected_rows,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "build_trainer_step_command",
+        _fake_build_trainer_step_command,
+    )
+    monkeypatch.setattr(rft_runtime_loop, "_run_command", _fake_run_command)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "resolve_latest_hf_checkpoint",
+        _fake_resolve_latest_hf_checkpoint,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "materialize_vllm_compatible_checkpoint",
+        _fake_materialize_vllm_compatible_checkpoint,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_global_step_checkpoints",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_step_checkpoints",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_step_payloads",
+        lambda **_kwargs: [],
+    )
+
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=2,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=1,
+        train_batch_size=1,
+        output_dir=tmp_path / "runtime",
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=True,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+        eval_split_fraction=0.0,
+    )
+
+    rft_runtime_loop.run_rft_runtime_loop(config)
+
+    trainer_model_paths = call_state["trainer_model_paths"]
+    assert isinstance(trainer_model_paths, list)
+    assert len(trainer_model_paths) == 2
+    assert trainer_model_paths[0] == "Qwen/Qwen3-0.6B"
+    assert trainer_model_paths[1].endswith("huggingface_vllm_merged")
+
+    controllers = call_state["controllers"]
+    assert isinstance(controllers, list)
+    assert len(controllers) == 1
+    controller = controllers[0]
+    assert controller.start_calls[0] == "Qwen/Qwen3-0.6B"
+    assert controller.start_calls[1].endswith("huggingface_vllm_merged")
+
+
 def test_run_loop_upsamples_selected_rows_to_effective_batch_multiple(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1478,3 +1649,48 @@ def test_resolve_vllm_api_key_prefers_small_swe_env(monkeypatch) -> None:
     monkeypatch.setenv("SMALL_SWE_VLLM_API_KEY", "small-swe-value")
 
     assert rft_runtime_loop._resolve_vllm_api_key() == "small-swe-value"
+
+
+def test_load_model_from_config_uses_dtype_when_supported() -> None:
+    captured: dict[str, object] = {}
+
+    class _AutoModel:
+        @staticmethod
+        def from_config(model_config, trust_remote_code=False, **kwargs):
+            del model_config
+            assert trust_remote_code is False
+            captured.update(kwargs)
+            return kwargs
+
+    payload = rft_runtime_loop._load_model_from_config_with_dtype_fallback(
+        auto_model_cls=_AutoModel,
+        model_config=object(),
+        model_kwargs={"dtype": "bfloat16"},
+    )
+
+    assert payload["dtype"] == "bfloat16"
+    assert captured["dtype"] == "bfloat16"
+
+
+def test_load_model_from_config_falls_back_to_torch_dtype_for_legacy_api() -> None:
+    captured: dict[str, object] = {}
+
+    class _AutoModel:
+        @staticmethod
+        def from_config(model_config, trust_remote_code=False, **kwargs):
+            del model_config
+            assert trust_remote_code is False
+            if "dtype" in kwargs:
+                raise TypeError("got an unexpected keyword argument 'dtype'")
+            captured.update(kwargs)
+            return kwargs
+
+    payload = rft_runtime_loop._load_model_from_config_with_dtype_fallback(
+        auto_model_cls=_AutoModel,
+        model_config=object(),
+        model_kwargs={"dtype": "bfloat16"},
+    )
+
+    assert "dtype" not in payload
+    assert payload["torch_dtype"] == "bfloat16"
+    assert captured["torch_dtype"] == "bfloat16"

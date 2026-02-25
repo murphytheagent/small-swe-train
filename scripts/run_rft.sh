@@ -78,6 +78,16 @@ if ! [[ "${NPROC_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 export NPROC_PER_NODE
+if [[ -z "${OMP_NUM_THREADS:-}" ]]; then
+  OMP_NUM_THREADS=1
+  if [[ "${SLURM_CPUS_PER_TASK:-}" =~ ^[1-9][0-9]*$ ]]; then
+    OMP_NUM_THREADS="$(( SLURM_CPUS_PER_TASK / NPROC_PER_NODE ))"
+    if (( OMP_NUM_THREADS < 1 )); then
+      OMP_NUM_THREADS=1
+    fi
+  fi
+  export OMP_NUM_THREADS
+fi
 NNODES="${NNODES:-1}"
 # Grounded defaults:
 # - verl SFT trainer entrypoint: https://github.com/lasgroup/SDPO/blob/main/verl/trainer/fsdp_sft_trainer.py
@@ -255,14 +265,23 @@ for item in target_modules_raw:
     if not isinstance(item, str) or not item.strip():
         raise ValueError("`adaptation.target_modules` must contain non-empty strings.")
     target_modules.append(item.strip())
+lora_rank = _required_positive_int(
+    adaptation.get("lora_rank", 16),
+    label="adaptation.lora_rank",
+)
+lora_alpha = _required_positive_int(
+    adaptation.get("lora_alpha", 32),
+    label="adaptation.lora_alpha",
+)
 
 compute_precision = _required_non_empty_str(
     adaptation.get("compute_precision"),
     label="adaptation.compute_precision",
 ).lower()
-if compute_precision not in {"bf16", "bfloat16", "fp16", "float16"}:
+if compute_precision not in {"bf16", "bfloat16", "fp16", "float16", "fp32", "float32"}:
     raise ValueError(
-        "run_rft.sh supports adaptation.compute_precision in {bf16,bfloat16,fp16,float16}. "
+        "run_rft.sh supports adaptation.compute_precision in "
+        "{bf16,bfloat16,fp16,float16,fp32,float32}. "
         f"Got {compute_precision!r}."
     )
 
@@ -287,13 +306,16 @@ print(
     default_max_turns_per_attempt,
     default_max_sequence_length,
     adaptation_mode,
+    compute_precision,
+    lora_rank,
+    lora_alpha,
     ",".join(target_modules),
 )
 PY
 }
 
 RFT_DEFAULTS="$(_load_rft_runtime_defaults)"
-read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_RFT_EVAL_SPLIT_FRACTION DEFAULT_RFT_EVAL_MIN_ROWS DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT DEFAULT_RFT_MAX_SEQUENCE_LENGTH DEFAULT_ADAPTATION_MODE DEFAULT_LORA_TARGET_MODULES <<<"${RFT_DEFAULTS}"
+read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_RFT_EVAL_SPLIT_FRACTION DEFAULT_RFT_EVAL_MIN_ROWS DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT DEFAULT_RFT_MAX_SEQUENCE_LENGTH DEFAULT_ADAPTATION_MODE DEFAULT_ADAPTATION_COMPUTE_PRECISION DEFAULT_LORA_RANK DEFAULT_LORA_ALPHA DEFAULT_LORA_TARGET_MODULES <<<"${RFT_DEFAULTS}"
 
 RFT_STEPS="${RFT_STEPS:-${DEFAULT_RFT_STEPS}}"
 SAMPLES_PER_TASK="${SAMPLES_PER_TASK:-${DEFAULT_SAMPLES_PER_TASK}}"
@@ -308,6 +330,9 @@ RFT_EVAL_MIN_ROWS="${RFT_EVAL_MIN_ROWS:-${DEFAULT_RFT_EVAL_MIN_ROWS}}"
 RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT="${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT:-${DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT}}"
 RFT_MAX_SEQUENCE_LENGTH="${RFT_MAX_SEQUENCE_LENGTH:-${DEFAULT_RFT_MAX_SEQUENCE_LENGTH}}"
 RFT_ADAPTATION_MODE="${RFT_ADAPTATION_MODE:-${DEFAULT_ADAPTATION_MODE}}"
+RFT_COMPUTE_PRECISION="${RFT_COMPUTE_PRECISION:-${DEFAULT_ADAPTATION_COMPUTE_PRECISION}}"
+RFT_LORA_RANK="${RFT_LORA_RANK:-${DEFAULT_LORA_RANK}}"
+RFT_LORA_ALPHA="${RFT_LORA_ALPHA:-${DEFAULT_LORA_ALPHA}}"
 RFT_LORA_TARGET_MODULES="${RFT_LORA_TARGET_MODULES:-${DEFAULT_LORA_TARGET_MODULES}}"
 RFT_OUTPUT_ROOT="${RFT_OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/rft_runtime}"
 RFT_RUN_TIMESTAMP="${RFT_RUN_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -325,6 +350,30 @@ if [[ "${RFT_ADAPTATION_MODE}" != "lora" ]]; then
   exit 1
 fi
 RFT_LORA_TARGET_MODULES_HYDRA="[${RFT_LORA_TARGET_MODULES}]"
+if ! [[ "${RFT_LORA_RANK}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "RFT_LORA_RANK must be a positive integer (got: ${RFT_LORA_RANK})."
+  exit 1
+fi
+if ! [[ "${RFT_LORA_ALPHA}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "RFT_LORA_ALPHA must be a positive integer (got: ${RFT_LORA_ALPHA})."
+  exit 1
+fi
+RFT_COMPUTE_PRECISION="${RFT_COMPUTE_PRECISION,,}"
+case "${RFT_COMPUTE_PRECISION}" in
+  bf16|bfloat16)
+    RFT_MODEL_DTYPE="bf16"
+    ;;
+  fp16|float16)
+    RFT_MODEL_DTYPE="fp16"
+    ;;
+  fp32|float32)
+    RFT_MODEL_DTYPE="fp32"
+    ;;
+  *)
+    echo "Unsupported RFT_COMPUTE_PRECISION=${RFT_COMPUTE_PRECISION}. Expected bf16/bfloat16, fp16/float16, or fp32/float32."
+    exit 1
+    ;;
+esac
 
 RFT_VLLM_TP_SIZE="${RFT_VLLM_TP_SIZE:-${DEFAULT_VLLM_TP_SIZE}}"
 if [[ -z "${RFT_VLLM_DP_SIZE}" ]]; then
@@ -354,6 +403,7 @@ export SMALL_SWE_VLLM_REQUEST_TIMEOUT_SEC="${SMALL_SWE_VLLM_REQUEST_TIMEOUT_SEC:
 export SMALL_SWE_VLLM_MAX_TOKENS="${SMALL_SWE_VLLM_MAX_TOKENS:-${DEFAULT_VLLM_MAX_TOKENS}}"
 export SMALL_SWE_VLLM_TEMPERATURE="${SMALL_SWE_VLLM_TEMPERATURE:-${DEFAULT_VLLM_TEMPERATURE}}"
 export SMALL_SWE_VLLM_TOP_P="${SMALL_SWE_VLLM_TOP_P:-${DEFAULT_VLLM_TOP_P}}"
+export SMALL_SWE_RFT_MODEL_DTYPE="${SMALL_SWE_RFT_MODEL_DTYPE:-${RFT_MODEL_DTYPE}}"
 export EXPERIMENT="${EXPERIMENT:-${RFT_TASK_NAME}}"
 
 if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
@@ -367,14 +417,19 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
     -m "${RFT_TRAINER_MODULE}"
     --config-name rft_swe
     --config-dir "${CONFIG_DIR}"
-    +max_model_len="${RFT_MAX_SEQUENCE_LENGTH}"
-    data.max_length="${RFT_MAX_SEQUENCE_LENGTH}"
+    max_model_len="${RFT_MAX_SEQUENCE_LENGTH}"
     trainer.total_epochs="${RFT_SFT_NUM_EPOCH_PER_BATCH}"
     trainer.total_training_steps="${RFT_STEPS}"
     data.train_batch_size="${RFT_TRAIN_BATCH_SIZE}"
     actor_rollout_ref.model.path="${RFT_INITIAL_MODEL}"
     model.partial_pretrain="${RFT_INITIAL_MODEL}"
+    model.fsdp_config.model_dtype="${RFT_MODEL_DTYPE}"
+    model.lora_rank="${RFT_LORA_RANK}"
+    model.lora_alpha="${RFT_LORA_ALPHA}"
+    model.target_modules="${RFT_LORA_TARGET_MODULES_HYDRA}"
     actor_rollout_ref.model.lora.enable=true
+    actor_rollout_ref.model.lora.rank="${RFT_LORA_RANK}"
+    actor_rollout_ref.model.lora.alpha="${RFT_LORA_ALPHA}"
     actor_rollout_ref.model.lora.target_modules="${RFT_LORA_TARGET_MODULES_HYDRA}"
     ++data.on_policy.total_steps="${RFT_STEPS}"
     +data.on_policy.runtime_overrides.task_batch_size="${RFT_TASK_BATCH_SIZE}"
@@ -429,10 +484,15 @@ LOOP_CMD=(
   --vllm-ready-timeout-sec "${RFT_VLLM_READY_TIMEOUT_SEC}"
   --vllm-stop-timeout-sec "${RFT_VLLM_STOP_TIMEOUT_SEC}"
   --vllm-extra-args "${RFT_VLLM_EXTRA_ARGS}"
-  --trainer-override "+max_model_len=${RFT_MAX_SEQUENCE_LENGTH}"
-  --trainer-override "data.max_length=${RFT_MAX_SEQUENCE_LENGTH}"
+  --trainer-override "max_model_len=${RFT_MAX_SEQUENCE_LENGTH}"
   --trainer-override "actor_rollout_ref.model.path=${RFT_INITIAL_MODEL}"
+  --trainer-override "model.fsdp_config.model_dtype=${RFT_MODEL_DTYPE}"
+  --trainer-override "model.lora_rank=${RFT_LORA_RANK}"
+  --trainer-override "model.lora_alpha=${RFT_LORA_ALPHA}"
+  --trainer-override "model.target_modules=${RFT_LORA_TARGET_MODULES_HYDRA}"
   --trainer-override "actor_rollout_ref.model.lora.enable=true"
+  --trainer-override "actor_rollout_ref.model.lora.rank=${RFT_LORA_RANK}"
+  --trainer-override "actor_rollout_ref.model.lora.alpha=${RFT_LORA_ALPHA}"
   --trainer-override "actor_rollout_ref.model.lora.target_modules=${RFT_LORA_TARGET_MODULES_HYDRA}"
 )
 

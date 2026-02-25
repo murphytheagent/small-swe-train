@@ -42,6 +42,24 @@ _DATA_MAX_LENGTH_KEY = "data.max_length"
 # Keep periodic saves effectively disabled for inner SFT loops while still
 # allowing the trainer's end-of-run checkpoint export to materialize.
 _INNER_SFT_CHECKPOINT_DISABLED_SAVE_FREQ = 2_147_483_647
+_MAX_MODEL_LEN_KEY = "max_model_len"
+_DEFAULT_LORA_RANK = 16
+_DEFAULT_LORA_ALPHA = 32
+_DEFAULT_LORA_TARGET_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+_MODEL_ARTIFACT_FILE_NAMES = {
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "pytorch_model.bin",
+    "pytorch_model.bin.index.json",
+}
 
 
 @dataclass(frozen=True)
@@ -76,6 +94,13 @@ class RFTLoopConfig:
     collector_max_turns_per_attempt: int | None = None
     eval_split_fraction: float = 0.1
     eval_min_rows: int = 1
+
+
+@dataclass(frozen=True)
+class LoraMergeSpec:
+    rank: int
+    alpha: int
+    target_modules: tuple[str, ...]
 
 
 class VLLMServerController:
@@ -268,6 +293,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             effective_eval_batch_size: int | None = None
             trainer_command: list[str] | None = None
             latest_hf_checkpoint: Path | None = None
+            latest_vllm_checkpoint: Path | None = None
             pruned_global_step_checkpoints: list[Path] = []
             trainer_duration_sec: float | None = None
             trainer_skipped = False
@@ -365,11 +391,15 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                                 f"{trainer_checkpoint_root}. Outer RFT requires one checkpoint "
                                 "per non-skipped step."
                             ) from exc
+                        latest_vllm_checkpoint = materialize_vllm_compatible_checkpoint(
+                            checkpoint_dir=latest_hf_checkpoint,
+                            trainer_overrides=config.trainer_overrides,
+                        )
                         pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
                             checkpoint_root=trainer_checkpoint_root,
                             keep_last=config.checkpoint_keep_last,
                         )
-                        current_model_path = str(latest_hf_checkpoint)
+                        current_model_path = str(latest_vllm_checkpoint)
                         checkpoint_step_dirs.append(step_dir)
 
                         # Restart vLLM only when another collection step remains.
@@ -413,6 +443,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "eval_parquet": str(resolved_val_parquet_path),
                 "trainer_checkpoint_root": str(trainer_checkpoint_root),
                 "latest_hf_checkpoint": str(latest_hf_checkpoint) if latest_hf_checkpoint else None,
+                "latest_vllm_checkpoint": (
+                    str(latest_vllm_checkpoint) if latest_vllm_checkpoint else None
+                ),
                 "trainer_command": trainer_command,
                 "pruned_global_step_checkpoints": [
                     str(path) for path in pruned_global_step_checkpoints
@@ -548,6 +581,324 @@ def resolve_latest_hf_checkpoint(checkpoint_root: str | Path) -> Path:
             f"Checkpoint {latest_step_dir} is missing huggingface export directory."
         )
     return huggingface_dir
+
+
+def materialize_vllm_compatible_checkpoint(
+    *,
+    checkpoint_dir: str | Path,
+    trainer_overrides: Sequence[str],
+) -> Path:
+    """Return a dense checkpoint path that vLLM can load.
+
+    verl+LoRA exports can carry PEFT wrapper keys (`base_model.model.*`), which
+    vLLM rejects for plain model classes. When detected, this function rebuilds
+    and merges the LoRA adapters into a dense HuggingFace checkpoint.
+    """
+    checkpoint_path = Path(checkpoint_dir)
+    if not checkpoint_path.is_dir():
+        return checkpoint_path
+
+    weight_names = _list_checkpoint_weight_names(checkpoint_path)
+    if not _checkpoint_requires_lora_merge(weight_names):
+        return checkpoint_path
+
+    merge_spec = _resolve_lora_merge_spec(
+        trainer_overrides=trainer_overrides,
+        checkpoint_dir=checkpoint_path,
+        checkpoint_weight_names=weight_names,
+    )
+    merged_path = checkpoint_path.parent / "huggingface_vllm_merged"
+    _merge_lora_checkpoint_to_dense(
+        checkpoint_dir=checkpoint_path,
+        merged_dir=merged_path,
+        merge_spec=merge_spec,
+    )
+    return merged_path
+
+
+def _list_checkpoint_weight_names(checkpoint_dir: Path) -> tuple[str, ...]:
+    index_path = checkpoint_dir / "model.safetensors.index.json"
+    if index_path.is_file():
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        weight_map = payload.get("weight_map")
+        if isinstance(weight_map, Mapping):
+            return tuple(str(name) for name in weight_map)
+        return ()
+
+    single_safetensors_path = checkpoint_dir / "model.safetensors"
+    if single_safetensors_path.is_file():
+        try:
+            from safetensors import safe_open
+        except ModuleNotFoundError as exc:  # pragma: no cover - train-only dependency
+            raise RuntimeError(
+                "LoRA checkpoint conversion requires safetensors. "
+                "Install training extras (`pip install -e \".[train]\"`)."
+            ) from exc
+        with safe_open(str(single_safetensors_path), framework="pt", device="cpu") as handle:
+            return tuple(str(name) for name in handle.keys())
+
+    return ()
+
+
+def _checkpoint_requires_lora_merge(weight_names: Sequence[str]) -> bool:
+    has_peft_prefix = any(name.startswith("base_model.model.") for name in weight_names)
+    has_lora_weights = any(".lora_A." in name or ".lora_B." in name for name in weight_names)
+    return has_peft_prefix and has_lora_weights
+
+
+def _resolve_lora_merge_spec(
+    *,
+    trainer_overrides: Sequence[str],
+    checkpoint_dir: Path,
+    checkpoint_weight_names: Sequence[str],
+) -> LoraMergeSpec:
+    inferred_targets = _infer_lora_target_modules_from_weight_names(checkpoint_weight_names)
+    configured_targets = _parse_hydra_list_override(
+        _find_override_value(
+            trainer_overrides,
+            keys=("model.target_modules", "actor_rollout_ref.model.lora.target_modules"),
+        )
+        or ""
+    )
+    target_modules = inferred_targets or configured_targets or _DEFAULT_LORA_TARGET_MODULES
+
+    inferred_rank = _infer_lora_rank_from_checkpoint(checkpoint_dir)
+    configured_rank = _resolve_positive_int_override_value(
+        trainer_overrides,
+        keys=("model.lora_rank", "actor_rollout_ref.model.lora.rank"),
+    )
+    rank = configured_rank or inferred_rank or _DEFAULT_LORA_RANK
+
+    configured_alpha = _resolve_positive_int_override_value(
+        trainer_overrides,
+        keys=("model.lora_alpha", "actor_rollout_ref.model.lora.alpha"),
+    )
+    alpha = configured_alpha or _DEFAULT_LORA_ALPHA
+
+    if rank < 1:
+        raise ValueError(f"Invalid LoRA rank for merge: {rank}")
+    if alpha < 1:
+        raise ValueError(f"Invalid LoRA alpha for merge: {alpha}")
+    if not target_modules:
+        raise ValueError("Unable to resolve LoRA target modules for checkpoint merge.")
+    return LoraMergeSpec(rank=rank, alpha=alpha, target_modules=tuple(target_modules))
+
+
+def _merge_lora_checkpoint_to_dense(
+    *,
+    checkpoint_dir: Path,
+    merged_dir: Path,
+    merge_spec: LoraMergeSpec,
+) -> None:
+    try:
+        import torch
+        from peft import LoraConfig, TaskType, get_peft_model
+        from safetensors.torch import load_file
+        from transformers import AutoConfig, AutoModelForCausalLM
+        from transformers.modeling_utils import load_sharded_checkpoint
+    except ModuleNotFoundError as exc:  # pragma: no cover - train-only dependency
+        raise RuntimeError(
+            "LoRA checkpoint conversion requires train dependencies "
+            "(torch/transformers/peft/safetensors). Install with `pip install -e \".[train]\"`."
+        ) from exc
+
+    if merged_dir.exists():
+        shutil.rmtree(merged_dir)
+    merged_dir.mkdir(parents=True, exist_ok=True)
+
+    model_config = AutoConfig.from_pretrained(str(checkpoint_dir), trust_remote_code=False)
+    model_kwargs: dict[str, Any] = {}
+    resolved_dtype = _resolve_torch_dtype_from_config(model_config=model_config, torch_module=torch)
+    if resolved_dtype is not None:
+        model_kwargs["dtype"] = resolved_dtype
+
+    base_model = _load_model_from_config_with_dtype_fallback(
+        auto_model_cls=AutoModelForCausalLM,
+        model_config=model_config,
+        model_kwargs=model_kwargs,
+    )
+    lora_config = LoraConfig(
+        r=merge_spec.rank,
+        lora_alpha=merge_spec.alpha,
+        target_modules=list(merge_spec.target_modules),
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,
+    )
+    lora_model = get_peft_model(base_model, lora_config)
+
+    index_path = checkpoint_dir / "model.safetensors.index.json"
+    if index_path.is_file():
+        load_sharded_checkpoint(lora_model, str(checkpoint_dir), strict=False)
+    else:
+        safetensors_path = checkpoint_dir / "model.safetensors"
+        if safetensors_path.is_file():
+            state_dict = load_file(str(safetensors_path))
+            lora_model.load_state_dict(state_dict, strict=False)
+        else:
+            bin_path = checkpoint_dir / "pytorch_model.bin"
+            if not bin_path.is_file():
+                raise FileNotFoundError(
+                    f"Unable to find model weights in checkpoint directory: {checkpoint_dir}"
+                )
+            state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
+            lora_model.load_state_dict(state_dict, strict=False)
+
+    with torch.no_grad():
+        merged_model = lora_model.merge_and_unload()
+    merged_model.save_pretrained(merged_dir, safe_serialization=True)
+    _copy_non_model_hf_artifacts(source_dir=checkpoint_dir, destination_dir=merged_dir)
+
+
+def _resolve_torch_dtype_from_config(*, model_config: Any, torch_module: Any) -> Any:
+    raw = getattr(model_config, "torch_dtype", None)
+    if raw is None:
+        raw = getattr(model_config, "dtype", None)
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        normalized = raw.strip().lower().replace("torch.", "")
+        alias_map = {
+            "bf16": "bfloat16",
+            "fp16": "float16",
+            "fp32": "float32",
+        }
+        resolved = alias_map.get(normalized, normalized)
+        return getattr(torch_module, resolved, None)
+    dtype_type = getattr(torch_module, "dtype", None)
+    if dtype_type is not None and isinstance(raw, dtype_type):
+        return raw
+    return None
+
+
+def _load_model_from_config_with_dtype_fallback(
+    *,
+    auto_model_cls: Any,
+    model_config: Any,
+    model_kwargs: Mapping[str, Any],
+) -> Any:
+    kwargs = dict(model_kwargs)
+    try:
+        return auto_model_cls.from_config(model_config, trust_remote_code=False, **kwargs)
+    except TypeError as exc:
+        if "dtype" in kwargs and "torch_dtype" not in kwargs:
+            message = str(exc)
+            if "unexpected keyword argument 'dtype'" in message:
+                fallback_kwargs = dict(kwargs)
+                fallback_kwargs["torch_dtype"] = fallback_kwargs.pop("dtype")
+                return auto_model_cls.from_config(
+                    model_config,
+                    trust_remote_code=False,
+                    **fallback_kwargs,
+                )
+        raise
+
+
+def _copy_non_model_hf_artifacts(*, source_dir: Path, destination_dir: Path) -> None:
+    for path in source_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.name in _MODEL_ARTIFACT_FILE_NAMES:
+            continue
+        if path.name.startswith("model-") and path.name.endswith(".safetensors"):
+            continue
+        shutil.copy2(path, destination_dir / path.name)
+
+
+def _infer_lora_target_modules_from_weight_names(weight_names: Sequence[str]) -> tuple[str, ...]:
+    pattern = re.compile(r"\.([^.]+)\.lora_A\.default\.weight$")
+    modules: set[str] = set()
+    for name in weight_names:
+        match = pattern.search(name)
+        if match is not None:
+            modules.add(match.group(1))
+    return tuple(sorted(modules))
+
+
+def _infer_lora_rank_from_checkpoint(checkpoint_dir: Path) -> int | None:
+    index_path = checkpoint_dir / "model.safetensors.index.json"
+    if index_path.is_file():
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        weight_map = payload.get("weight_map")
+        if isinstance(weight_map, Mapping):
+            lora_a_keys = [
+                str(name)
+                for name in weight_map
+                if str(name).endswith(".lora_A.default.weight")
+            ]
+            if lora_a_keys:
+                first_key = lora_a_keys[0]
+                shard_name = str(weight_map[first_key])
+                shard_path = checkpoint_dir / shard_name
+                if shard_path.is_file():
+                    try:
+                        from safetensors import safe_open
+                    except ModuleNotFoundError:
+                        return None
+                    with safe_open(str(shard_path), framework="pt", device="cpu") as handle:
+                        tensor = handle.get_tensor(first_key)
+                    if getattr(tensor, "ndim", 0) >= 1:
+                        return int(tensor.shape[0])
+        return None
+
+    single_safetensors_path = checkpoint_dir / "model.safetensors"
+    if single_safetensors_path.is_file():
+        try:
+            from safetensors import safe_open
+        except ModuleNotFoundError:
+            return None
+        with safe_open(str(single_safetensors_path), framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                if not str(key).endswith(".lora_A.default.weight"):
+                    continue
+                tensor = handle.get_tensor(str(key))
+                if getattr(tensor, "ndim", 0) >= 1:
+                    return int(tensor.shape[0])
+                break
+    return None
+
+
+def _resolve_positive_int_override_value(
+    overrides: Sequence[str],
+    *,
+    keys: Sequence[str],
+) -> int | None:
+    resolved: int | None = None
+    for key in keys:
+        for override in overrides:
+            parsed = _parse_positive_int_override(override, key=key)
+            if parsed is not None:
+                resolved = parsed
+    return resolved
+
+
+def _find_override_value(overrides: Sequence[str], *, keys: Sequence[str]) -> str | None:
+    resolved: str | None = None
+    for override in overrides:
+        normalized = override.strip()
+        while normalized.startswith("+"):
+            normalized = normalized[1:]
+        if "=" not in normalized:
+            continue
+        raw_key, raw_value = normalized.split("=", 1)
+        if raw_key.strip() in keys:
+            resolved = raw_value.strip()
+    return resolved
+
+
+def _parse_hydra_list_override(raw_value: str) -> tuple[str, ...]:
+    normalized = raw_value.strip()
+    if not normalized:
+        return ()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    if not normalized.strip():
+        return ()
+    items: list[str] = []
+    for item in normalized.split(","):
+        token = item.strip().strip("\"'")
+        if token:
+            items.append(token)
+    return tuple(items)
 
 
 def prune_old_step_checkpoints(*, step_dirs: Sequence[str | Path], keep_last: int) -> list[Path]:
@@ -1019,6 +1370,9 @@ def resolve_data_max_length(
     """Resolve trainer data.max_length with override precedence."""
     resolved = _load_default_data_max_length(config_dir=config_dir, config_name=config_name)
     for override in trainer_overrides:
+        parsed = _parse_positive_int_override(override, key=_MAX_MODEL_LEN_KEY)
+        if parsed is not None:
+            resolved = parsed
         parsed = _parse_positive_int_override(override, key=_DATA_MAX_LENGTH_KEY)
         if parsed is not None:
             resolved = parsed
@@ -1047,9 +1401,21 @@ def _load_default_data_max_length(*, config_dir: Path, config_name: str) -> int:
     if not config_path.is_file():
         return 1024
 
-    pattern = re.compile(r"^\s*max_length\s*:\s*([0-9]+)\s*(?:#.*)?$")
-    for line in config_path.read_text(encoding="utf-8").splitlines():
-        match = pattern.match(line)
+    max_length_pattern = re.compile(r"^\s*max_length\s*:\s*([0-9]+)\s*(?:#.*)?$")
+    top_level_max_model_len_pattern = re.compile(r"^max_model_len\s*:\s*([0-9]+)\s*(?:#.*)?$")
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+
+    for line in lines:
+        match = max_length_pattern.match(line)
+        if match is None:
+            continue
+        value = int(match.group(1))
+        if value >= 1:
+            return value
+        break
+
+    for line in lines:
+        match = top_level_max_model_len_pattern.match(line)
         if match is None:
             continue
         value = int(match.group(1))

@@ -132,8 +132,21 @@ def _patched_from_pretrained(*args: Any, **kwargs: Any):
     ):
         model_dtype = _resolved_model_dtype()
         if model_dtype is not None:
-            kwargs["torch_dtype"] = model_dtype
-    return _ORIGINAL_FROM_PRETRAINED(*args, **kwargs)
+            kwargs["dtype"] = model_dtype
+    return _call_from_pretrained_with_dtype_fallback(*args, **kwargs)
+
+
+def _call_from_pretrained_with_dtype_fallback(*args: Any, **kwargs: Any):
+    try:
+        return _ORIGINAL_FROM_PRETRAINED(*args, **kwargs)
+    except TypeError as exc:
+        if "dtype" in kwargs and "torch_dtype" not in kwargs:
+            message = str(exc)
+            if "unexpected keyword argument 'dtype'" in message:
+                fallback_kwargs = dict(kwargs)
+                fallback_kwargs["torch_dtype"] = fallback_kwargs.pop("dtype")
+                return _ORIGINAL_FROM_PRETRAINED(*args, **fallback_kwargs)
+        raise
 
 
 _ensure_flash_attn_runtime_compatibility()
