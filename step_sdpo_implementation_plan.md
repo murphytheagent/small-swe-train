@@ -348,7 +348,8 @@ Checkpoint must resolve to a valid directory containing model export artifacts.
 - `trainer.total_training_steps=1`
 - `trainer.default_local_dir=<outputs/integration/<run_label>>`
 - rollout prompt dataset path (`data.train_files`)
-- for RL-style e2e acceptance, set offline validation binding to empty (`data.val_files=[]`)
+- config-compatibility validation path (`data.val_files`) should mirror `data.train_files` (no separate offline split)
+- for RL-style e2e acceptance, disable validation rollouts (`trainer.test_freq=0`)
 
 ### 7.3 Canonical Dry-run Example
 
@@ -416,7 +417,8 @@ srun --mem=384G --gres=gpu:8 --cpus-per-task=32 --time=04:00:00 bash -lc '
     trainer.total_training_steps=1 \
     trainer.default_local_dir="${RUN_DIR}" \
     data.train_files=/path/to/train_data \
-    data.val_files=[] \
+    data.val_files=/path/to/train_data \
+    trainer.test_freq=0 \
     2>&1 | tee "${RUN_DIR}/train.log"
 '
 ```

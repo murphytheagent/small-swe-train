@@ -42,11 +42,13 @@ SDPO_TRAINER_MODULE="${SDPO_TRAINER_MODULE:-verl_integration.main_ppo_entry}"
 export SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH="${SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH:-1}"
 SDPO_ROLLOUT_ONLY_E2E="${SDPO_ROLLOUT_ONLY_E2E:-0}"
 
-_has_val_files_override() {
+_has_override_with_prefix() {
+  local prefix="$1"
+  shift
   local arg
   for arg in "$@"; do
     case "${arg}" in
-      data.val_files=*|+data.val_files=*|~data.val_files|\\~data.val_files)
+      "${prefix}"=*|+"${prefix}"=*)
         return 0
         ;;
     esac
@@ -55,9 +57,15 @@ _has_val_files_override() {
 }
 
 ROLLOUT_ONLY_OVERRIDES=()
-if [[ "${SDPO_ROLLOUT_ONLY_E2E}" == "1" ]] && ! _has_val_files_override "$@"; then
-  # RL e2e mode should consume rollout-generated data only.
-  ROLLOUT_ONLY_OVERRIDES+=("data.val_files=[]")
+if [[ "${SDPO_ROLLOUT_ONLY_E2E}" == "1" ]]; then
+  # RL e2e mode should use rollout-generated training data only; disable
+  # validation rollouts while preserving config compatibility.
+  if ! _has_override_with_prefix "trainer.test_freq" "$@"; then
+    ROLLOUT_ONLY_OVERRIDES+=("trainer.test_freq=0")
+  fi
+  if ! _has_override_with_prefix "trainer.val_before_train" "$@"; then
+    ROLLOUT_ONLY_OVERRIDES+=("trainer.val_before_train=false")
+  fi
 fi
 
 CMD=(
