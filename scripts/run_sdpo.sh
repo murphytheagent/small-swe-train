@@ -40,13 +40,37 @@ fi
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 SDPO_TRAINER_MODULE="${SDPO_TRAINER_MODULE:-verl_integration.main_ppo_entry}"
 export SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH="${SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH:-1}"
+SDPO_ROLLOUT_ONLY_E2E="${SDPO_ROLLOUT_ONLY_E2E:-0}"
+
+_has_val_files_override() {
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      data.val_files=*|+data.val_files=*|~data.val_files|\\~data.val_files)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+ROLLOUT_ONLY_OVERRIDES=()
+if [[ "${SDPO_ROLLOUT_ONLY_E2E}" == "1" ]] && ! _has_val_files_override "$@"; then
+  # RL e2e mode should consume rollout-generated data only.
+  ROLLOUT_ONLY_OVERRIDES+=("~data.val_files")
+fi
 
 CMD=(
   "${PYTHON_BIN}" -m "${SDPO_TRAINER_MODULE}"
   --config-name sdpo_swe
   --config-dir "${CONFIG_DIR}"
-  "$@"
 )
+
+if [[ "${#ROLLOUT_ONLY_OVERRIDES[@]}" -gt 0 ]]; then
+  CMD+=("${ROLLOUT_ONLY_OVERRIDES[@]}")
+fi
+
+CMD+=("$@")
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   printf '%q ' "${CMD[@]}"

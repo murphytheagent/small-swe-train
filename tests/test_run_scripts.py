@@ -234,6 +234,24 @@ def test_run_sdpo_script_dry_run_allows_entrypoint_override() -> None:
     assert "-m verl.trainer.main_ppo" in result.stdout
 
 
+def test_run_sdpo_script_dry_run_rollout_only_removes_val_files_by_default() -> None:
+    result = _run_script(
+        "run_sdpo.sh",
+        env_overrides={"SDPO_ROLLOUT_ONLY_E2E": "1"},
+    )
+    assert "~data.val_files" in result.stdout
+
+
+def test_run_sdpo_script_dry_run_rollout_only_respects_explicit_val_override() -> None:
+    result = _run_script(
+        "run_sdpo.sh",
+        "data.val_files=/tmp/explicit-val.parquet",
+        env_overrides={"SDPO_ROLLOUT_ONLY_E2E": "1"},
+    )
+    assert "data.val_files=/tmp/explicit-val.parquet" in result.stdout
+    assert "~data.val_files" not in result.stdout
+
+
 def test_run_rft_onpolicy_rollout_proof_script_sets_onpolicy_overrides() -> None:
     result = _run_script("run_rft_onpolicy_rollout_proof.sh")
     assert "--config-name rft_swe" in result.stdout

@@ -347,7 +347,8 @@ Checkpoint must resolve to a valid directory containing model export artifacts.
 - `actor_rollout_ref.rollout.agent.agent_loop_config_path=<repo>/configs/verl/agent_loops/swe_bridge_agent.yaml`
 - `trainer.total_training_steps=1`
 - `trainer.default_local_dir=<outputs/integration/<run_label>>`
-- run dataset paths (`data.train_files`, `data.val_files`)
+- rollout prompt dataset path (`data.train_files`)
+- for RL-style e2e acceptance, clear offline validation file binding (`~data.val_files`)
 
 ### 7.3 Canonical Dry-run Example
 
@@ -415,7 +416,7 @@ srun --mem=384G --gres=gpu:8 --cpus-per-task=32 --time=04:00:00 bash -lc '
     trainer.total_training_steps=1 \
     trainer.default_local_dir="${RUN_DIR}" \
     data.train_files=/path/to/train_data \
-    data.val_files=/path/to/val_data \
+    ~data.val_files \
     2>&1 | tee "${RUN_DIR}/train.log"
 '
 ```
@@ -449,4 +450,3 @@ This planning PR phase is complete when:
 1. This root guiding plan is tracked and reviewed.
 2. Implementation work follows Sections 5-8 in order.
 3. Runtime coding starts only after collaborator confirms this guiding doc is acceptable.
-
