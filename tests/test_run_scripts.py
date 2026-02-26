@@ -78,6 +78,7 @@ def _write_python_env_probe_stub(tmp_path: Path) -> Path:
         "printf 'TASK=%s\\n' \"${TASK:-}\"\n"
         "printf 'CUDA_VISIBLE_DEVICES=%s\\n' \"${CUDA_VISIBLE_DEVICES:-}\"\n"
         "printf 'ROCR_VISIBLE_DEVICES=%s\\n' \"${ROCR_VISIBLE_DEVICES:-}\"\n"
+        "printf 'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=%s\\n' \"${RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES:-}\"\n"
         "exit 0\n",
         encoding="utf-8",
     )
@@ -306,6 +307,39 @@ def test_run_sdpo_script_defaults_experiment_with_slurm_job_suffix(tmp_path: Pat
 
     assert "EXPERIMENT=small-swe-sdpo_20260226T123456Z_job4242" in result.stdout
     assert "TASK=small-swe-sdpo" in result.stdout
+    assert "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1" in result.stdout
+
+
+def test_run_sdpo_script_allows_disabling_ray_noset_visible_devices(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_env_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_PRELOADED_TASK_PARQUET": str(fake_parquet),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_RAY_FORCE_NOSET_VISIBLE_DEVICES": "0",
+            "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=" in result.stdout
+    assert "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1" not in result.stdout
 
 
 def test_run_sdpo_script_unsets_rocr_visible_devices_when_cuda_visible(tmp_path: Path) -> None:
@@ -339,6 +373,48 @@ def test_run_sdpo_script_unsets_rocr_visible_devices_when_cuda_visible(tmp_path:
     assert "CUDA_VISIBLE_DEVICES=0,1" in result.stdout
     assert "ROCR_VISIBLE_DEVICES=" in result.stdout
     assert "ROCR_VISIBLE_DEVICES=0,1" not in result.stdout
+
+
+def test_run_sdpo_script_dry_run_sets_ray_num_cpus_from_slurm_cpus_per_task() -> None:
+    result = _run_script(
+        "run_sdpo.sh",
+        env_overrides={"SLURM_CPUS_PER_TASK": "64"},
+    )
+    assert "ray_kwargs.ray_init.num_cpus=64" in result.stdout
+
+
+def test_run_sdpo_script_dry_run_sets_ray_num_cpus_from_slurm_cpus_per_gpu_times_visible_gpus() -> None:
+    result = _run_script(
+        "run_sdpo.sh",
+        env_overrides={
+            "SLURM_CPUS_PER_TASK": "",
+            "SLURM_CPUS_PER_GPU": "12",
+            "CUDA_VISIBLE_DEVICES": "0,1,2,3",
+        },
+    )
+    assert "ray_kwargs.ray_init.num_cpus=48" in result.stdout
+
+
+def test_run_sdpo_script_dry_run_prefers_sdpo_ray_num_cpus_env() -> None:
+    result = _run_script(
+        "run_sdpo.sh",
+        env_overrides={
+            "SDPO_RAY_NUM_CPUS": "72",
+            "SLURM_CPUS_PER_TASK": "64",
+        },
+    )
+    assert "ray_kwargs.ray_init.num_cpus=72" in result.stdout
+    assert "ray_kwargs.ray_init.num_cpus=64" not in result.stdout
+
+
+def test_run_sdpo_script_dry_run_respects_explicit_ray_num_cpus_override() -> None:
+    result = _run_script(
+        "run_sdpo.sh",
+        "ray_kwargs.ray_init.num_cpus=7",
+        env_overrides={"SLURM_CPUS_PER_TASK": "64"},
+    )
+    assert "ray_kwargs.ray_init.num_cpus=7" in result.stdout
+    assert "ray_kwargs.ray_init.num_cpus=64" not in result.stdout
 
 
 def test_run_sdpo_script_dry_run_rollout_only_disables_validation_rollouts_by_default() -> None:

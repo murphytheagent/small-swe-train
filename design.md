@@ -154,6 +154,11 @@ small-swe-train/
     test_turn_parser.py
 ```
 
+SDPO launch ops note: on this machine, run `scripts/run_sdpo.sh` via Slurm with
+`RAY_TMPDIR=/data/scratch/$USER/ray_tmp/$SLURM_JOB_ID`; if needed, clean stale
+`/tmp/ray/session_*` only when no Ray daemons are running. The SDPO launcher also
+defaults `TOKENIZERS_PARALLELISM=false` for Ray workers.
+
 ## 9) Deeper adaptation notes for `lasgroup/SDPO`
 
 ### 9.1 Reuse points

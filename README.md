@@ -90,6 +90,21 @@ Run proof-mode direct launch (single-shot trainer invocation):
 bash scripts/run_rft_onpolicy_rollout_proof.sh
 ```
 
+Run SDPO runtime (`run_sdpo.sh`) through Slurm only:
+```bash
+# Required on this machine for SDPO:
+# 1) put Ray temp on scratch, not /tmp
+# 2) clean stale /tmp/ray/session_* only when no Ray daemons are running
+if ! pgrep -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then
+  rm -rf /tmp/ray/session_*
+fi
+export RAY_TMPDIR=/data/scratch/$USER/ray_tmp/${SLURM_JOB_ID:-manual}
+mkdir -p "$RAY_TMPDIR"
+bash scripts/run_sdpo.sh trainer.total_training_steps=2
+```
+`run_sdpo.sh` defaults `TOKENIZERS_PARALLELISM=false` for Ray SDPO workers.
+See `scripts/SLURM_GPU_LAUNCH.md` for full 8-GPU submit examples and SDPO-specific launcher defaults.
+
 Rebuild flash-attn through Slurm:
 ```bash
 bash scripts/run_flash_attn_rebuild.sh

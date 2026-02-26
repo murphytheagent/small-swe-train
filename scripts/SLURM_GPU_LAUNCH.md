@@ -100,6 +100,27 @@ bash scripts/run_rft_onpolicy_rollout_proof.sh --dry-run
 - SDPO prompt parquet overrides:
   - if `data.train_files`/`data.val_files` are not passed, it resolves deterministic split
     parquet paths in `data/sdpo_task_cache` by default.
+- Ray CPU budget (`ray_kwargs.ray_init.num_cpus`) from:
+  - explicit Hydra override (highest priority), or
+  - `SDPO_RAY_NUM_CPUS`, or
+  - `SLURM_CPUS_PER_TASK`, or
+  - `SLURM_CPUS_PER_GPU * visible GPUs`, or
+  - CPU affinity fallback (`os.sched_getaffinity(0)`).
+- Ray GPU visibility defaults to no-set mode for SDPO:
+  - `run_sdpo.sh` exports `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1` by default
+    so worker local-rank device binding is deterministic.
+  - Set `SDPO_RAY_FORCE_NOSET_VISIBLE_DEVICES=0` to disable this behavior.
+- Tokenizer parallelism defaults to safe mode for SDPO:
+  - `run_sdpo.sh` now exports `TOKENIZERS_PARALLELISM=false` by default.
+  - This avoids forked-worker tokenizer deadlocks in Ray agent-loop workers.
+
+`RAY_TMPDIR` is required for SDPO on this node:
+- Without it, Ray defaults to `/tmp/ray`, and this host has frequent `/tmp` disk pressure.
+- Typical failure symptom when `/tmp/ray` fills: `ray.exceptions.ActorDiedError` with worker
+  connection error / EOF details.
+- Set `RAY_TMPDIR` to a high-capacity scratch path (for this machine: `/data/scratch/$USER/ray_tmp/$SLURM_JOB_ID`).
+- Optional cleanup before launch (only when no Ray jobs are running):
+  - `if ! pgrep -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then rm -rf /tmp/ray/session_*; fi`
 
 If no checkpoint can be resolved, the launcher exits early. If no data overrides are passed,
 the launcher expects those parquet files to already exist; `run_sdpo.sh` does not preload/build them.
@@ -110,6 +131,11 @@ Common environment knobs:
 - `SDPO_EVAL_SPLIT_FRACTION` / `SDPO_EVAL_MIN_ROWS` (affect default split file path resolution)
 - `SDPO_PRELOADED_TASK_PARQUET=/path/file.parquet` to use one file for both train/val
 - `SDPO_ROLLOUT_ONLY_E2E=1` to auto-set `trainer.test_freq=0` and `trainer.val_before_train=false`
+- `SDPO_RAY_NUM_CPUS=<N>` to pin Ray CPU count when cluster Slurm env vars are non-standard
+- `RAY_TMPDIR=/data/scratch/$USER/ray_tmp/$SLURM_JOB_ID` to keep Ray temp/spill files off `/tmp`
+
+For stable Slurm behavior, keep CPU requests proportional to GPU requests (same CPUs per GPU).
+Example: `GPUS=8`, `CPUS_PER_GPU=8`, `--cpus-per-task=$((GPUS * CPUS_PER_GPU))`.
 
 One-time preload (manual, outside `run_sdpo.sh`):
 
@@ -125,6 +151,10 @@ PYTHONPATH=src ./.venv/bin/python -m env.preload_sdpo_dataset \
 Example submit (auto-checkpoint + default data cache paths):
 
 ```bash
+if ! pgrep -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then
+  rm -rf /tmp/ray/session_*
+fi
+
 sbatch \
   --partition=gpu \
   --nodes=1 \
@@ -138,6 +168,8 @@ sbatch \
   --wrap "cd $PWD \
     && export PYTHON_BIN=$PWD/.venv/bin/python \
     && export WANDB_MODE=offline \
+    && export RAY_TMPDIR=/data/scratch/\$USER/ray_tmp/\$SLURM_JOB_ID \
+    && mkdir -p \$RAY_TMPDIR \
     && export SDPO_ROLLOUT_ONLY_E2E=1 \
     && bash scripts/run_sdpo.sh trainer.total_training_steps=1"
 ```
@@ -159,11 +191,13 @@ sbatch \
   --error="$PWD/outputs/slurm/%x-%j.err" \
   --wrap "cd $PWD \
     && export PYTHON_BIN=$PWD/.venv/bin/python \
+    && export RAY_TMPDIR=/data/scratch/\$USER/ray_tmp/\$SLURM_JOB_ID \
+    && mkdir -p \$RAY_TMPDIR \
     && export SDPO_RFT_MANIFEST=${RFT_MANIFEST} \
     && bash scripts/run_sdpo.sh trainer.total_training_steps=1"
 ```
 
-Dry-run (prints resolved command including auto-overrides):
+Dry-run (prints resolved command including auto-overrides; does not start Ray):
 
 ```bash
 bash scripts/run_sdpo.sh --dry-run trainer.total_training_steps=1

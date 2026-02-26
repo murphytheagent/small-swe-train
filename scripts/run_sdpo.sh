@@ -41,6 +41,9 @@ fi
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 SDPO_TRAINER_MODULE="${SDPO_TRAINER_MODULE:-verl_integration.main_ppo_entry}"
 export SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH="${SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH:-1}"
+# Prevent tokenizer-thread deadlocks in forked Ray worker processes.
+# verl's PPO runtime sets TOKENIZERS_PARALLELISM=true by default unless this is preset.
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 SDPO_ROLLOUT_ONLY_E2E="${SDPO_ROLLOUT_ONLY_E2E:-0}"
 SDPO_DATA_CONFIG_NAME="${SDPO_DATA_CONFIG_NAME:-on_policy_swe_smith}"
 SDPO_TASK_CACHE_DIR="${SDPO_TASK_CACHE_DIR:-${PROJECT_ROOT}/data/sdpo_task_cache}"
@@ -64,6 +67,14 @@ export TASK="${TASK:-${SDPO_TASK_NAME}}"
 # verl workers reject simultaneous ROCR + CUDA/HIP visibility variables.
 if [[ -n "${ROCR_VISIBLE_DEVICES:-}" ]] && [[ -n "${CUDA_VISIBLE_DEVICES:-${HIP_VISIBLE_DEVICES:-}}" ]]; then
   unset ROCR_VISIBLE_DEVICES
+fi
+
+# Ray+verl SDPO workers rely on explicit local-rank device binding.
+# Keep CUDA visibility under launcher control by default so runtime patches can
+# assign `torch.cuda.set_device(LOCAL_RANK)` deterministically per worker.
+SDPO_RAY_FORCE_NOSET_VISIBLE_DEVICES="${SDPO_RAY_FORCE_NOSET_VISIBLE_DEVICES:-1}"
+if [[ "${SDPO_RAY_FORCE_NOSET_VISIBLE_DEVICES}" == "1" ]]; then
+  export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES:-1}"
 fi
 
 _has_override_with_prefix() {
@@ -107,6 +118,75 @@ _extract_override_value() {
     esac
   done
   return 1
+}
+
+_count_visible_gpus() {
+  local devices="${CUDA_VISIBLE_DEVICES:-${HIP_VISIBLE_DEVICES:-}}"
+  if [[ -n "${devices}" ]]; then
+    IFS=',' read -r -a _gpu_items <<< "${devices}"
+    printf '%d' "${#_gpu_items[@]}"
+    return 0
+  fi
+
+  local slurm_gpus="${SLURM_GPUS_ON_NODE:-}"
+  if [[ -z "${slurm_gpus}" ]]; then
+    slurm_gpus="${SLURM_JOB_GPUS:-}"
+  fi
+  if [[ -n "${slurm_gpus}" ]]; then
+    if [[ "${slurm_gpus}" =~ ^[0-9]+$ ]]; then
+      printf '%s' "${slurm_gpus}"
+      return 0
+    fi
+    if [[ "${slurm_gpus}" =~ ([0-9]+) ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  fi
+
+  printf '0'
+}
+
+_resolve_sdpo_ray_num_cpus() {
+  if [[ -n "${SDPO_RAY_NUM_CPUS:-}" ]]; then
+    printf '%s' "${SDPO_RAY_NUM_CPUS}"
+    return 0
+  fi
+
+  if [[ -n "${SLURM_CPUS_PER_TASK:-}" ]] && [[ "${SLURM_CPUS_PER_TASK}" =~ ^[0-9]+$ ]]; then
+    printf '%s' "${SLURM_CPUS_PER_TASK}"
+    return 0
+  fi
+
+  if [[ -n "${SLURM_CPUS_PER_GPU:-}" ]] && [[ "${SLURM_CPUS_PER_GPU}" =~ ^[0-9]+$ ]]; then
+    local gpu_count
+    gpu_count="$(_count_visible_gpus)"
+    if [[ "${gpu_count}" =~ ^[0-9]+$ ]] && [[ "${gpu_count}" -gt 0 ]]; then
+      printf '%d' "$((SLURM_CPUS_PER_GPU * gpu_count))"
+      return 0
+    fi
+  fi
+
+  if [[ -n "${SLURM_JOB_CPUS_PER_NODE:-}" ]]; then
+    if [[ "${SLURM_JOB_CPUS_PER_NODE}" =~ ^([0-9]+) ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  fi
+
+  "${PYTHON_BIN}" - <<'PY'
+import multiprocessing
+import os
+
+try:
+    affinity_count = len(os.sched_getaffinity(0))
+except Exception:
+    affinity_count = 0
+
+if affinity_count > 0:
+    print(affinity_count)
+else:
+    print(multiprocessing.cpu_count())
+PY
 }
 
 _discover_latest_rft_manifest() {
@@ -227,6 +307,13 @@ PY
 }
 
 AUTO_OVERRIDES=()
+
+if ! _has_override_with_prefix "ray_kwargs.ray_init.num_cpus" "$@"; then
+  SDPO_RAY_NUM_CPUS_VALUE="$(_resolve_sdpo_ray_num_cpus)"
+  if [[ -n "${SDPO_RAY_NUM_CPUS_VALUE}" ]]; then
+    AUTO_OVERRIDES+=("ray_kwargs.ray_init.num_cpus=${SDPO_RAY_NUM_CPUS_VALUE}")
+  fi
+fi
 
 if ! _has_override_for_key "data.apply_chat_template_kwargs.enable_thinking" "$@"; then
   AUTO_OVERRIDES+=("~data.apply_chat_template_kwargs.enable_thinking")
