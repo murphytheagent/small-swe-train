@@ -106,6 +106,26 @@ def test_reward_fn_treats_empty_verifier_results_without_targets_as_missing() ->
     assert info["pass_to_pass_verified"] == [False]
 
 
+def test_reward_fn_ignores_vacuous_all_passed_without_targets() -> None:
+    data = [
+        {
+            "response_text": '<tool_call>{"tool":"submit","args":{"final_response":"ok"}}</tool_call>',
+            "fail_to_pass": [],
+            "pass_to_pass": [],
+            "fail_to_pass_all_passed": True,
+            "pass_to_pass_all_passed": True,
+        }
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [0.0]
+    assert info["resolved_source"] == ["missing_verifier_targets"]
+    assert info["reward_verification_missing"] == [True]
+    assert info["fail_to_pass_verified"] == [False]
+    assert info["pass_to_pass_verified"] == [False]
+
+
 def test_reward_fn_returns_zero_for_invalid_payload() -> None:
     data = [
         {

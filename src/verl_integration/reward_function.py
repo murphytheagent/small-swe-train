@@ -140,7 +140,7 @@ def _resolve_test_group_verification(
         f"{key_root.upper()}_ALL_PASSED",
     )
     all_passed = _coerce_optional_bool_flag(all_passed_raw)
-    if all_passed is not None:
+    if all_passed is not None and expected_tests:
         return expected_tests, all_passed, True
 
     passed_tests = _coerce_test_name_set(
