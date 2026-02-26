@@ -66,6 +66,7 @@ max_model_len: 8192
 data:
   micro_batch_size_per_gpu: 1
   max_length: ${max_model_len}
+  apply_chat_template_kwargs: {}
   train_files: /tmp/onpolicy-rft-train.parquet
   val_files: /tmp/onpolicy-rft-val.parquet
   custom_cls:

@@ -7,6 +7,9 @@ import pytest
 from prompts import build_sdpo_rollout_followup_user_message
 from verl_integration.swe_bridge_agent_loop import (
     BridgeLoopTaskContext,
+    _extract_final_submit_text,
+    _clip_prompt_for_rollout_context,
+    _validate_rollout_context_alignment,
     _build_task_sample,
     _get_container_slot_gate,
     append_response_tokens,
@@ -109,6 +112,18 @@ def test_build_task_sample_prefers_explicit_targets_over_reward_ground_truth() -
     assert sample.pass_to_pass == ["tests/test_ok.py::test_explicit_regression"]
 
 
+def test_extract_final_submit_text_uses_terminal_submit_tool_call_when_steps_empty() -> None:
+    submit_call = type(
+        "_ToolCall",
+        (),
+        {"tool": "submit", "args": {"final_response": "patched successfully"}},
+    )()
+
+    text = _extract_final_submit_text([submit_call], [])
+
+    assert text == "patched successfully"
+
+
 def test_build_tool_response_messages_keeps_non_empty_blocks() -> None:
     messages = build_tool_response_messages(
         [
@@ -201,6 +216,40 @@ def test_append_response_tokens_clips_to_available_budget() -> None:
     assert full_token_ids == [1, 2]
     assert response_mask == [1, 1]
     assert response_logprobs == [-1.0, -2.0]
+
+
+def test_clip_prompt_for_rollout_context_applies_left_truncation() -> None:
+    clipped = _clip_prompt_for_rollout_context([10, 11, 12, 13], prompt_length=2)
+    assert clipped == [12, 13]
+
+
+def test_validate_rollout_context_alignment_accepts_consistent_state() -> None:
+    _validate_rollout_context_alignment(
+        canonical_prompt_ids=[101, 102],
+        full_token_ids=[101, 102, 201, 202],
+        response_mask=[1, 0],
+        response_logprobs=[-0.1, 0.0],
+    )
+
+
+def test_validate_rollout_context_alignment_rejects_prefix_divergence() -> None:
+    with pytest.raises(RuntimeError, match="prompt prefix diverged"):
+        _validate_rollout_context_alignment(
+            canonical_prompt_ids=[101, 102],
+            full_token_ids=[101, 999, 201],
+            response_mask=[1],
+            response_logprobs=[-0.1],
+        )
+
+
+def test_validate_rollout_context_alignment_rejects_response_length_mismatch() -> None:
+    with pytest.raises(RuntimeError, match="response length does not match response_mask"):
+        _validate_rollout_context_alignment(
+            canonical_prompt_ids=[101, 102],
+            full_token_ids=[101, 102, 201],
+            response_mask=[],
+            response_logprobs=None,
+        )
 
 
 def test_resolve_bridge_loop_runtime_config_uses_yaml_aligned_defaults() -> None:

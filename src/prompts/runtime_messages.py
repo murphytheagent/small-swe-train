@@ -14,8 +14,6 @@ from .model_delimiters import ModelDelimiters, default_delimiters
 _d = default_delimiters()
 CHATML_START: str = _d.role_start
 CHATML_END: str = _d.role_end
-THINK_START: str = _d.think_start
-THINK_END: str = _d.think_end
 TOOL_CALL_START: str = _d.tool_call_start
 TOOL_CALL_END: str = _d.tool_call_end
 TOOL_RESPONSE_START: str = _d.tool_response_start
@@ -165,10 +163,9 @@ def build_assistant_contract_prompt(
     return (
         "Assistant output contract:\n"
         "1) Surround each tool action with a tool-call delimiter block.\n"
-        f"2) Optional reasoning span: {d.think_start}...{d.think_end}\n"
-        f"3) Emit 1..{max_tool_calls} ordered tool calls: "
+        f"2) Emit 1..{max_tool_calls} ordered tool calls: "
         f"{d.tool_call_start}{{\"tool\":\"...\",\"args\":{{...}}}}{d.tool_call_end}\n"
-        "   Every tool-call JSON object MUST include both keys: 'tool' and 'args'.\n"
+        "3) Every tool-call JSON object MUST include both keys: 'tool' and 'args'.\n"
         "   'args' MUST be a JSON object (never put command/query/path at top level).\n"
         f"4) Allowed tools: {allowed_tools_text}.\n"
         f"{_build_required_args_prompt()}"

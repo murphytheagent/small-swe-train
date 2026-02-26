@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import config
+
 from verl_integration.reward_function import reward_fn
 
 
@@ -49,7 +51,7 @@ def test_reward_fn_returns_zero_when_verifier_signals_are_missing() -> None:
     assert info["pass_to_pass_verified"] == [False]
 
 
-def test_reward_fn_returns_zero_without_terminal_submit_even_if_verifier_passes() -> None:
+def test_reward_fn_applies_terminal_validity_penalty_when_submit_is_missing() -> None:
     data = [
         {
             "response_text": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
@@ -66,7 +68,8 @@ def test_reward_fn_returns_zero_without_terminal_submit_even_if_verifier_passes(
 
     rewards, info = reward_fn(data)
 
-    assert rewards == [0.0]
+    expected_reward = 1.0 - config.TERMINAL_VALIDITY_PENALTY
+    assert rewards == [expected_reward]
     assert info["terminal_submission"] == [False]
     assert info["resolved_source"] == ["verifiable_tests"]
 
@@ -126,7 +129,7 @@ def test_reward_fn_ignores_vacuous_all_passed_without_targets() -> None:
     assert info["pass_to_pass_verified"] == [False]
 
 
-def test_reward_fn_returns_zero_for_invalid_payload() -> None:
+def test_reward_fn_applies_unresolved_and_terminal_penalties_for_invalid_payload() -> None:
     data = [
         {
             "response_text": "<tool_call>{\"tool\":\"submit\",\"args\":{}}</tool_call>",
@@ -136,7 +139,8 @@ def test_reward_fn_returns_zero_for_invalid_payload() -> None:
 
     rewards, info = reward_fn(data)
 
-    assert rewards == [0.0]
+    expected_reward = 1.0 - 1.0 - config.TERMINAL_VALIDITY_PENALTY
+    assert rewards == [expected_reward]
     assert info["parse_valid"] == [True]
     assert info["required_arg_presence"] == [False]
     assert info["validation_errors"] == [True]

@@ -25,7 +25,7 @@ train = [
   "vllm>=0.8.4",
   "datasets>=4.4.2",
   "ray>=2.40",
-  "verl @ git+https://github.com/lasgroup/SDPO.git",
+  "verl @ git+https://github.com/lasgroup/SDPO.git@c52586ba45633a817879f59e2612cc62c55c8479",
   "omegaconf>=2.3",
   "hydra-core>=1.3",
   "wandb>=0.23.1",

@@ -89,8 +89,8 @@ def test_run_onpolicy_rft_step_from_config_uses_real_data_config_and_collector(t
                 "task_id": "task-1",
                 "image_name": "img:1",
                 "problem_statement": "Fix bug",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             }
         ],
         pool_factory=lambda _runtime: _FakePool(),

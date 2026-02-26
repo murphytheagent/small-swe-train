@@ -38,6 +38,15 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
         tool_response_blocks = _coerce_text_list(
             _select_non_tensor(non_tensor_batch, "tool_response_blocks", index)
         )
+        trajectory_assistant_turns = _coerce_text_list(
+            _select_non_tensor(non_tensor_batch, "trajectory_assistant_turns", index)
+        )
+        trajectory_assistant_turn_token_lengths = _coerce_int_list(
+            _select_non_tensor(non_tensor_batch, "trajectory_assistant_turn_token_lengths", index)
+        )
+        trajectory_turn_tool_response_blocks = _coerce_nested_text_list(
+            _select_non_tensor(non_tensor_batch, "trajectory_turn_tool_response_blocks", index)
+        )
         tool_output = _extract_last_tool_output(trajectory_steps)
         reward_ground_truth = _extract_reward_ground_truth(
             _select_non_tensor(non_tensor_batch, "reward_model", index)
@@ -77,6 +86,9 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
             "tool_output": tool_output,
             "trajectory_steps": trajectory_steps,
             "tool_response_blocks": tool_response_blocks,
+            "trajectory_assistant_turns": trajectory_assistant_turns,
+            "trajectory_assistant_turn_token_lengths": trajectory_assistant_turn_token_lengths,
+            "trajectory_turn_tool_response_blocks": trajectory_turn_tool_response_blocks,
             "loop_exit_reason": _as_text(_select_non_tensor(non_tensor_batch, "loop_exit_reason", index)),
             "bridge_error": _as_text(_select_non_tensor(non_tensor_batch, "bridge_error", index)),
             "timeout_error": _as_text(_select_non_tensor(non_tensor_batch, "timeout_error", index)),
@@ -289,6 +301,15 @@ def _coerce_text_list(value: Any) -> list[str]:
         text = _as_text(item).strip()
         if text:
             rows.append(text)
+    return rows
+
+
+def _coerce_nested_text_list(value: Any) -> list[list[str]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    rows: list[list[str]] = []
+    for item in value:
+        rows.append(_coerce_text_list(item))
     return rows
 
 

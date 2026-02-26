@@ -102,3 +102,31 @@ def test_sitecustomize_can_install_sdpo_patch_import_guard(monkeypatch) -> None:
 
     assert calls["count"] >= 1
     assert calls["module"] is fake_ray_trainer
+
+
+def test_sitecustomize_accepts_num_recent_raw_blocks_on_older_verl_config(monkeypatch) -> None:
+    class _FakeSelfDistillationConfig:
+        def __init__(self, alpha: float = 0.0) -> None:
+            self.alpha = alpha
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_workers_pkg = types.ModuleType("verl.workers")
+    fake_config_pkg = types.ModuleType("verl.workers.config")
+    fake_actor_module = types.ModuleType("verl.workers.config.actor")
+    fake_actor_module.SelfDistillationConfig = _FakeSelfDistillationConfig
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers", fake_workers_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config", fake_config_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config.actor", fake_actor_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    original_import = builtins.__import__
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+        cfg = _FakeSelfDistillationConfig(alpha=0.25, num_recent_raw_blocks=7)
+    finally:
+        builtins.__import__ = original_import
+
+    assert cfg.alpha == 0.25
+    assert getattr(cfg, "num_recent_raw_blocks") == 7

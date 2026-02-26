@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+import config
 from verl_integration import reward_adapter
 
 
@@ -106,7 +107,14 @@ def test_rows_to_reward_tensor_marks_last_valid_response_token_when_torch_availa
             "response_text": '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
             "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
             "_response_mask": [0, 1, 1, 0],
-            "resolved": True,
+            "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+            "tool_output": {
+                "metadata": {
+                    "fail_to_pass_results": {"tests/test_bug.py::test_bugfix": True},
+                    "pass_to_pass_results": {"tests/test_ok.py::test_regression": True},
+                }
+            },
         },
         {
             "response_text": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
@@ -124,7 +132,7 @@ def test_rows_to_reward_tensor_marks_last_valid_response_token_when_torch_availa
     assert reward_tensor.shape == (2, 4)
     assert float(reward_tensor[0, 2].item()) == pytest.approx(1.0)
     assert float(reward_tensor[0].sum().item()) == pytest.approx(1.0)
-    assert float(reward_tensor[1].sum().item()) == pytest.approx(0.0)
+    assert float(reward_tensor[1].sum().item()) == pytest.approx(-config.TERMINAL_VALIDITY_PENALTY)
     assert "feedback" in reward_extra_infos
     assert len(reward_extra_infos["feedback"]) == 2
     _ = torch  # silence lint for optional import in skip environments

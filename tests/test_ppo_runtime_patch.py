@@ -30,7 +30,6 @@ def _build_non_swe_trainer_class():
                 self_distillation=_ConfigNode(max_reprompt_len=128),
             ),
         ),
-        data=_ConfigNode(apply_chat_template_kwargs=_ConfigNode(enable_thinking=True)),
     )
 
     class _Trainer:
@@ -65,7 +64,6 @@ def _build_swe_trainer_class():
                 ),
             ),
         ),
-        data=_ConfigNode(apply_chat_template_kwargs=_ConfigNode(enable_thinking=False)),
     )
 
     class _Trainer:
@@ -224,8 +222,9 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
         *,
         include_student_attempt_for_teacher,
         max_reprompt_len,
+        num_recent_raw_blocks,
     ):
-        _ = include_student_attempt_for_teacher, max_reprompt_len
+        _ = include_student_attempt_for_teacher, max_reprompt_len, num_recent_raw_blocks
         captured["resolved"] = [bool(row.get("resolved")) for row in rows]
         return {
             "teacher_prompts": ["fix one", "fix two"],
@@ -247,7 +246,6 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
             return_dict,
             continue_final_message,
             add_generation_prompt,
-            enable_thinking,
             max_length,
             padding,
             truncation,
@@ -255,7 +253,6 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
             _ = (
                 continue_final_message,
                 add_generation_prompt,
-                enable_thinking,
                 max_length,
                 padding,
                 truncation,
@@ -303,3 +300,185 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     assert metrics["self_distillation/reprompt_sample_fraction"] == pytest.approx(0.5)
     assert metrics["self_distillation/prompt_truncated_fraction"] == pytest.approx(0.5)
     assert metrics["self_distillation/empty_target_batch"] == pytest.approx(0.0)
+
+
+def test_turn_level_actor_expansion_builds_per_turn_rows() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _FakeDataProto:
+        def __init__(self, *, batch, non_tensor_batch=None, meta_info=None):
+            self.batch = batch
+            self.non_tensor_batch = non_tensor_batch or {}
+            self.meta_info = meta_info or {}
+
+        @classmethod
+        def from_dict(cls, *, tensors=None, non_tensors=None, meta_info=None):
+            return cls(
+                batch=tensors or {},
+                non_tensor_batch=non_tensors or {},
+                meta_info=meta_info or {},
+            )
+
+    data = _FakeDataProto(
+        batch={
+            "responses": torch.tensor([[1, 2], [3, 4]], dtype=torch.long),
+            "response_mask": torch.tensor([[1, 1], [1, 1]], dtype=torch.long),
+            "input_ids": torch.tensor([[10, 11, 1, 2], [20, 21, 3, 4]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 1, 1], [1, 1, 1, 1]], dtype=torch.long),
+            "position_ids": torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long),
+            "old_log_probs": torch.zeros((2, 2), dtype=torch.float32),
+            "advantages": torch.zeros((2, 2), dtype=torch.float32),
+            "teacher_input_ids": torch.tensor([[90, 91, 1, 2], [92, 93, 3, 4]], dtype=torch.long),
+            "teacher_attention_mask": torch.tensor([[1, 1, 1, 1], [1, 1, 1, 1]], dtype=torch.long),
+            "teacher_position_ids": torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long),
+            "self_distillation_mask": torch.tensor([1.0, 1.0], dtype=torch.float32),
+            "turn_teacher_input_ids": torch.tensor(
+                [
+                    [[100, 101, 1, 2], [110, 111, 1, 2]],
+                    [[200, 201, 3, 4], [210, 211, 3, 4]],
+                ],
+                dtype=torch.long,
+            ),
+            "turn_teacher_attention_mask": torch.tensor(
+                [
+                    [[1, 1, 1, 1], [1, 1, 1, 1]],
+                    [[1, 1, 1, 1], [1, 1, 1, 1]],
+                ],
+                dtype=torch.long,
+            ),
+            "turn_teacher_position_ids": torch.tensor(
+                [
+                    [[0, 1, 2, 3], [0, 1, 2, 3]],
+                    [[0, 1, 2, 3], [0, 1, 2, 3]],
+                ],
+                dtype=torch.long,
+            ),
+            "turn_response_mask": torch.tensor(
+                [
+                    [[1, 0], [0, 1]],
+                    [[1, 1], [0, 0]],
+                ],
+                dtype=torch.long,
+            ),
+            "turn_self_distillation_mask": torch.tensor(
+                [
+                    [1.0, 0.0],
+                    [1.0, 0.0],
+                ],
+                dtype=torch.float32,
+            ),
+        },
+        non_tensor_batch={"uid": ["a", "b"]},
+        meta_info={"temperature": 1.0},
+    )
+
+    expanded = runtime_patch._maybe_expand_turn_level_distillation_data(data)
+    assert expanded is not None
+
+    assert expanded.batch["teacher_input_ids"].tolist() == [
+        [100, 101, 1, 2],
+        [200, 201, 3, 4],
+    ]
+    assert expanded.batch["response_mask"].tolist() == [
+        [1, 0],
+        [1, 1],
+    ]
+    assert expanded.batch["self_distillation_mask"].tolist() == [1.0, 1.0]
+    assert list(expanded.non_tensor_batch["uid"]) == ["a", "b"]
+    assert list(expanded.non_tensor_batch["distillation_turn_index"]) == [0, 0]
+
+
+def test_patched_distillation_hook_emits_turn_level_tensors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+    trainer_cls = _build_swe_trainer_class()
+
+    class _FakeDataProto:
+        def __init__(self, *, tensors):
+            self.tensors = tensors
+
+        @classmethod
+        def from_dict(cls, *, tensors):
+            return cls(tensors=tensors)
+
+    fake_module = SimpleNamespace(
+        RayPPOTrainer=trainer_cls,
+        DataProto=_FakeDataProto,
+        compute_position_id_with_mask=lambda mask: mask.cumsum(dim=1) - 1,
+    )
+    assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
+
+    def _fake_rows(batch, tokenizer):
+        _ = batch, tokenizer
+        return [{"_raw_prompt_messages": [{"role": "user", "content": "u"}], "_response_mask": [1, 1]}]
+
+    def _fake_build_self_distillation_batch(
+        rows,
+        *,
+        include_student_attempt_for_teacher,
+        max_reprompt_len,
+        num_recent_raw_blocks,
+    ):
+        _ = rows, include_student_attempt_for_teacher, max_reprompt_len, num_recent_raw_blocks
+        return {
+            "teacher_prompts": ["row-level"],
+            "self_distillation_mask": [True],
+            "prompt_truncated": [False],
+            "turn_teacher_prompts": [["turn-0", "turn-1"]],
+            "turn_response_masks": [[[1, 0], [0, 1]]],
+            "turn_distillation_mask": [[True, True]],
+        }
+
+    monkeypatch.setattr(runtime_patch, "dataproto_to_rows", _fake_rows)
+    monkeypatch.setattr(runtime_patch, "build_self_distillation_batch", _fake_build_self_distillation_batch)
+
+    trainer = trainer_cls()
+
+    class _FakeTokenizer:
+        def apply_chat_template(
+            self,
+            messages,
+            *,
+            tokenize,
+            return_tensors,
+            return_dict,
+            continue_final_message,
+            add_generation_prompt,
+            max_length,
+            padding,
+            truncation,
+        ):
+            _ = (
+                tokenize,
+                return_tensors,
+                return_dict,
+                continue_final_message,
+                add_generation_prompt,
+                max_length,
+                padding,
+                truncation,
+            )
+            rows = len(messages)
+            input_ids = torch.arange(rows * 3, dtype=torch.long).reshape(rows, 3)
+            attention_mask = torch.ones((rows, 3), dtype=torch.long)
+            return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+    trainer.tokenizer = _FakeTokenizer()
+    batch = SimpleNamespace(
+        batch={
+            "responses": torch.tensor([[1, 2]], dtype=torch.long),
+            "response_mask": torch.tensor([[1, 1]], dtype=torch.long),
+        },
+        non_tensor_batch={"trajectory_steps": [[]]},
+    )
+    reward_tensor = torch.tensor([[0.0, 1.0]], dtype=torch.float32)
+
+    output = trainer._maybe_build_self_distillation_batch(batch, reward_tensor, {"feedback": [""]})
+    assert output is not None
+    distill_batch, _metrics = output
+
+    assert "turn_teacher_input_ids" in distill_batch.tensors
+    assert distill_batch.tensors["turn_teacher_input_ids"].shape[0] == 1
+    assert distill_batch.tensors["turn_teacher_input_ids"].shape[1] == 2
+    assert distill_batch.tensors["turn_response_mask"].tolist() == [[[1, 0], [0, 1]]]

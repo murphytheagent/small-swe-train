@@ -76,6 +76,40 @@ def _try_apply_sdpo_runtime_patch() -> None:
         return
 
 
+def _install_self_distillation_config_compat_patch() -> None:
+    """Accept small-swe-only SDPO keys on older verl SelfDistillationConfig."""
+    try:
+        from verl.workers.config.actor import SelfDistillationConfig
+    except Exception:
+        return
+
+    # Newer verl versions may already expose this field natively.
+    dataclass_fields = getattr(SelfDistillationConfig, "__dataclass_fields__", {})
+    if isinstance(dataclass_fields, dict) and "num_recent_raw_blocks" in dataclass_fields:
+        return
+
+    if getattr(SelfDistillationConfig, "_small_swe_num_recent_raw_blocks_compat", False):
+        return
+
+    original_init = SelfDistillationConfig.__init__
+
+    def _small_swe_self_distillation_init(self, *args, **kwargs):
+        raw_num_recent_raw_blocks = kwargs.pop("num_recent_raw_blocks", None)
+        original_init(self, *args, **kwargs)
+        value = 3 if raw_num_recent_raw_blocks is None else raw_num_recent_raw_blocks
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError):
+            normalized = 3
+        normalized = max(normalized, 0)
+        # BaseConfig allows setting new fields once on frozen configs.
+        setattr(self, "num_recent_raw_blocks", normalized)
+
+    _small_swe_self_distillation_init.__name__ = "_small_swe_self_distillation_init"
+    SelfDistillationConfig.__init__ = _small_swe_self_distillation_init
+    setattr(SelfDistillationConfig, "_small_swe_num_recent_raw_blocks_compat", True)
+
+
 def _install_sdpo_runtime_patch_import_guard() -> None:
     current = builtins.__import__
     if getattr(current, "__name__", "") == "_small_swe_sdpo_guarded_import":
@@ -111,6 +145,7 @@ def apply_small_swe_runtime_patches() -> None:
         _install_flash_attn_find_spec_guard()
         _install_flash_attn_import_guard()
     if _coerce_bool_env("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", default=False):
+        _install_self_distillation_config_compat_patch()
         # Ray worker processes do not enter our main wrapper module.
         # Patch lazily once ray_trainer is imported in-process.
         _install_sdpo_runtime_patch_import_guard()

@@ -92,6 +92,38 @@ bash scripts/run_rft_onpolicy_rollout_proof.sh --dry-run
 
 ## 3) `scripts/run_sdpo.sh` (8 GPUs required)
 
+`run_sdpo.sh` now auto-resolves two inputs before launching trainer:
+- RFT checkpoint path (`actor_rollout_ref.model.path`) from:
+  - `SDPO_RFT_CHECKPOINT` (highest priority), or
+  - `SDPO_RFT_MANIFEST`, or
+  - latest `outputs/rft_runtime/*/rft_runtime_loop_manifest.json` (`final_model_path` fallback keys).
+- SDPO prompt parquet overrides:
+  - if `data.train_files`/`data.val_files` are not passed, it resolves deterministic split
+    parquet paths in `data/sdpo_task_cache` by default.
+
+If no checkpoint can be resolved, the launcher exits early. If no data overrides are passed,
+the launcher expects those parquet files to already exist; `run_sdpo.sh` does not preload/build them.
+
+Common environment knobs:
+- `SDPO_TASK_CACHE_DIR` (default: `$PWD/data/sdpo_task_cache`)
+- `SDPO_DATA_CONFIG_NAME` (default: `on_policy_swe_smith`)
+- `SDPO_EVAL_SPLIT_FRACTION` / `SDPO_EVAL_MIN_ROWS` (affect default split file path resolution)
+- `SDPO_PRELOADED_TASK_PARQUET=/path/file.parquet` to use one file for both train/val
+- `SDPO_ROLLOUT_ONLY_E2E=1` to auto-set `trainer.test_freq=0` and `trainer.val_before_train=false`
+
+One-time preload (manual, outside `run_sdpo.sh`):
+
+```bash
+PYTHONPATH=src ./.venv/bin/python -m env.preload_sdpo_dataset \
+  --data-config-name on_policy_swe_smith \
+  --cache-dir data/sdpo_task_cache \
+  --emit-split \
+  --emit-hydra-overrides \
+  --force-refresh
+```
+
+Example submit (auto-checkpoint + default data cache paths):
+
 ```bash
 sbatch \
   --partition=gpu \
@@ -103,13 +135,38 @@ sbatch \
   --job-name=small-swe-sdpo \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
-  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && bash scripts/run_sdpo.sh <hydra-overrides>"
+  --wrap "cd $PWD \
+    && export PYTHON_BIN=$PWD/.venv/bin/python \
+    && export WANDB_MODE=offline \
+    && export SDPO_ROLLOUT_ONLY_E2E=1 \
+    && bash scripts/run_sdpo.sh trainer.total_training_steps=1"
 ```
 
-Dry-run:
+Example submit (pin explicit RFT manifest + keep cached parquet):
 
 ```bash
-bash scripts/run_sdpo.sh --dry-run <hydra-overrides>
+RFT_MANIFEST="$PWD/outputs/rft_runtime/<run>/rft_runtime_loop_manifest.json"
+
+sbatch \
+  --partition=gpu \
+  --nodes=1 \
+  --gres=gpu:8 \
+  --cpus-per-task=64 \
+  --mem=512G \
+  --time=24:00:00 \
+  --job-name=small-swe-sdpo \
+  --output="$PWD/outputs/slurm/%x-%j.out" \
+  --error="$PWD/outputs/slurm/%x-%j.err" \
+  --wrap "cd $PWD \
+    && export PYTHON_BIN=$PWD/.venv/bin/python \
+    && export SDPO_RFT_MANIFEST=${RFT_MANIFEST} \
+    && bash scripts/run_sdpo.sh trainer.total_training_steps=1"
+```
+
+Dry-run (prints resolved command including auto-overrides):
+
+```bash
+bash scripts/run_sdpo.sh --dry-run trainer.total_training_steps=1
 ```
 
 ## 4) `scripts/run_sdft.sh` (8 GPUs required)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Sequence
 
-from config import MAX_TOOL_CALLS_PER_TURN
+from config import MAX_TOOL_CALLS_PER_TURN, TERMINAL_VALIDITY_PENALTY
 from metrics.contracts import FormatMetrics, rate
 from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
 from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME, ActionEnvelope, validate_tool_call
@@ -257,7 +257,7 @@ def reward_fn(
     *,
     max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
 ) -> tuple[list[float], dict[str, list[Any]]]:
-    """Compute binary rewards from verifiable test outcomes plus terminal submit."""
+    """Compute baseline-minus-penalty rewards from verifier + terminal-submit validity."""
     rewards: list[float] = []
     feedback: list[str] = []
 
@@ -338,7 +338,11 @@ def reward_fn(
         pass_to_pass_verified.append(bool(verification.get("pass_to_pass_verified", False)))
         reward_verification_missing.append(bool(verification.get("verification_missing", False)))
 
-        reward_value = 1.0 if terminal_submission_ok and resolved else 0.0
+        reward_value = 1.0
+        if not resolved:
+            reward_value -= 1.0
+        if not terminal_submission_ok:
+            reward_value -= TERMINAL_VALIDITY_PENALTY
         rewards.append(reward_value)
         feedback.append(_verification_feedback(sample, verification=verification))
 

@@ -102,8 +102,8 @@ def _build_test_onpolicy_rft_collector() -> tuple[OnPolicyRolloutCollector, _Cha
                 "task_id": "task-1",
                 "image_name": "img:1",
                 "problem_statement": "Fix bug",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             }
         ],
         pool_factory=lambda _runtime: _FakePool(),

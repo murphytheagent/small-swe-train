@@ -41,6 +41,7 @@ CMD=(
   "${PYTHON_BIN}" -m verl.trainer.main_ppo
   --config-name sdpo_swe
   --config-dir "${CONFIG_DIR}"
+  "~data.apply_chat_template_kwargs.enable_thinking"
   actor_rollout_ref.actor.policy_loss.loss_mode=sdft
   "$@"
 )

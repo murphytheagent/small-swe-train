@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import config
 from env.task_dataset import TaskSample
 import pytest
 import rollout.vllm_turn_generator as vllm_turn_generator_module
@@ -88,7 +89,7 @@ def test_build_vllm_turn_generator_calls_chat_completion(monkeypatch) -> None:
     generator = build_vllm_turn_generator(
         VLLMTurnGeneratorConfig(
             base_url="http://localhost:8000/v1",
-            model_name="Qwen/Qwen3-4B-Instruct-2507",
+            model_name=config.DEFAULT_TRAINING_MODEL_NAME,
             request_timeout_sec=12,
             max_tokens=256,
             temperature=0.0,
@@ -128,7 +129,7 @@ def test_build_messages_starts_with_single_user_message() -> None:
     messages = vllm_turn_generator_module._build_messages(
         config=VLLMTurnGeneratorConfig(
             base_url="http://localhost:8000/v1",
-            model_name="Qwen/Qwen3-4B-Instruct-2507",
+            model_name=config.DEFAULT_TRAINING_MODEL_NAME,
             request_timeout_sec=12,
             max_tokens=256,
             temperature=0.0,
@@ -182,7 +183,7 @@ def test_load_vllm_turn_generator_config_rejects_invalid_max_tokens(monkeypatch)
         lambda: {
             "vllm": {
                 "base_url": "http://127.0.0.1:8000/v1",
-                "model_name": "Qwen/Qwen3-4B-Instruct-2507",
+                "model_name": config.DEFAULT_TRAINING_MODEL_NAME,
                 "request_timeout_sec": 90,
                 "max_tokens": 0,
                 "temperature": 0.0,

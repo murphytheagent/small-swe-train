@@ -388,11 +388,26 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         images = multi_modal_data.get("images")
         videos = multi_modal_data.get("videos")
 
-        full_token_ids = await self.apply_chat_template(
+        raw_prompt_ids = await self.apply_chat_template(
             messages,
             images=images,
             videos=videos,
         )
+        raw_prompt_token_ids = _coerce_token_ids(raw_prompt_ids)
+        canonical_prompt_ids = _clip_prompt_for_rollout_context(
+            raw_prompt_token_ids,
+            prompt_length=self.prompt_length,
+        )
+        if not canonical_prompt_ids:
+            raise ValueError("swe_bridge_agent produced an empty prompt token sequence.")
+        if len(canonical_prompt_ids) < len(raw_prompt_token_ids):
+            logger.info(
+                "swe_bridge_agent clipped prompt context from %d to %d tokens (prompt_length=%d).",
+                len(raw_prompt_token_ids),
+                len(canonical_prompt_ids),
+                self.prompt_length,
+            )
+        full_token_ids = list(canonical_prompt_ids)
         response_mask: list[int] = []
         response_logprobs: list[float] = []
         metrics = {"generate_sequences": 0.0, "tool_calls": 0.0}
@@ -413,6 +428,9 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         loop_exit_reason = "response_length_budget_exhausted"
         trajectory_steps: list[dict[str, Any]] = []
         tool_response_blocks: list[str] = []
+        trajectory_assistant_turns: list[str] = []
+        trajectory_assistant_turn_token_lengths: list[int] = []
+        trajectory_turn_tool_response_blocks: list[list[str]] = []
         validation_errors: list[str] = []
         final_turn_has_submit = False
         final_submit_format_valid = False
@@ -456,11 +474,36 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     loop_exit_reason = "attempt_timeout"
                     break
 
+                available_tokens = self.response_length - len(response_mask)
+                if available_tokens <= 0:
+                    loop_exit_reason = "response_length_budget_exhausted"
+                    break
+
+                _validate_rollout_context_alignment(
+                    canonical_prompt_ids=canonical_prompt_ids,
+                    full_token_ids=full_token_ids,
+                    response_mask=response_mask,
+                    response_logprobs=response_logprobs if response_logprobs else None,
+                )
+
+                turn_sampling_params = dict(sampling_params)
+                requested_tokens_raw = turn_sampling_params.get(
+                    "max_tokens",
+                    turn_sampling_params.get("max_new_tokens", available_tokens),
+                )
+                try:
+                    requested_tokens = int(requested_tokens_raw)
+                except (TypeError, ValueError):
+                    requested_tokens = available_tokens
+                if requested_tokens < 1:
+                    requested_tokens = available_tokens
+                turn_sampling_params["max_tokens"] = max(1, min(available_tokens, requested_tokens))
+
                 generate_started = time.monotonic()
                 generation_output = await self.server_manager.generate(
                     request_id=request_id,
                     prompt_ids=full_token_ids,
-                    sampling_params=sampling_params,
+                    sampling_params=turn_sampling_params,
                     image_data=images,
                     video_data=videos,
                 )
@@ -473,7 +516,6 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     loop_exit_reason = "empty_generation"
                     break
 
-                available_tokens = max(0, self.response_length - len(response_mask))
                 clipped_generated_ids = generated_ids[:available_tokens]
                 clipped_generated_logprobs = (
                     generated_logprobs[:available_tokens] if generated_logprobs is not None else None
@@ -493,6 +535,9 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     lambda: self.tokenizer.decode(assistant_turn_ids, skip_special_tokens=True),
                 )
                 assistant_turns += 1
+                trajectory_assistant_turns.append(assistant_text)
+                trajectory_assistant_turn_token_lengths.append(len(assistant_turn_ids))
+                trajectory_turn_tool_response_blocks.append([])
                 if reached_limit:
                     loop_exit_reason = "response_length_budget_exhausted"
                     break
@@ -528,7 +573,10 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 if bridge_result.is_terminal:
                     final_turn_has_submit = True
                     final_submit_format_valid = not bool(turn_validation_errors)
-                    final_response_text = _extract_final_submit_text(bridge_result.steps)
+                    final_response_text = _extract_final_submit_text(
+                        bridge_result.envelope.tool_calls,
+                        bridge_result.steps,
+                    )
                     verification_metadata = await asyncio.to_thread(
                         _verify_terminal_submission,
                         executor,
@@ -543,7 +591,9 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                             metadata.update(verification_metadata)
 
                 if bridge_result.tool_response_blocks:
-                    tool_response_blocks.extend(str(block) for block in bridge_result.tool_response_blocks)
+                    current_turn_tool_blocks = [str(block) for block in bridge_result.tool_response_blocks]
+                    tool_response_blocks.extend(current_turn_tool_blocks)
+                    trajectory_turn_tool_response_blocks[-1] = current_turn_tool_blocks
                     tool_messages = build_tool_response_messages(bridge_result.tool_response_blocks)
                     if tool_messages:
                         tool_ids = await self.apply_chat_template(
@@ -576,13 +626,14 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             len(tool_response_blocks),
         )
 
-        response_len = len(response_mask)
-        if response_len > 0:
-            response_ids = full_token_ids[-response_len:]
-            prompt_ids = full_token_ids[:-response_len]
-        else:
-            response_ids = []
-            prompt_ids = full_token_ids
+        _validate_rollout_context_alignment(
+            canonical_prompt_ids=canonical_prompt_ids,
+            full_token_ids=full_token_ids,
+            response_mask=response_mask,
+            response_logprobs=response_logprobs if response_logprobs else None,
+        )
+        prompt_ids = list(canonical_prompt_ids)
+        response_ids = full_token_ids[len(canonical_prompt_ids) :]
 
         output_multi_modal_data = {}
         if images is not None:
@@ -596,6 +647,9 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             "container_id": handle.container_id if handle is not None else "",
             "trajectory_steps": trajectory_steps,
             "tool_response_blocks": tool_response_blocks,
+            "trajectory_assistant_turns": trajectory_assistant_turns,
+            "trajectory_assistant_turn_token_lengths": trajectory_assistant_turn_token_lengths,
+            "trajectory_turn_tool_response_blocks": trajectory_turn_tool_response_blocks,
             "assistant_turns": assistant_turns,
             "user_turns": user_turns,
             "tool_response_block_count": len(tool_response_blocks),
@@ -706,7 +760,20 @@ def _verify_terminal_submission(
         }
 
 
-def _extract_final_submit_text(steps: Sequence[EnvironmentStep]) -> str:
+def _extract_final_submit_text(
+    tool_calls: Sequence[Any],
+    steps: Sequence[EnvironmentStep],
+) -> str:
+    if tool_calls:
+        first_call = tool_calls[0]
+        if getattr(first_call, "tool", "") == "submit":
+            args = getattr(first_call, "args", {})
+            if isinstance(args, Mapping):
+                value = args.get("final_response")
+                if isinstance(value, str):
+                    return value
+                if value is not None:
+                    return str(value)
     for step in reversed(steps):
         if step.request.tool != "submit":
             continue
@@ -862,6 +929,47 @@ def _coerce_token_ids(value: Any) -> list[int]:
         if isinstance(token, numbers.Integral):
             token_ids.append(int(token))
     return token_ids
+
+
+def _clip_prompt_for_rollout_context(prompt_ids: Any, *, prompt_length: int) -> list[int]:
+    if prompt_length < 1:
+        raise ValueError("prompt_length must be >= 1.")
+    normalized_prompt_ids = _coerce_token_ids(prompt_ids)
+    if len(normalized_prompt_ids) <= prompt_length:
+        return normalized_prompt_ids
+    return normalized_prompt_ids[-prompt_length:]
+
+
+def _validate_rollout_context_alignment(
+    *,
+    canonical_prompt_ids: Sequence[int],
+    full_token_ids: Sequence[int],
+    response_mask: Sequence[int],
+    response_logprobs: Sequence[float] | None = None,
+) -> None:
+    prompt_len = len(canonical_prompt_ids)
+    full_len = len(full_token_ids)
+    if full_len < prompt_len:
+        raise RuntimeError(
+            "swe_bridge_agent context mismatch: full_token_ids shorter than canonical prompt "
+            f"(full={full_len}, prompt={prompt_len})."
+        )
+
+    if list(full_token_ids[:prompt_len]) != list(canonical_prompt_ids):
+        raise RuntimeError("swe_bridge_agent context mismatch: prompt prefix diverged from rollout context.")
+
+    response_len = full_len - prompt_len
+    if response_len != len(response_mask):
+        raise RuntimeError(
+            "swe_bridge_agent context mismatch: response length does not match response_mask "
+            f"(response={response_len}, mask={len(response_mask)})."
+        )
+
+    if response_logprobs is not None and len(response_logprobs) != len(response_mask):
+        raise RuntimeError(
+            "swe_bridge_agent context mismatch: response_logprobs length does not match response_mask "
+            f"(logprobs={len(response_logprobs)}, mask={len(response_mask)})."
+        )
 
 
 def _coerce_logprobs(value: Any) -> list[float] | None:

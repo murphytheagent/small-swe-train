@@ -18,6 +18,8 @@ def _run_script(
 ) -> subprocess.CompletedProcess[str]:
     script_path = _repo_root() / "scripts" / script_name
     env = os.environ.copy()
+    if script_name == "run_sdpo.sh":
+        env.setdefault("SDPO_RFT_CHECKPOINT", "/tmp/rft-checkpoint")
     if env_overrides is not None:
         env.update(env_overrides)
     return subprocess.run(
@@ -50,6 +52,21 @@ def _write_python_defaults_stub(tmp_path: Path, defaults_line: str) -> Path:
     return stub_path
 
 
+def _write_python_no_preload_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "python-no-preload-stub.sh"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1:-}\" == \"-m\" && \"${2:-}\" == \"env.preload_sdpo_dataset\" ]]; then\n"
+        "  echo \"unexpected preload helper invocation\" >&2\n"
+        "  exit 91\n"
+        "fi\n"
+        "exec python3 \"$@\"\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
 def test_run_rft_script_dry_run_prints_verl_command() -> None:
     result = _run_script("run_rft.sh", "trainer.total_training_steps=1")
     assert "-m torch.distributed.run" in result.stdout
@@ -59,13 +76,14 @@ def test_run_rft_script_dry_run_prints_verl_command() -> None:
 
 
 def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
+    expected_tp, expected_dp = config.resolve_rft_vllm_parallel_defaults(nproc_per_node=8)
     result = _run_script(
         "run_rft.sh",
         "trainer.total_training_steps=1",
         env_overrides={"NPROC_PER_NODE": "8"},
     )
-    assert "--tensor-parallel-size 2" in result.stdout
-    assert "--data-parallel-size 4" in result.stdout
+    assert f"--tensor-parallel-size {expected_tp}" in result.stdout
+    assert f"--data-parallel-size {expected_dp}" in result.stdout
 
 
 def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topology(
@@ -76,7 +94,7 @@ def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topo
         (
             "100 8 64 32 1 1 512 0.1 1 2 2 "
             "http://127.0.0.1:8000/v1 "
-            "Qwen/Qwen3-4B-Instruct-2507 90 1024 0.0 1.0 8 12288 "
+            f"{config.DEFAULT_TRAINING_MODEL_NAME} 90 1024 0.0 1.0 8 12288 "
             "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
         ),
     )
@@ -100,7 +118,7 @@ def test_run_rft_script_dry_run_defaults_nproc_to_detected_gpu_count(
         (
             "100 8 64 32 1 1 512 0.1 1 2 4 "
             "http://127.0.0.1:8000/v1 "
-            "Qwen/Qwen3-4B-Instruct-2507 90 1024 0.0 1.0 8 12288 "
+            f"{config.DEFAULT_TRAINING_MODEL_NAME} 90 1024 0.0 1.0 8 12288 "
             "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
         ),
     )
@@ -116,11 +134,14 @@ def test_run_rft_script_dry_run_defaults_nproc_to_detected_gpu_count(
 
 
 def test_run_rft_script_dry_run_uses_centralized_collector_in_flight_default() -> None:
+    runtime_defaults = config.rft_runtime_defaults()
+    task_batch_size = int(runtime_defaults["loop"]["task_batch_size"])
+    expected_in_flight = config.resolve_rft_collector_max_in_flight_default(task_batch_size=task_batch_size)
     result = _run_script(
         "run_rft.sh",
         "trainer.total_training_steps=1",
     )
-    assert "collector_max_in_flight_tasks=32" in result.stdout
+    assert f"collector_max_in_flight_tasks={expected_in_flight}" in result.stdout
 
 
 def test_run_rft_script_dry_run_allows_explicit_tp_override() -> None:
@@ -223,6 +244,9 @@ def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     result = _run_script("run_sdpo.sh", "data.train_batch_size=4")
     assert "-m verl_integration.main_ppo_entry" in result.stdout
     assert "--config-name sdpo_swe" in result.stdout
+    assert "actor_rollout_ref.model.path=/tmp/rft-checkpoint" in result.stdout
+    assert "data.train_files=" in result.stdout
+    assert "data.val_files=" in result.stdout
     assert "data.train_batch_size=4" in result.stdout
 
 
@@ -254,6 +278,43 @@ def test_run_sdpo_script_dry_run_rollout_only_respects_explicit_validation_overr
     assert "trainer.val_before_train=true" in result.stdout
     assert "trainer.test_freq=0" not in result.stdout
     assert "trainer.val_before_train=false" not in result.stdout
+
+
+def test_run_sdpo_script_dry_run_uses_preloaded_task_parquet_for_both_splits() -> None:
+    result = _run_script("run_sdpo.sh")
+    assert "data.train_files=" in result.stdout
+    assert "data.val_files=" in result.stdout
+    assert "sdpo_tasks_" in result.stdout
+    assert "_train.parquet" in result.stdout
+    assert "_val.parquet" in result.stdout
+
+
+def test_run_sdpo_script_dry_run_mirrors_explicit_train_files_to_val_files() -> None:
+    result = _run_script(
+        "run_sdpo.sh",
+        "data.train_files=/tmp/custom_sdpo_tasks.parquet",
+    )
+    assert "data.train_files=/tmp/custom_sdpo_tasks.parquet" in result.stdout
+    assert "data.val_files=/tmp/custom_sdpo_tasks.parquet" in result.stdout
+
+
+def test_run_sdpo_script_dry_run_preloaded_task_parquet_overrides_split_defaults() -> None:
+    result = _run_script(
+        "run_sdpo.sh",
+        env_overrides={"SDPO_PRELOADED_TASK_PARQUET": "/tmp/preloaded.parquet"},
+    )
+    assert "data.train_files=/tmp/preloaded.parquet" in result.stdout
+    assert "data.val_files=/tmp/preloaded.parquet" in result.stdout
+
+
+def test_run_sdpo_script_dry_run_does_not_invoke_preload_helper_module(tmp_path: Path) -> None:
+    fake_python = _write_python_no_preload_stub(tmp_path)
+    result = _run_script(
+        "run_sdpo.sh",
+        env_overrides={"PYTHON_BIN": str(fake_python)},
+    )
+    assert "data.train_files=" in result.stdout
+    assert "data.val_files=" in result.stdout
 
 
 def test_run_rft_onpolicy_rollout_proof_script_sets_onpolicy_overrides() -> None:

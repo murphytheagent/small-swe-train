@@ -198,7 +198,7 @@ def test_docker_executor_search_command_does_not_suppress_errors() -> None:
 def test_docker_executor_rejects_out_of_range_bash_timeout() -> None:
     executor = DockerToolExecutor(container_id="container-1", tool_timeout_sec=30)
     response = executor.run(
-        ToolRequest(tool="bash", args={"command": "echo hi", "timeout_sec": 601})
+        ToolRequest(tool="bash", args={"command": "echo hi", "timeout_sec": 7201})
     )
 
     assert response.exit_code == 2

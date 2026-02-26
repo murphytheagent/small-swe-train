@@ -9,7 +9,7 @@ from .command_runner import CommandRunner, default_command_runner
 from .runtime_protocol import ToolRequest, ToolResponse
 
 _BASH_TIMEOUT_MIN = 1
-_BASH_TIMEOUT_MAX = 600
+_BASH_TIMEOUT_MAX = 7200
 _SEARCH_TOP_K_DEFAULT = 10
 _SEARCH_TOP_K_MIN = 1
 _SEARCH_TOP_K_MAX = 50

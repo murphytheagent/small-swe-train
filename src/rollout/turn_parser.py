@@ -1,16 +1,15 @@
 """ChatML assistant-turn parser for optional thinking + ordered tool calls.
 
-The ``TurnParser`` class compiles regex patterns from a ``ModelDelimiters``
-config so the same parsing logic works across model families.  Module-level
-convenience functions (``parse_chatml_assistant_turn``, etc.) use the Qwen3
-defaults for backward compatibility.
+The ``TurnParser`` class uses delimiter-aware scanning plus JSON decoding so
+the same parsing logic works across model families. Module-level convenience
+functions (``parse_chatml_assistant_turn``, etc.) use the Qwen3 defaults for
+backward compatibility.
 """
 
 from __future__ import annotations
 
 import functools
 import json
-import re
 
 from prompts.model_delimiters import ModelDelimiters, default_delimiters
 from config import MAX_TOOL_CALLS_PER_TURN
@@ -32,18 +31,7 @@ class TurnParser:
         self._delimiters = delimiters
         self._assistant_prefix = f"{delimiters.role_start}assistant"
         self._assistant_end = delimiters.role_end
-        self._think_pattern = re.compile(
-            re.escape(delimiters.think_start)
-            + r"(.*?)"
-            + re.escape(delimiters.think_end),
-            re.DOTALL,
-        )
-        self._tool_call_pattern = re.compile(
-            re.escape(delimiters.tool_call_start)
-            + r"(.*?)"
-            + re.escape(delimiters.tool_call_end),
-            re.DOTALL,
-        )
+        self._json_decoder = json.JSONDecoder()
 
     @property
     def delimiters(self) -> ModelDelimiters:
@@ -58,14 +46,19 @@ class TurnParser:
             raise TurnParseError(
                 f"Turn does not start with '{self._assistant_prefix}'."
             )
-        end_index = stripped.rfind(self._assistant_end)
-        if end_index < 0:
+        if not stripped.endswith(self._assistant_end):
+            end_index = stripped.rfind(self._assistant_end)
+            if end_index < 0:
+                raise TurnParseError(
+                    f"Missing '{self._assistant_end}' terminator."
+                )
+            raise TurnParseError("Unexpected text after ChatML end delimiter.")
+
+        end_index = len(stripped) - len(self._assistant_end)
+        if end_index < len(self._assistant_prefix):
             raise TurnParseError(
                 f"Missing '{self._assistant_end}' terminator."
             )
-        tail = stripped[end_index + len(self._assistant_end) :].strip()
-        if tail:
-            raise TurnParseError("Unexpected text after ChatML end delimiter.")
         payload = stripped[len(self._assistant_prefix) : end_index]
         return payload.lstrip("\n").strip()
 
@@ -77,42 +70,63 @@ class TurnParser:
         if max_tool_calls < 1:
             raise ValueError("max_tool_calls must be >= 1")
 
-        if payload.count(d.think_start) != payload.count(d.think_end):
-            raise TurnParseError(f"Unbalanced {d.think_start} delimiters.")
-
-        think_matches = list(self._think_pattern.finditer(payload))
-        if len(think_matches) > 1:
-            raise TurnParseError(
-                f"At most one {d.think_start} block is allowed per assistant turn."
-            )
-
         thinking: str | None = None
-        if think_matches:
-            match = think_matches[0]
-            thinking = match.group(1).strip() or None
-
-        tool_matches = list(self._tool_call_pattern.finditer(payload))
-        if not tool_matches:
-            raise TurnParseError(
-                f"At least one {d.tool_call_start} block is required."
-            )
-        if len(tool_matches) > max_tool_calls:
-            raise TurnParseError(
-                f"Too many tool calls: got {len(tool_matches)}, max is {max_tool_calls}."
-            )
-
+        think_seen = False
         tool_calls: list[ToolCall] = []
-        for match in tool_matches:
-            raw_json = match.group(1).strip()
+        cursor = 0
+
+        while cursor < len(payload):
+            think_start = payload.find(d.think_start, cursor)
+            tool_start = payload.find(d.tool_call_start, cursor)
+            if think_start == -1 and tool_start == -1:
+                break
+
+            if think_start != -1 and (tool_start == -1 or think_start < tool_start):
+                if think_seen:
+                    raise TurnParseError(
+                        f"At most one {d.think_start} block is allowed per assistant turn."
+                    )
+                think_end = payload.find(d.think_end, think_start + len(d.think_start))
+                if think_end < 0:
+                    raise TurnParseError(f"Unbalanced {d.think_start} delimiters.")
+                think_seen = True
+                raw_thinking = payload[think_start + len(d.think_start) : think_end].strip()
+                thinking = raw_thinking or None
+                cursor = think_end + len(d.think_end)
+                continue
+
+            json_start = tool_start + len(d.tool_call_start)
+            while json_start < len(payload) and payload[json_start].isspace():
+                json_start += 1
+
             try:
-                payload_obj = json.loads(raw_json)
+                payload_obj, json_end = self._json_decoder.raw_decode(payload, json_start)
             except json.JSONDecodeError as exc:
                 raise TurnParseError(f"Invalid tool_call JSON: {exc.msg}") from exc
+
+            end_tag_start = json_end
+            while end_tag_start < len(payload) and payload[end_tag_start].isspace():
+                end_tag_start += 1
+            if not payload.startswith(d.tool_call_end, end_tag_start):
+                raise TurnParseError(
+                    f"Missing {d.tool_call_end} after {d.tool_call_start} JSON payload."
+                )
+
             if not isinstance(payload_obj, dict):
                 raise TurnParseError(
                     f"Each {d.tool_call_start} payload must decode to a JSON object."
                 )
             tool_calls.append(make_tool_call(payload_obj))
+            if len(tool_calls) > max_tool_calls:
+                raise TurnParseError(
+                    f"Too many tool calls: got {len(tool_calls)}, max is {max_tool_calls}."
+                )
+            cursor = end_tag_start + len(d.tool_call_end)
+
+        if not tool_calls:
+            raise TurnParseError(
+                f"At least one {d.tool_call_start} block is required."
+            )
 
         try:
             return ActionEnvelope(tool_calls=tuple(tool_calls), thinking=thinking)

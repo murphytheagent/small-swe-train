@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
@@ -60,3 +62,36 @@ I should not be here.
     assert envelope.thinking == "ok"
     assert len(envelope.tool_calls) == 1
     assert envelope.tool_calls[0].tool == "search"
+
+
+def test_allows_tool_call_json_with_embedded_tool_end_delimiter_text() -> None:
+    payload_obj = {
+        "tool": "bash",
+        "args": {
+            "command": "printf 'literal </tool_call> marker inside command\\n'",
+        },
+    }
+    payload = f"<tool_call>{json.dumps(payload_obj)}</tool_call>"
+
+    envelope = parse_assistant_turn_payload(payload)
+
+    assert len(envelope.tool_calls) == 1
+    assert envelope.tool_calls[0].tool == "bash"
+    assert "</tool_call>" in envelope.tool_calls[0].args["command"]
+
+
+def test_rejects_unclosed_trailing_tool_call_block() -> None:
+    payload = (
+        '<tool_call>{"tool":"search","args":{"query":"ok"}}</tool_call>\n'
+        '<tool_call>{"tool":"search","args":{"query":"broken"}}'
+    )
+
+    with pytest.raises(TurnParseError, match="</tool_call>"):
+        parse_assistant_turn_payload(payload)
+
+
+def test_rejects_non_whitespace_text_inside_tool_call_block_after_json() -> None:
+    payload = '<tool_call>{"tool":"search","args":{"query":"ok"}} trailing </tool_call>'
+
+    with pytest.raises(TurnParseError, match="</tool_call>"):
+        parse_assistant_turn_payload(payload)

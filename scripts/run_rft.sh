@@ -422,6 +422,7 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
     -m "${RFT_TRAINER_MODULE}"
     --config-name rft_swe
     --config-dir "${CONFIG_DIR}"
+    "~data.apply_chat_template_kwargs.enable_thinking"
     max_model_len="${RFT_MAX_SEQUENCE_LENGTH}"
     trainer.total_epochs="${RFT_SFT_NUM_EPOCH_PER_BATCH}"
     trainer.total_training_steps="${RFT_STEPS}"
@@ -499,6 +500,7 @@ LOOP_CMD=(
   --trainer-override "actor_rollout_ref.model.lora.rank=${RFT_LORA_RANK}"
   --trainer-override "actor_rollout_ref.model.lora.alpha=${RFT_LORA_ALPHA}"
   --trainer-override "actor_rollout_ref.model.lora.target_modules=${RFT_LORA_TARGET_MODULES_HYDRA}"
+  --trainer-override "~data.apply_chat_template_kwargs.enable_thinking"
 )
 
 if [[ -n "${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}" ]]; then

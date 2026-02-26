@@ -8,6 +8,11 @@ from typing import Any, Mapping, Sequence
 
 from env.runtime_protocol import ToolRequest
 
+_MIN_PER_TEST_TIMEOUT_SEC = 180
+_MAX_PER_TEST_TIMEOUT_SEC = 1800
+_GROUP_TIMEOUT_BUFFER_SEC = 120
+_MAX_GROUP_TIMEOUT_SEC = 7200
+
 _VERIFY_SCRIPT = """import json
 import os
 import subprocess
@@ -90,17 +95,21 @@ def run_submission_verifier(
     fail_targets = _normalize_test_targets(fail_to_pass)
     pass_targets = _normalize_test_targets(pass_to_pass)
 
-    per_test_timeout_sec = max(10, min(int(verifier_timeout_sec), 180))
+    requested_timeout_sec = max(int(verifier_timeout_sec), 1)
+    per_test_timeout_sec = max(
+        _MIN_PER_TEST_TIMEOUT_SEC,
+        min(requested_timeout_sec, _MAX_PER_TEST_TIMEOUT_SEC),
+    )
     fail_group = _verify_test_group(
         executor=executor,
         tests=fail_targets,
-        verifier_timeout_sec=verifier_timeout_sec,
+        verifier_timeout_sec=requested_timeout_sec,
         per_test_timeout_sec=per_test_timeout_sec,
     )
     pass_group = _verify_test_group(
         executor=executor,
         tests=pass_targets,
-        verifier_timeout_sec=verifier_timeout_sec,
+        verifier_timeout_sec=requested_timeout_sec,
         per_test_timeout_sec=per_test_timeout_sec,
     )
 
@@ -155,11 +164,17 @@ def _verify_test_group(
             "stderr_tail": "",
         }
 
+    group_timeout_sec = _resolve_group_timeout_sec(
+        verifier_timeout_sec=verifier_timeout_sec,
+        per_test_timeout_sec=per_test_timeout_sec,
+        test_count=len(tests),
+    )
+
     tests_json = json.dumps(list(tests), ensure_ascii=True)
     request = ToolRequest(
         tool="bash",
         args={
-            "timeout_sec": int(max(verifier_timeout_sec, 1)),
+            "timeout_sec": int(group_timeout_sec),
             "stdin": _VERIFY_SCRIPT,
             "command": _build_verifier_shell_command(
                 tests_json=tests_json,
@@ -245,6 +260,18 @@ def _build_verifier_shell_command(*, tests_json: str, per_test_timeout_sec: int)
         'SMALL_SWE_PYBIN="${pybin}" '
         '"${pybin}" -'
     )
+
+
+def _resolve_group_timeout_sec(
+    *,
+    verifier_timeout_sec: int,
+    per_test_timeout_sec: int,
+    test_count: int,
+) -> int:
+    base_timeout = max(int(verifier_timeout_sec), 1)
+    safe_test_count = max(int(test_count), 1)
+    min_group_timeout = per_test_timeout_sec * safe_test_count + _GROUP_TIMEOUT_BUFFER_SEC
+    return min(max(base_timeout, min_group_timeout), _MAX_GROUP_TIMEOUT_SEC)
 
 
 def _decode_verifier_payload(stdout_text: str) -> dict[str, Any] | None:
@@ -334,4 +361,3 @@ def _build_feedback(
     if pass_tail:
         lines.append("PASS_TO_PASS stderr tail:\n" + pass_tail[-2000:])
     return "\n".join(lines).strip()
-

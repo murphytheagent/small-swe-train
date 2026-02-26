@@ -101,8 +101,8 @@ def test_collect_rollouts_for_steps_writes_jsonl_artifacts(tmp_path: Path) -> No
                 "task_id": "task-1",
                 "image_name": "img:1",
                 "problem_statement": "Fix bug",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             }
         ],
         pool_factory=lambda _runtime: _FakePool(),
@@ -369,8 +369,8 @@ def test_collect_rft_sft_batch_for_steps_filters_failed_attempts(tmp_path: Path)
                 "task_id": "task-1",
                 "image_name": "img:1",
                 "problem_statement": "Fix bug",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             }
         ],
         pool_factory=lambda _runtime: _FakePool(),
@@ -463,8 +463,8 @@ def test_collect_rft_sft_batch_for_steps_all_rejected_returns_empty_selected_bat
                 "task_id": "task-1",
                 "image_name": "img:1",
                 "problem_statement": "Fix bug",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             }
         ],
         pool_factory=lambda _runtime: _FakePool(),

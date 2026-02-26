@@ -296,12 +296,15 @@ MIN_TOOL_CALLS_PER_TURN: int = int(_output_contract["min_tool_calls_per_turn"])
 MAX_TOOL_CALLS_PER_TURN: int = int(_output_contract["max_tool_calls_per_turn"])
 TERMINAL_TOOL_NAME: str = str(_output_contract["terminal_tool"]).strip().lower()
 SUBMIT_MUST_BE_ONLY_TOOL_CALL: bool = bool(_output_contract["submit_must_be_only_tool_call"])
+TERMINAL_VALIDITY_PENALTY: float = float(_output_contract.get("terminal_validity_penalty", 0.2))
 DEFAULT_TRAINING_MODEL_NAME: str = default_training_model_name()
 
 if MIN_TOOL_CALLS_PER_TURN < 1:
     raise ValueError("min_tool_calls_per_turn must be >= 1")
 if MAX_TOOL_CALLS_PER_TURN < MIN_TOOL_CALLS_PER_TURN:
     raise ValueError("max_tool_calls_per_turn must be >= min_tool_calls_per_turn")
+if TERMINAL_VALIDITY_PENALTY < 0.0:
+    raise ValueError("terminal_validity_penalty must be >= 0")
 _validate_terminal_tool_name(TERMINAL_TOOL_NAME, allowed_tools=ALLOWED_TOOLS)
 if TERMINAL_TOOL_NAME != SCHEMA_TERMINAL_TOOL_NAME:
     raise ValueError(

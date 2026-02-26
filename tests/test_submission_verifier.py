@@ -92,3 +92,29 @@ def test_run_submission_verifier_handles_missing_test_groups() -> None:
     assert result["resolved"] is True
     assert executor.requests == []
 
+
+def test_run_submission_verifier_uses_generous_group_timeout_budget() -> None:
+    executor = _FakeExecutor(
+        responses=[
+            ToolResponse(
+                stdout='{"results":{"tests/test_bug.py::test_a":true,"tests/test_bug.py::test_b":true},"executed":2,"all_passed":true,"failures":{}}',
+                stderr="",
+                exit_code=0,
+            )
+        ]
+    )
+
+    run_submission_verifier(
+        executor=executor,
+        fail_to_pass=["tests/test_bug.py::test_a", "tests/test_bug.py::test_b"],
+        pass_to_pass=[],
+        verifier_timeout_sec=30,
+        final_response="patched",
+    )
+
+    assert len(executor.requests) == 1
+    request = executor.requests[0]
+    assert request.tool == "bash"
+    # 2 tests * 180s each + 120s buffer
+    assert request.args["timeout_sec"] == 480
+    assert "SMALL_SWE_PER_TEST_TIMEOUT_SEC=180" in request.args["command"]
