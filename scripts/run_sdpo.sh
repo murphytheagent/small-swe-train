@@ -57,7 +57,7 @@ _has_val_files_override() {
 ROLLOUT_ONLY_OVERRIDES=()
 if [[ "${SDPO_ROLLOUT_ONLY_E2E}" == "1" ]] && ! _has_val_files_override "$@"; then
   # RL e2e mode should consume rollout-generated data only.
-  ROLLOUT_ONLY_OVERRIDES+=("~data.val_files")
+  ROLLOUT_ONLY_OVERRIDES+=("data.val_files=[]")
 fi
 
 CMD=(
