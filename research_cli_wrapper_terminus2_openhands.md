@@ -1,101 +1,194 @@
-# Research: CLI Wrapper to Run Terminus2 or OpenHands with `small-swe-train` Backend
+# Research: CLI Wrapper for Terminus2/OpenHands with `small-swe-train` Backend
 
 Generated: 2026-02-26 05:17 UTC
-Status: research draft (no implementation in this PR)
+Updated: 2026-02-26 10:44 UTC (deep consult + codebase-context pass)
+Status: research draft (implementation-ready plan; no code changes in this PR)
 
-## Goal
-Define a practical path to run an external CLI/code agent runtime (Terminus2 or OpenHands) while using our trained model as the backend.
+## Executive Decision Summary
+- Build a dedicated in-repo runtime gateway under `src/runtime_gateway/` as the interoperability boundary.
+- Keep the internal action contract canonical (`bash/search/apply_patch/submit`, JSON args) and do all external mediation at the gateway boundary.
+- Use OpenAI-compatible chat API at the gateway edge so Terminus2/OpenHands can integrate without patching their repos.
+- Reuse existing parser/schema stack (`turn_parser`, `contracts`, `env_bridge`) for model-output validation before emitting runtime-specific responses.
+- Add deterministic context-window controls in the gateway for inbound/outbound tool-output growth.
+- Add strict telemetry and replay artifacts for parse/adapter/runtime failures.
+- Start with minimal command-path interoperability (smoke tasks) before richer native tool mapping.
 
-## Source-Backed Facts
-- Harbor Terminus2 supports parser selection (`json` or `xml`), turn limits, summarization controls, and optional rollout-detail collection.
-  - Source: https://raw.githubusercontent.com/laude-institute/harbor/main/src/harbor/agents/terminus_2/terminus_2.py
-- Terminus2 prompt templates exist for both JSON and XML response contracts.
-  - Sources:
-    - https://raw.githubusercontent.com/laude-institute/harbor/main/src/harbor/agents/terminus_2/templates/terminus-json-plain.txt
-    - https://raw.githubusercontent.com/laude-institute/harbor/main/src/harbor/agents/terminus_2/templates/terminus-xml-plain.txt
-- OpenHands CLI supports terminal/headless/web/IDE modes and automation-friendly headless execution.
-  - Source: https://raw.githubusercontent.com/OpenHands/OpenHands-CLI/main/README.md
-- OpenHands SDK workspace exposes command and git primitives (`execute_command`, `git_changes`, `git_diff`) and supports local/remote workspace modes.
-  - Source: https://docs.openhands.dev/sdk/api-reference/openhands.sdk.workspace
-- OpenHands runtime internally routes actions like `CmdRunAction`, `FileReadAction`, `FileWriteAction`, and `IPythonRunCellAction`.
-  - Source: https://raw.githubusercontent.com/All-Hands-AI/OpenHands/main/openhands/runtime/base.py
+## Integration Options Matrix
 
-## Recommended Integration Strategy
-Use a compatibility gateway that serves our trained model via an OpenAI-compatible chat endpoint, then configure Terminus2/OpenHands to call that endpoint.
+| Option | Description | Effort | Reliability | Preserves canonical internal JSON | Notes |
+| --- | --- | --- | --- | --- | --- |
+| OpenAI-compat gateway (recommended) | Our service translates external runtime expectations to/from canonical schema | Medium | High | Yes | Best isolation of drift |
+| Native runtime plugin | Build runtime-specific plugins/forks | High | Medium | Yes | High maintenance burden |
+| Direct prompt shim | Try to force direct prompt-level compatibility only | Low | Low | Partial | brittle and hard to audit |
 
-Why this is the fastest path:
-- avoids rewriting external runtimes
-- keeps our model ownership + deployment control
-- preserves runtime features from external agent frameworks (tooling, retries, UI, orchestration)
+## Gap Analysis Against Current Codebase
 
-## Architecture
-```text
-Terminus2 or OpenHands CLI
-        |
-        | (chat/tool requests)
-        v
-Model Gateway (OpenAI-compatible API)
-        |
-        | (tokenizer/chat template adapter)
-        v
-small-swe-train model server (vLLM/TGI/custom)
-```
+| Capability | Present now | Missing | Risk |
+| --- | --- | --- | --- |
+| Canonical tool schemas + validation (`contracts.py`) | Yes | None | Low |
+| Canonical assistant turn parsing (`turn_parser.py`) | Yes | None | Low |
+| Bridge execution + response serialization (`env_bridge.py`) | Yes | None | Low |
+| OpenAI-compatible model server entry (`vllm_api_server_entry.py`) | Yes | None | Low |
+| Runtime-gateway service layer | No | `src/runtime_gateway/*` | High |
+| External-runtime request/response adapters | No | Terminus2/OpenHands adapter modules | High |
+| Gateway-side context protection for external runtime history | Partial (only internal loop has truncation policy) | inbound guard + budget enforcement | High |
+| Gateway observability/replay tooling | No | structured logs + replay bundle | High |
 
-## Wrapper Responsibilities
-1. Request/response compatibility
-- map incoming chat format to the model’s expected prompt template
-- normalize tool-call style if runtime expects a specific schema
+## Recommended Architecture
 
-2. Safety and runtime controls
-- enforce max output tokens
-- enforce timeout and retry policy
-- return structured errors for caller runtime
+### Proposed files
+- `src/runtime_gateway/app.py`
+- `src/runtime_gateway/config.py`
+- `src/runtime_gateway/server.py`
+- `src/runtime_gateway/canonical_history.py`
+- `src/runtime_gateway/canonical_prompt.py`
+- `src/runtime_gateway/output_parser.py`
+- `src/runtime_gateway/context_guard.py`
+- `src/runtime_gateway/contract_validation.py`
+- `src/runtime_gateway/adapters/base.py`
+- `src/runtime_gateway/adapters/terminus2_json.py`
+- `src/runtime_gateway/adapters/terminus2_xml.py`
+- `src/runtime_gateway/adapters/openhands.py`
+- `src/runtime_gateway/upstream/openai_client.py`
+- `src/runtime_gateway/obs/logging.py`
+- `src/runtime_gateway/obs/replay.py`
+- `scripts/serve_runtime_gateway.py`
+- `scripts/smoke_terminus2_gateway.sh`
+- `scripts/smoke_openhands_gateway.sh`
 
-3. Telemetry
-- include trace IDs
-- capture latency + token usage
-- persist raw request/response for failure replay
+### Component boundaries
+- Gateway edge:
+  - receives OpenAI-compatible requests from external runtimes,
+  - validates request shape and limits,
+  - routes through adapter mode (`terminus2_json`, `terminus2_xml`, `openhands`).
+- Canonical core:
+  - normalizes history/messages into canonical internal representation,
+  - builds canonical prompt contract,
+  - calls upstream model endpoint,
+  - parses/validates returned tool calls via existing internal parser/schema.
+- Adapter egress:
+  - converts canonical output into runtime-specific response payloads.
 
-## Per-Runtime Notes
-### Terminus2 path
-- Prefer `parser_name="json"` for alignment with current internal contracts.
-- Keep `collect_rollout_details=false` by default; enable only for training/eval traces.
-- Tune `max_turns` + summarization settings to avoid hidden context drift.
+## Request/Response Contract Mapping
 
-### OpenHands path
-- Start with OpenHands CLI headless mode for deterministic benchmarking.
-- Bind to remote workspace when isolation is needed; local workspace for quick dev loops.
-- Map model endpoint config through CLI settings so backend swap does not require code changes.
+### Internal canonical contract (unchanged)
+- Tool calls remain JSON with canonical tool names and args:
+  - `{"tool":"bash","args":{...}}`, `{"tool":"search","args":{...}}`, `{"tool":"apply_patch","args":{...}}`, `{"tool":"submit","args":{...}}`.
+- Preserve existing invariants (`submit` terminal singleton, schema-required args, max tool-call count policy).
 
-## MVP Implementation Plan
-1. Build `scripts/serve_model_gateway.py` (OpenAI-compatible `/v1/chat/completions`).
-2. Add one smoke script for Terminus2 backend validation.
-3. Add one smoke script for OpenHands headless backend validation.
-4. Add contract tests:
-   - malformed request handling
-   - timeout handling
-   - max-token clipping
-   - tool-call schema preservation
+### Terminus2 mapping
+- Inbound: OpenAI-like chat payload.
+- Outbound: Terminus2 parser-compatible JSON/XML payload.
+- Canonical-to-Terminus2 strategy:
+  - `bash` -> command/keystroke action entries,
+  - `search` -> command/keystroke action entries,
+  - `apply_patch` -> patch-apply command sequence,
+  - `submit` -> terminal completion mapping.
 
-## Acceptance Criteria (for implementation PR)
-- Terminus2 can complete a simple terminal task against our backend endpoint.
-- OpenHands headless can complete a simple repo task against our backend endpoint.
-- Unified logs capture prompt, response, stop reason, and runtime latency.
-- No code changes required inside external runtime repos for basic backend swap.
+### OpenHands mapping
+- Inbound: OpenAI-like chat payload and runtime tool capabilities.
+- Outbound: OpenAI tool-call style responses compatible with OpenHands runtime expectations.
+- P0 mapping target:
+  - map canonical tool calls to command execution path first,
+  - refine to richer native actions in later phase when runtime schema stability is validated.
 
-## Risks
-- Prompt-template mismatch can degrade tool-call correctness even when endpoint is compatible.
-- Runtime-specific assumptions about tool format (XML/JSON/function-call style) can silently reduce solve rate.
-- Stateful kernels (notably Python tools) can expand context rapidly; wrapper must support context-protection policies.
+## Tool-Format Mediation Strategy
+- Internal source of truth remains canonical JSON tool schema.
+- Support external formats by ingress/egress adapters only:
+  - Terminus2 JSON parser format,
+  - Terminus2 XML parser format,
+  - OpenHands-native OpenAI tool-call response format.
+- Never train/deploy against multiple internal schemas; normalize at boundaries.
+- Keep conversion deterministic and log adapter decisions for replay.
+
+## Reliability, Safety, and Security Controls
+
+### Reliability controls
+- Parse/validation fail-fast with one bounded repair retry policy.
+- Hard per-request timeout and response-size limits.
+- Deterministic stop-reason propagation (`parse_error`, `validation_error`, `timeout`, `upstream_error`).
+
+### Context growth controls
+- Reuse deterministic truncation policy on gateway inbound tool outputs.
+- Add total-context budget guard with pre-forward pruning.
+- Optional output-cache strategy for repeated large tool results (store full blob outside prompt, inject short reference).
+
+### Security controls
+- Request size limits and rate limits.
+- Strict JSON schema validation on API boundary.
+- Redact secrets in logs/replays.
+- Gateway executes no tools itself; runtime executes tools.
+- Default deployment recommendation: localhost/private network unless explicit auth/TLS hardening is configured.
+
+## Observability and Diagnostics Plan
+- Structured JSON logs:
+  - request id, adapter mode, upstream latency, parse status, truncation stats.
+- Replay bundle artifacts on failure:
+  - sanitized request,
+  - canonicalized prompt/history snapshot,
+  - raw upstream response,
+  - parsed envelope or parse error,
+  - emitted runtime payload.
+- Metrics:
+  - request count by adapter mode,
+  - parse failure rate,
+  - truncation frequency,
+  - upstream timeout/error rates,
+  - p50/p95 end-to-end latency.
+
+## Validation Matrix
+
+### Unit
+- canonical-history conversion tests.
+- contract-validation tests.
+- terminus2/openhands adapter mapping tests.
+- context-guard determinism tests.
+
+### Integration
+- gateway -> upstream vLLM request/response conformance.
+- terminus2 adapter output compatibility checks.
+- openhands adapter output compatibility checks.
+
+### Runtime smoke
+- Terminus2 executes simple command task through gateway.
+- OpenHands headless executes simple repository task through gateway.
+
+### Failure injection
+- malformed model output.
+- oversized tool output history.
+- upstream timeout and transport errors.
+- adapter mapping missing/unknown tool capability.
+
+## Phased Implementation Plan
+
+### P0: Minimal gateway + dual smokes
+- Implement service skeleton, canonical parser integration, basic adapters, and smoke scripts.
+- Gate: both Terminus2 and OpenHands complete trivial smoke via gateway.
+
+### P1: Canonical history + stronger mappings
+- Add richer history normalization and improved runtime-specific tool mappings.
+- Gate: multi-turn tasks pass with lower parse/adapter failure rates.
+
+### P2: Hardening + observability
+- Add replay bundles, structured metrics, and strict guardrails.
+- Gate: deterministic reproduction of injected failures from replay artifacts.
+
+### P3: Multi-backend + conformance suite
+- Add interchangeable upstream backend client and full conformance regression suite.
+- Gate: stable cross-runtime compatibility on maintained smoke/e2e matrix.
+
+## Open Questions for Human Review
+- For Terminus2 terminal completion, should `submit` map to empty command list or explicit no-op command?
+- Which OpenHands runtime/schema version should be the pinned compatibility target?
+- Should P0 include only command execution mappings, or also native file-edit/action mappings?
+- Should gateway enforce strict auth/TLS in first release or remain local-only initially?
+- What is the preferred policy for oversized history: strict truncation vs summarize-and-continue?
+- Should context-budget limits be static or model-config-driven from runtime policy files?
 
 ## References
-- Harbor Terminus2 source and templates:
-  - https://raw.githubusercontent.com/laude-institute/harbor/main/src/harbor/agents/terminus_2/terminus_2.py
-  - https://raw.githubusercontent.com/laude-institute/harbor/main/src/harbor/agents/terminus_2/templates/terminus-json-plain.txt
-  - https://raw.githubusercontent.com/laude-institute/harbor/main/src/harbor/agents/terminus_2/templates/terminus-xml-plain.txt
-- OpenHands CLI:
-  - https://raw.githubusercontent.com/OpenHands/OpenHands-CLI/main/README.md
-- OpenHands SDK workspace API:
-  - https://docs.openhands.dev/sdk/api-reference/openhands.sdk.workspace
-- OpenHands runtime actions:
-  - https://raw.githubusercontent.com/All-Hands-AI/OpenHands/main/openhands/runtime/base.py
+- https://raw.githubusercontent.com/laude-institute/harbor/main/src/harbor/agents/terminus_2/terminus_2.py
+- https://raw.githubusercontent.com/laude-institute/harbor/main/src/harbor/agents/terminus_2/templates/terminus-json-plain.txt
+- https://raw.githubusercontent.com/laude-institute/harbor/main/src/harbor/agents/terminus_2/templates/terminus-xml-plain.txt
+- https://raw.githubusercontent.com/OpenHands/OpenHands-CLI/main/README.md
+- https://raw.githubusercontent.com/All-Hands-AI/OpenHands/main/openhands/runtime/base.py
+- https://docs.openhands.dev/sdk/api-reference/openhands.sdk.workspace
