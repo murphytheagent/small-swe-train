@@ -85,6 +85,7 @@ def test_sitecustomize_can_install_sdpo_patch_import_guard(monkeypatch) -> None:
     fake_trainer_pkg = types.ModuleType("verl.trainer")
     fake_ppo_pkg = types.ModuleType("verl.trainer.ppo")
     fake_ray_trainer = types.ModuleType("verl.trainer.ppo.ray_trainer")
+    fake_ray_trainer.RayPPOTrainer = object
 
     monkeypatch.setitem(sys.modules, "verl_integration.ppo_runtime_patch", fake_patch_module)
     monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
@@ -102,6 +103,41 @@ def test_sitecustomize_can_install_sdpo_patch_import_guard(monkeypatch) -> None:
 
     assert calls["count"] >= 1
     assert calls["module"] is fake_ray_trainer
+
+
+def test_sitecustomize_skips_sdpo_patch_until_ray_trainer_class_ready(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    fake_patch_module = types.ModuleType("verl_integration.ppo_runtime_patch")
+
+    def _fake_apply_small_swe_sdpo_runtime_patch(module=None):
+        calls["count"] += 1
+        _ = module
+        return True
+
+    fake_patch_module.apply_small_swe_sdpo_runtime_patch = _fake_apply_small_swe_sdpo_runtime_patch
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_trainer_pkg = types.ModuleType("verl.trainer")
+    fake_ppo_pkg = types.ModuleType("verl.trainer.ppo")
+    # Simulate partially initialized import where RayPPOTrainer is not yet set.
+    fake_ray_trainer = types.ModuleType("verl.trainer.ppo.ray_trainer")
+
+    monkeypatch.setitem(sys.modules, "verl_integration.ppo_runtime_patch", fake_patch_module)
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.trainer", fake_trainer_pkg)
+    monkeypatch.setitem(sys.modules, "verl.trainer.ppo", fake_ppo_pkg)
+    monkeypatch.setitem(sys.modules, "verl.trainer.ppo.ray_trainer", fake_ray_trainer)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    original_import = builtins.__import__
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+        builtins.__import__("verl.trainer.ppo.ray_trainer")
+    finally:
+        builtins.__import__ = original_import
+
+    assert calls["count"] == 0
 
 
 def test_sitecustomize_accepts_num_recent_raw_blocks_on_older_verl_config(monkeypatch) -> None:

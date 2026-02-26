@@ -67,6 +67,24 @@ def _write_python_no_preload_stub(tmp_path: Path) -> Path:
     return stub_path
 
 
+def _write_python_env_probe_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "python-env-probe-stub.sh"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1:-}\" == \"-c\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "printf 'EXPERIMENT=%s\\n' \"${EXPERIMENT:-}\"\n"
+        "printf 'TASK=%s\\n' \"${TASK:-}\"\n"
+        "printf 'CUDA_VISIBLE_DEVICES=%s\\n' \"${CUDA_VISIBLE_DEVICES:-}\"\n"
+        "printf 'ROCR_VISIBLE_DEVICES=%s\\n' \"${ROCR_VISIBLE_DEVICES:-}\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
 def test_run_rft_script_dry_run_prints_verl_command() -> None:
     result = _run_script("run_rft.sh", "trainer.total_training_steps=1")
     assert "-m torch.distributed.run" in result.stdout
@@ -256,6 +274,71 @@ def test_run_sdpo_script_dry_run_allows_entrypoint_override() -> None:
         env_overrides={"SDPO_TRAINER_MODULE": "verl.trainer.main_ppo"},
     )
     assert "-m verl.trainer.main_ppo" in result.stdout
+
+
+def test_run_sdpo_script_defaults_experiment_with_slurm_job_suffix(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_env_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SLURM_JOB_ID": "4242",
+            "SDPO_RUN_TIMESTAMP": "20260226T123456Z",
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_PRELOADED_TASK_PARQUET": str(fake_parquet),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert "EXPERIMENT=small-swe-sdpo_20260226T123456Z_job4242" in result.stdout
+    assert "TASK=small-swe-sdpo" in result.stdout
+
+
+def test_run_sdpo_script_unsets_rocr_visible_devices_when_cuda_visible(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_env_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_PRELOADED_TASK_PARQUET": str(fake_parquet),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "CUDA_VISIBLE_DEVICES": "0,1",
+            "ROCR_VISIBLE_DEVICES": "0,1",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert "CUDA_VISIBLE_DEVICES=0,1" in result.stdout
+    assert "ROCR_VISIBLE_DEVICES=" in result.stdout
+    assert "ROCR_VISIBLE_DEVICES=0,1" not in result.stdout
 
 
 def test_run_sdpo_script_dry_run_rollout_only_disables_validation_rollouts_by_default() -> None:

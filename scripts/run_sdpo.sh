@@ -50,8 +50,21 @@ SDPO_PRELOADED_TASK_PARQUET="${SDPO_PRELOADED_TASK_PARQUET:-}"
 SDPO_RFT_CHECKPOINT="${SDPO_RFT_CHECKPOINT:-${RFT_CKPT:-}}"
 SDPO_RFT_MANIFEST="${SDPO_RFT_MANIFEST:-${RFT_MANIFEST:-}}"
 SDPO_TASK_NAME="${SDPO_TASK_NAME:-small-swe-sdpo}"
-export EXPERIMENT="${EXPERIMENT:-${SDPO_TASK_NAME}}"
+SDPO_RUN_TIMESTAMP="${SDPO_RUN_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  DEFAULT_SDPO_RUN_LABEL="${SDPO_RUN_TIMESTAMP}_job${SLURM_JOB_ID}"
+else
+  DEFAULT_SDPO_RUN_LABEL="${SDPO_RUN_TIMESTAMP}_pid$$"
+fi
+SDPO_RUN_LABEL="${SDPO_RUN_LABEL:-${DEFAULT_SDPO_RUN_LABEL}}"
+export EXPERIMENT="${EXPERIMENT:-${SDPO_TASK_NAME}_${SDPO_RUN_LABEL}}"
 export TASK="${TASK:-${SDPO_TASK_NAME}}"
+
+# Some cluster environments export ROCR/HIP selectors even on CUDA nodes.
+# verl workers reject simultaneous ROCR + CUDA/HIP visibility variables.
+if [[ -n "${ROCR_VISIBLE_DEVICES:-}" ]] && [[ -n "${CUDA_VISIBLE_DEVICES:-${HIP_VISIBLE_DEVICES:-}}" ]]; then
+  unset ROCR_VISIBLE_DEVICES
+fi
 
 _has_override_with_prefix() {
   local prefix="$1"

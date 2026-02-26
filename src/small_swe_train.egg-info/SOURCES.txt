@@ -8,6 +8,7 @@ src/env/__init__.py
 src/env/command_runner.py
 src/env/container_pool.py
 src/env/docker_executor.py
+src/env/preload_sdpo_dataset.py
 src/env/runtime_protocol.py
 src/env/task_dataset.py
 src/eval/__init__.py
@@ -17,8 +18,9 @@ src/losses/action_masking.py
 src/metrics/__init__.py
 src/metrics/contracts.py
 src/prompts/__init__.py
-src/prompts/chat_contract.py
 src/prompts/model_delimiters.py
+src/prompts/runtime_messages.py
+src/prompts/teacher_messages.py
 src/prompts/model_configs/__init__.py
 src/prompts/model_configs/qwen3.yaml
 src/rollout/__init__.py
@@ -34,6 +36,7 @@ src/small_swe_train.egg-info/dependency_links.txt
 src/small_swe_train.egg-info/requires.txt
 src/small_swe_train.egg-info/top_level.txt
 src/teacher/__init__.py
+src/teacher/memory_builder.py
 src/teacher/prompt_builder.py
 src/trainer/__init__.py
 src/trainer/common.py
@@ -49,13 +52,18 @@ src/verl_integration/__init__.py
 src/verl_integration/data_preprocessor.py
 src/verl_integration/env_bridge.py
 src/verl_integration/fsdp_sft_trainer_entry.py
+src/verl_integration/main_ppo_entry.py
 src/verl_integration/mask_injector.py
 src/verl_integration/onpolicy_rft_dataset.py
 src/verl_integration/onpolicy_rollout_adapter.py
+src/verl_integration/ppo_runtime_patch.py
 src/verl_integration/reprompt_adapter.py
+src/verl_integration/reward_adapter.py
 src/verl_integration/reward_function.py
 src/verl_integration/rft_rejection.py
 src/verl_integration/rft_runtime.py
+src/verl_integration/submission_verifier.py
+src/verl_integration/swe_bridge_agent_loop.py
 tests/test_action_masking.py
 tests/test_config_authority.py
 tests/test_container_pool.py
@@ -68,6 +76,8 @@ tests/test_model_delimiter_resolution.py
 tests/test_onpolicy_collector.py
 tests/test_onpolicy_rft_dataset.py
 tests/test_onpolicy_rollout_adapter.py
+tests/test_ppo_runtime_patch.py
+tests/test_preload_sdpo_dataset.py
 tests/test_qwen_vl_utils.py
 tests/test_rft_multiturn_dataset.py
 tests/test_rft_runtime.py
@@ -77,6 +87,8 @@ tests/test_run_scripts.py
 tests/test_run_step_sdpo_scaffold_script.py
 tests/test_sdpo_trainer.py
 tests/test_sitecustomize.py
+tests/test_submission_verifier.py
+tests/test_swe_bridge_agent_loop.py
 tests/test_swebench_lite.py
 tests/test_task_dataset.py
 tests/test_tokenization.py
@@ -87,6 +99,7 @@ tests/test_verl_data_preprocessor.py
 tests/test_verl_env_bridge.py
 tests/test_verl_mask_injector.py
 tests/test_verl_reprompt_adapter.py
+tests/test_verl_reward_adapter.py
 tests/test_verl_reward_function.py
 tests/test_vllm_api_server_entry.py
 tests/test_vllm_turn_generator.py

@@ -66,6 +66,10 @@ def _try_apply_sdpo_runtime_patch() -> None:
     ray_trainer_module = sys.modules.get("verl.trainer.ppo.ray_trainer")
     if ray_trainer_module is None:
         return
+    # Avoid noisy false-negative warnings during partially-initialized imports.
+    # The runtime patch only becomes meaningful once RayPPOTrainer exists.
+    if getattr(ray_trainer_module, "RayPPOTrainer", None) is None:
+        return
     try:
         from verl_integration.ppo_runtime_patch import apply_small_swe_sdpo_runtime_patch
     except Exception:

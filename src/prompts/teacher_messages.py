@@ -23,8 +23,8 @@ def build_teacher_output_contract_block(
     return (
         "1) The multi-turn conversation above is a previous attempt at fixing the issue stated in the task statement.\n"
         "2) This attempt is not complete, it can be on the right track or completely wrong. \n"
-        "3) Learn from the interactions from this attempt and take correct actions in the next turn.\n"
+        "3) Learn from the interactions from this attempt, correct mistakes, and take correct actions in the next turn.\n"
         "4) All tools in this attempt have been executed already, so assume you are working potentially modified repo.\n"
         f"{base_contract}\n"
-        "Now Correctly solve the original issue, focus only on what to do best in the next turn.\n"
+        "Now correctly solve the original issue, focus only on what to do best in the next turn.\n"
     )
