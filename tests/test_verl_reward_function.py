@@ -71,7 +71,7 @@ def test_reward_fn_returns_zero_without_terminal_submit_even_if_verifier_passes(
     assert info["resolved_source"] == ["verifiable_tests"]
 
 
-def test_reward_fn_can_fallback_to_resolved_flag_when_no_verifier_targets_exist() -> None:
+def test_reward_fn_returns_zero_when_no_verifier_targets_exist() -> None:
     data = [
         {
             "response_text": '<tool_call>{"tool":"submit","args":{"final_response":"ok"}}</tool_call>',
@@ -81,9 +81,29 @@ def test_reward_fn_can_fallback_to_resolved_flag_when_no_verifier_targets_exist(
 
     rewards, info = reward_fn(data)
 
-    assert rewards == [1.0]
-    assert info["resolved_source"] == ["resolved_flag_no_tests"]
-    assert info["reward_verification_missing"] == [False]
+    assert rewards == [0.0]
+    assert info["resolved_source"] == ["missing_verifier_targets"]
+    assert info["reward_verification_missing"] == [True]
+    assert info["fail_to_pass_verified"] == [False]
+    assert info["pass_to_pass_verified"] == [False]
+
+
+def test_reward_fn_treats_empty_verifier_results_without_targets_as_missing() -> None:
+    data = [
+        {
+            "response_text": '<tool_call>{"tool":"submit","args":{"final_response":"ok"}}</tool_call>',
+            "fail_to_pass_results": {},
+            "pass_to_pass_results": {},
+        }
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [0.0]
+    assert info["resolved_source"] == ["missing_verifier_targets"]
+    assert info["reward_verification_missing"] == [True]
+    assert info["fail_to_pass_verified"] == [False]
+    assert info["pass_to_pass_verified"] == [False]
 
 
 def test_reward_fn_returns_zero_for_invalid_payload() -> None:

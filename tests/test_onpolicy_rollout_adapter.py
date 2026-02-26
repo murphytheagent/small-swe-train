@@ -489,6 +489,31 @@ def test_collect_rft_sft_batch_for_steps_all_rejected_returns_empty_selected_bat
     assert meta["rejected_count"] == 2
 
 
+def test_merge_rollout_and_preprocessed_rows_propagates_verifier_targets() -> None:
+    merged = merge_rollout_and_preprocessed_rows(
+        rollout_rows=[
+            {
+                "task_id": "task-1",
+                "attempt_index": 0,
+                "turn_index": 0,
+                "step_index": 3,
+                "resolved": False,
+                "is_terminal": True,
+                "format_valid": True,
+                "final_turn_has_submit": True,
+                "final_submit_format_valid": True,
+                "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+                "pass_to_pass": ["tests/test_ok.py::test_regression"],
+            }
+        ],
+        preprocessed_rows=[{"input_ids": [1, 2], "action_mask_rft": [1, 1]}],
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
+    assert merged[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
+
+
 def test_merge_rollout_and_preprocessed_rows_requires_non_empty_task_id() -> None:
     try:
         merge_rollout_and_preprocessed_rows(

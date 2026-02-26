@@ -19,6 +19,8 @@ class RolloutRowRequired(TypedDict):
 
 
 class RolloutRow(RolloutRowRequired, total=False):
+    fail_to_pass: Any
+    pass_to_pass: Any
     collector_error: str
     bridge_error: str
     timeout_error: str

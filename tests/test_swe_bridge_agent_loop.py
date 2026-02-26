@@ -6,6 +6,8 @@ import pytest
 
 from prompts import build_sdpo_rollout_followup_user_message
 from verl_integration.swe_bridge_agent_loop import (
+    BridgeLoopTaskContext,
+    _build_task_sample,
     _get_container_slot_gate,
     append_response_tokens,
     build_agent_loop_messages,
@@ -59,6 +61,52 @@ def test_build_bridge_task_context_extracts_prompt_and_patch() -> None:
     assert context.image_name == "sweb.eval.x86_64"
     assert context.prompt_text == "Fix failing tests."
     assert context.patch == "diff --git ..."
+
+
+def test_build_task_sample_resolves_verifier_targets_from_reward_ground_truth() -> None:
+    sample = _build_task_sample(
+        task_context=BridgeLoopTaskContext(
+            task_id="task-17",
+            image_name="sweb.eval.x86_64",
+            prompt_text="Fix tests.",
+            patch=None,
+        ),
+        raw_kwargs={
+            "reward_model": {
+                "ground_truth": {
+                    "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                    "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
+                }
+            }
+        },
+    )
+
+    assert sample.fail_to_pass == ["tests/test_bug.py::test_bugfix"]
+    assert sample.pass_to_pass == ["tests/test_ok.py::test_regression"]
+
+
+def test_build_task_sample_prefers_explicit_targets_over_reward_ground_truth() -> None:
+    sample = _build_task_sample(
+        task_context=BridgeLoopTaskContext(
+            task_id="task-17",
+            image_name="sweb.eval.x86_64",
+            prompt_text="Fix tests.",
+            patch=None,
+        ),
+        raw_kwargs={
+            "fail_to_pass": ["tests/test_bug.py::test_explicit_bugfix"],
+            "pass_to_pass": ["tests/test_ok.py::test_explicit_regression"],
+            "reward_model": {
+                "ground_truth": {
+                    "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+                    "pass_to_pass": ["tests/test_ok.py::test_regression"],
+                }
+            },
+        },
+    )
+
+    assert sample.fail_to_pass == ["tests/test_bug.py::test_explicit_bugfix"]
+    assert sample.pass_to_pass == ["tests/test_ok.py::test_explicit_regression"]
 
 
 def test_build_tool_response_messages_keeps_non_empty_blocks() -> None:

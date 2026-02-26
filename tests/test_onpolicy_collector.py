@@ -219,6 +219,8 @@ def test_onpolicy_collector_collects_terminal_attempt_rows() -> None:
     assert row["is_terminal"] is True
     assert row["task_id"] == "task-1"
     assert row["image_name"] == "img:1"
+    assert row["fail_to_pass"] == ["a"]
+    assert row["pass_to_pass"] == ["b"]
     assert row["trajectory_steps"]
     assert row["trajectory_history"]
     assert row["trajectory_assistant_turns"]

@@ -167,7 +167,9 @@ def _resolve_test_group_verification(
         f"{key_root}_results",
         f"{key_root.upper()}_RESULTS",
     )
+    has_non_empty_results = False
     if isinstance(results_raw, Mapping):
+        has_non_empty_results = bool(results_raw)
         for test_name, status in results_raw.items():
             normalized_name = str(test_name).strip()
             if not normalized_name:
@@ -178,11 +180,13 @@ def _resolve_test_group_verification(
             elif verdict is False:
                 failed_tests.add(normalized_name)
 
+    # Empty verifier-result mappings are non-informative when no expected target list
+    # is present. Treat those as missing verification rather than implicit success.
     has_signal = (
-        all_passed_raw is not None
-        or results_raw is not None
+        has_non_empty_results
         or bool(passed_tests)
         or bool(failed_tests)
+        or (all_passed_raw is not None and bool(expected_tests))
     )
     if not has_signal:
         return expected_tests, None, False
@@ -216,7 +220,7 @@ def _resolve_verifiable_resolution(sample: Mapping[str, Any]) -> dict[str, Any]:
             "has_expected_tests": has_expected_tests,
             "fail_to_pass_verified": fail_verified,
             "pass_to_pass_verified": pass_verified,
-            "verification_missing": has_expected_tests,
+            "verification_missing": True,
         }
 
     fail_result = fail_verified if fail_verified is not None else (False if fail_expected else True)
@@ -321,12 +325,11 @@ def reward_fn(
         resolved_from_verification = _coerce_optional_bool_flag(verification.get("resolved"))
         has_expected_tests = bool(verification.get("has_expected_tests", False))
         if resolved_from_verification is None:
+            resolved = False
             if has_expected_tests:
-                resolved = False
                 resolved_sources.append("missing_verifier")
             else:
-                resolved = _coerce_bool_flag(sample.get("resolved"), fallback=False)
-                resolved_sources.append("resolved_flag_no_tests")
+                resolved_sources.append("missing_verifier_targets")
         else:
             resolved = bool(resolved_from_verification)
             resolved_sources.append("verifiable_tests")

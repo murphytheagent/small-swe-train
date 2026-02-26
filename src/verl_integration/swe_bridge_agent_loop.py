@@ -603,6 +603,8 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             "trajectory_tool_validation_errors": _stable_unique_strings(validation_errors),
             "final_turn_has_submit": final_turn_has_submit,
             "final_submit_format_valid": final_submit_format_valid,
+            "fail_to_pass": _coerce_test_targets(task_sample.fail_to_pass),
+            "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
         }
         if bridge_error:
             extra_fields["bridge_error"] = bridge_error
@@ -611,9 +613,13 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         if verification_metadata:
             extra_fields.update(
                 {
+                    "fail_to_pass": verification_metadata.get("fail_to_pass", []),
+                    "pass_to_pass": verification_metadata.get("pass_to_pass", []),
                     "verification_feedback": verification_metadata.get("verification_feedback", ""),
                     "fail_to_pass_results": verification_metadata.get("fail_to_pass_results", {}),
                     "pass_to_pass_results": verification_metadata.get("pass_to_pass_results", {}),
+                    "fail_to_pass_all_passed": verification_metadata.get("fail_to_pass_all_passed"),
+                    "pass_to_pass_all_passed": verification_metadata.get("pass_to_pass_all_passed"),
                     "fail_to_pass_verified": verification_metadata.get("fail_to_pass_verified"),
                     "pass_to_pass_verified": verification_metadata.get("pass_to_pass_verified"),
                     "verification_missing": verification_metadata.get("verification_missing"),
@@ -636,12 +642,21 @@ class SWEBridgeAgentLoop(AgentLoopBase):
 
 
 def _build_task_sample(*, task_context: BridgeLoopTaskContext, raw_kwargs: Mapping[str, Any]) -> TaskSample:
+    reward_ground_truth = _extract_reward_ground_truth_from_kwargs(raw_kwargs)
     return TaskSample(
         task_id=task_context.task_id,
         image_name=task_context.image_name,
         problem_statement=task_context.prompt_text,
-        fail_to_pass=raw_kwargs.get("fail_to_pass"),
-        pass_to_pass=raw_kwargs.get("pass_to_pass"),
+        fail_to_pass=_resolve_task_sample_test_targets(
+            raw_kwargs,
+            reward_ground_truth=reward_ground_truth,
+            key="fail_to_pass",
+        ),
+        pass_to_pass=_resolve_task_sample_test_targets(
+            raw_kwargs,
+            reward_ground_truth=reward_ground_truth,
+            key="pass_to_pass",
+        ),
         raw=dict(raw_kwargs),
     )
 
@@ -718,6 +733,28 @@ def _coerce_test_targets(value: Any) -> list[str]:
     if not text:
         return []
     return [text]
+
+
+def _extract_reward_ground_truth_from_kwargs(raw_kwargs: Mapping[str, Any]) -> Mapping[str, Any]:
+    reward_model = raw_kwargs.get("reward_model")
+    if isinstance(reward_model, Mapping):
+        ground_truth = reward_model.get("ground_truth")
+        if isinstance(ground_truth, Mapping):
+            return ground_truth
+    return {}
+
+
+def _resolve_task_sample_test_targets(
+    raw_kwargs: Mapping[str, Any],
+    *,
+    reward_ground_truth: Mapping[str, Any],
+    key: str,
+) -> list[str]:
+    for source in (raw_kwargs, reward_ground_truth):
+        for candidate_key in (key, key.upper()):
+            if candidate_key in source:
+                return _coerce_test_targets(source.get(candidate_key))
+    return []
 
 
 def _get_container_slot_gate(env_pool_size: int) -> threading.BoundedSemaphore:

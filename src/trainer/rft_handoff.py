@@ -196,6 +196,14 @@ def merge_rollout_and_preprocessed_rows(
                 "turn_index": rollout_row.get("turn_index", 0),
                 "step_index": rollout_row.get("step_index", 0),
                 "resolved": rollout_row.get("resolved", False),
+                "fail_to_pass": rollout_row.get(
+                    "fail_to_pass",
+                    rollout_row.get("FAIL_TO_PASS"),
+                ),
+                "pass_to_pass": rollout_row.get(
+                    "pass_to_pass",
+                    rollout_row.get("PASS_TO_PASS"),
+                ),
                 "is_terminal": rollout_row.get("is_terminal", False),
                 "collector_error": rollout_row.get("collector_error", ""),
                 "bridge_error": rollout_row.get("bridge_error", ""),

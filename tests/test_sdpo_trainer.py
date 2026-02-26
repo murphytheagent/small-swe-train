@@ -134,6 +134,14 @@ def test_run_sdpo_step_uses_reward_fn_metrics() -> None:
                 "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
             ),
             "resolved": True,
+            "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+            "tool_output": {
+                "metadata": {
+                    "fail_to_pass_results": {"tests/test_bug.py::test_bugfix": True},
+                    "pass_to_pass_results": {"tests/test_ok.py::test_regression": True},
+                }
+            },
         }
     ]
 
@@ -154,6 +162,14 @@ def test_run_end_to_end_global_step_exposes_reprompt_and_ema_artifacts() -> None
                 "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
             ),
             "resolved": True,
+            "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+            "tool_output": {
+                "metadata": {
+                    "fail_to_pass_results": {"tests/test_bug.py::test_bugfix": True},
+                    "pass_to_pass_results": {"tests/test_ok.py::test_regression": True},
+                }
+            },
         }
     ]
 

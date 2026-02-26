@@ -72,6 +72,8 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
             "format_valid": True,
             "final_turn_has_submit": True,
             "final_submit_format_valid": True,
+            "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
         }
     ]
 
@@ -85,6 +87,14 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
     assert records[0]["data_source"] == "small_swe_phase_d"
     assert records[0]["reward_model"]["ground_truth"]["task_id"] == "task-1"
     assert records[0]["reward_model"]["ground_truth"]["resolved"] is True
+    assert records[0]["reward_model"]["ground_truth"]["fail_to_pass"] == [
+        "tests/test_bug.py::test_bugfix"
+    ]
+    assert records[0]["reward_model"]["ground_truth"]["pass_to_pass"] == [
+        "tests/test_ok.py::test_regression"
+    ]
+    assert records[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
+    assert records[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
     assert records[0]["messages"][0]["role"] == "user"
     assert records[0]["messages"][-1]["role"] == "assistant"
     assert records[0]["prompt"] == [{"role": "user", "content": "Task prompt"}]
@@ -121,6 +131,37 @@ def test_build_multiturn_dataset_records_prompt_uses_preceding_context() -> None
         "user",
     ]
     assert records[0]["prompt"][-1]["content"].startswith("<tool_response>")
+
+
+def test_build_multiturn_dataset_records_uses_reward_ground_truth_test_targets_when_missing_top_level() -> None:
+    rows = [
+        {
+            "prompt": "Task prompt",
+            "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"ok"}}</tool_call>',
+            "task_id": "task-1",
+            "image_name": "img:task-1",
+            "attempt_index": 0,
+            "step_index": 0,
+            "turn_index": 0,
+            "reward_model": {
+                "ground_truth": {
+                    "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+                    "pass_to_pass": ["tests/test_ok.py::test_regression"],
+                }
+            },
+        }
+    ]
+
+    records = build_multiturn_dataset_records(rows)
+
+    assert records[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
+    assert records[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
+    assert records[0]["reward_model"]["ground_truth"]["fail_to_pass"] == [
+        "tests/test_bug.py::test_bugfix"
+    ]
+    assert records[0]["reward_model"]["ground_truth"]["pass_to_pass"] == [
+        "tests/test_ok.py::test_regression"
+    ]
 
 
 def test_build_multiturn_dataset_records_requires_image_name() -> None:
