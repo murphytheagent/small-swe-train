@@ -98,8 +98,8 @@ bash scripts/run_rft_onpolicy_rollout_proof.sh --dry-run
   - `SDPO_RFT_MANIFEST`, or
   - latest `outputs/rft_runtime/*/rft_runtime_loop_manifest.json` (`final_model_path` fallback keys).
 - SDPO prompt parquet overrides:
-  - if `data.train_files`/`data.val_files` are not passed, it resolves deterministic split
-    parquet paths in `data/sdpo_task_cache` by default.
+  - if `data.train_files`/`data.val_files` are not passed, it resolves preloaded
+    parquet paths from `task/sdpo_task_cache` by default.
 - Ray CPU budget (`ray_kwargs.ray_init.num_cpus`) from:
   - explicit Hydra override (highest priority), or
   - `SDPO_RAY_NUM_CPUS`, or
@@ -126,9 +126,7 @@ If no checkpoint can be resolved, the launcher exits early. If no data overrides
 the launcher expects those parquet files to already exist; `run_sdpo.sh` does not preload/build them.
 
 Common environment knobs:
-- `SDPO_TASK_CACHE_DIR` (default: `$PWD/data/sdpo_task_cache`)
-- `SDPO_DATA_CONFIG_NAME` (default: `on_policy_swe_smith`)
-- `SDPO_EVAL_SPLIT_FRACTION` / `SDPO_EVAL_MIN_ROWS` (affect default split file path resolution)
+- `SDPO_TASK_CACHE_DIR` (default: `$PWD/task/sdpo_task_cache`)
 - `SDPO_PRELOADED_TASK_PARQUET=/path/file.parquet` to use one file for both train/val
 - `SDPO_ROLLOUT_ONLY_E2E=1` to auto-set `trainer.test_freq=0` and `trainer.val_before_train=false`
 - `SDPO_RAY_NUM_CPUS=<N>` to pin Ray CPU count when cluster Slurm env vars are non-standard
@@ -142,7 +140,7 @@ One-time preload (manual, outside `run_sdpo.sh`):
 ```bash
 PYTHONPATH=src ./.venv/bin/python -m env.preload_sdpo_dataset \
   --data-config-name on_policy_swe_smith \
-  --cache-dir data/sdpo_task_cache \
+  --cache-dir task/sdpo_task_cache \
   --emit-split \
   --emit-hydra-overrides \
   --force-refresh

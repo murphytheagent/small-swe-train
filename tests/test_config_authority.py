@@ -36,6 +36,12 @@ def test_default_training_model_name_is_loaded_from_shared_verl_config() -> None
     assert config.DEFAULT_TRAINING_MODEL_NAME.strip()
 
 
+def test_sdpo_task_cache_default_is_centralized() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    assert config.DEFAULT_SDPO_TASK_CACHE_RELATIVE_DIR == Path("task") / "sdpo_task_cache"
+    assert config.resolve_sdpo_task_cache_dir(project_root=repo_root) == repo_root / "task" / "sdpo_task_cache"
+
+
 def test_phase_transition_gates_defaults_load() -> None:
     gates = config.phase_transition_gates_defaults()
     assert "entry_gate_for_main_sdpo" in gates

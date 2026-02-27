@@ -5,6 +5,7 @@ import importlib.util
 import os
 import sys
 import types
+import warnings
 from importlib.machinery import ModuleSpec
 
 import pytest
@@ -211,3 +212,169 @@ def test_sitecustomize_sets_local_rank_from_rank_in_ray_noset_mode(monkeypatch) 
     assert calls["base_called"] == 1
     assert calls["set_device"] == [5]
     assert os.environ["LOCAL_RANK"] == "5"
+
+
+def test_sitecustomize_installs_model_type_aware_mistral_regex_default(monkeypatch, tmp_path) -> None:
+    calls: dict[str, list[dict[str, object]]] = {"tokenizer": []}
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_utils_pkg = types.ModuleType("verl.utils")
+    fake_utils_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_tokenizer_module = types.ModuleType("verl.utils.tokenizer")
+
+    def _fake_hf_tokenizer(name_or_path, *args, **kwargs):
+        _ = name_or_path, args
+        calls["tokenizer"].append(dict(kwargs))
+        return kwargs
+
+    def _fake_hf_processor(name_or_path, *args, **kwargs):
+        _ = name_or_path, args, kwargs
+        return None
+
+    fake_tokenizer_module.hf_tokenizer = _fake_hf_tokenizer
+    fake_tokenizer_module.hf_processor = _fake_hf_processor
+    fake_utils_pkg.tokenizer = fake_tokenizer_module
+    fake_utils_pkg.hf_tokenizer = _fake_hf_tokenizer
+    fake_utils_pkg.hf_processor = _fake_hf_processor
+
+    qwen_dir = tmp_path / "qwen"
+    qwen_dir.mkdir()
+    (qwen_dir / "config.json").write_text('{"model_type":"qwen3"}', encoding="utf-8")
+    mistral_dir = tmp_path / "mistral"
+    mistral_dir.mkdir()
+    (mistral_dir / "config.json").write_text('{"model_type":"mistral"}', encoding="utf-8")
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.tokenizer", fake_tokenizer_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+
+    fake_tokenizer_module.hf_tokenizer(str(qwen_dir))
+    fake_tokenizer_module.hf_tokenizer(str(mistral_dir))
+    fake_tokenizer_module.hf_tokenizer(str(qwen_dir), fix_mistral_regex=True)
+
+    assert calls["tokenizer"][0]["fix_mistral_regex"] is False
+    assert calls["tokenizer"][1]["fix_mistral_regex"] is True
+    assert calls["tokenizer"][2]["fix_mistral_regex"] is True
+    assert fake_utils_pkg.hf_tokenizer is fake_tokenizer_module.hf_tokenizer
+
+
+def test_sitecustomize_suppresses_text_only_processor_warning(monkeypatch) -> None:
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_utils_pkg = types.ModuleType("verl.utils")
+    fake_utils_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_tokenizer_module = types.ModuleType("verl.utils.tokenizer")
+
+    def _fake_hf_tokenizer(name_or_path, *args, **kwargs):
+        _ = name_or_path, args, kwargs
+        return {}
+
+    def _fake_hf_processor(name_or_path, *args, **kwargs):
+        _ = name_or_path, args, kwargs
+        warnings.warn(
+            "Failed to create processor: Unsupported processor type: Qwen2TokenizerFast. This may affect multimodal processing",
+            UserWarning,
+            stacklevel=1,
+        )
+        return None
+
+    fake_tokenizer_module.hf_tokenizer = _fake_hf_tokenizer
+    fake_tokenizer_module.hf_processor = _fake_hf_processor
+    fake_utils_pkg.tokenizer = fake_tokenizer_module
+    fake_utils_pkg.hf_tokenizer = _fake_hf_tokenizer
+    fake_utils_pkg.hf_processor = _fake_hf_processor
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.tokenizer", fake_tokenizer_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        assert fake_tokenizer_module.hf_processor("/tmp/model") is None
+
+    assert not any("Unsupported processor type" in str(item.message) for item in captured)
+
+
+def test_sitecustomize_marks_fast_tokenizer_pad_warning_as_handled(monkeypatch, tmp_path) -> None:
+    class _FakeTokenizer:
+        def __init__(self) -> None:
+            self.deprecation_warnings: dict[str, bool] = {}
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_utils_pkg = types.ModuleType("verl.utils")
+    fake_utils_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_tokenizer_module = types.ModuleType("verl.utils.tokenizer")
+
+    calls: dict[str, list[dict[str, object]]] = {"kwargs": []}
+
+    def _fake_hf_tokenizer(name_or_path, *args, **kwargs):
+        _ = name_or_path, args
+        calls["kwargs"].append(dict(kwargs))
+        return _FakeTokenizer()
+
+    def _fake_hf_processor(name_or_path, *args, **kwargs):
+        _ = name_or_path, args, kwargs
+        return None
+
+    fake_tokenizer_module.hf_tokenizer = _fake_hf_tokenizer
+    fake_tokenizer_module.hf_processor = _fake_hf_processor
+    fake_utils_pkg.tokenizer = fake_tokenizer_module
+    fake_utils_pkg.hf_tokenizer = _fake_hf_tokenizer
+    fake_utils_pkg.hf_processor = _fake_hf_processor
+
+    qwen_dir = tmp_path / "qwen"
+    qwen_dir.mkdir()
+    (qwen_dir / "config.json").write_text('{"model_type":"qwen3"}', encoding="utf-8")
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.tokenizer", fake_tokenizer_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+
+    tokenizer = fake_tokenizer_module.hf_tokenizer(str(qwen_dir))
+    assert calls["kwargs"][-1]["fix_mistral_regex"] is False
+    assert tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] is True
+
+
+def test_sitecustomize_patches_transformers_torch_dtype_property(monkeypatch) -> None:
+    transformers = pytest.importorskip("transformers")
+    _ = transformers
+    import transformers.configuration_utils as configuration_utils
+    from transformers.configuration_utils import PretrainedConfig
+
+    original_property = PretrainedConfig.torch_dtype
+    had_marker = hasattr(PretrainedConfig, "_small_swe_torch_dtype_property_patch")
+    original_marker = getattr(PretrainedConfig, "_small_swe_torch_dtype_property_patch", False)
+    call_count = {"value": 0}
+
+    def _fake_warning_once(*args, **kwargs):
+        _ = args, kwargs
+        call_count["value"] += 1
+
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+    monkeypatch.setattr(configuration_utils.logger, "warning_once", _fake_warning_once)
+
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+        cfg = PretrainedConfig()
+        cfg.dtype = "float16"
+        assert cfg.torch_dtype == "float16"
+        cfg.torch_dtype = "float32"
+        assert cfg.dtype == "float32"
+        assert call_count["value"] == 0
+    finally:
+        PretrainedConfig.torch_dtype = original_property
+        if had_marker:
+            setattr(PretrainedConfig, "_small_swe_torch_dtype_property_patch", original_marker)
+        else:
+            delattr(PretrainedConfig, "_small_swe_torch_dtype_property_patch")

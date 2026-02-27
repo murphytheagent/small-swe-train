@@ -7,7 +7,9 @@ import pytest
 from prompts import build_sdpo_rollout_followup_user_message
 from verl_integration.swe_bridge_agent_loop import (
     BridgeLoopTaskContext,
+    _apply_verification_metadata,
     _extract_final_submit_text,
+    _initial_verification_extra_fields,
     _clip_prompt_for_rollout_context,
     _validate_rollout_context_alignment,
     _build_task_sample,
@@ -110,6 +112,55 @@ def test_build_task_sample_prefers_explicit_targets_over_reward_ground_truth() -
 
     assert sample.fail_to_pass == ["tests/test_bug.py::test_explicit_bugfix"]
     assert sample.pass_to_pass == ["tests/test_ok.py::test_explicit_regression"]
+
+
+def test_verification_extra_fields_schema_stable_without_metadata() -> None:
+    fields = _initial_verification_extra_fields(
+        fail_to_pass=["tests/test_bug.py::test_bugfix"],
+        pass_to_pass=["tests/test_ok.py::test_regression"],
+    )
+
+    assert fields["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
+    assert fields["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
+    assert fields["verification_feedback"] == ""
+    assert fields["fail_to_pass_results"] == {}
+    assert fields["pass_to_pass_results"] == {}
+    assert fields["fail_to_pass_all_passed"] is None
+    assert fields["pass_to_pass_all_passed"] is None
+    assert fields["verification_missing"] is None
+    assert fields["resolved"] is False
+
+
+def test_apply_verification_metadata_preserves_schema_and_overrides_values() -> None:
+    fields = _initial_verification_extra_fields(
+        fail_to_pass=["tests/test_bug.py::test_bugfix"],
+        pass_to_pass=["tests/test_ok.py::test_regression"],
+    )
+    baseline_keys = set(fields.keys())
+
+    _apply_verification_metadata(
+        fields,
+        {
+            "fail_to_pass_results": {"tests/test_bug.py::test_bugfix": True},
+            "pass_to_pass_results": {"tests/test_ok.py::test_regression": True},
+            "verification_feedback": "all tests passed",
+            "fail_to_pass_all_passed": True,
+            "pass_to_pass_all_passed": True,
+            "fail_to_pass_verified": True,
+            "pass_to_pass_verified": True,
+            "verification_missing": False,
+            "verification_error": "",
+            "submission_final_response": "done",
+            "resolved": True,
+        },
+    )
+
+    assert set(fields.keys()) == baseline_keys
+    assert fields["fail_to_pass_results"] == {"tests/test_bug.py::test_bugfix": True}
+    assert fields["pass_to_pass_results"] == {"tests/test_ok.py::test_regression": True}
+    assert fields["verification_feedback"] == "all tests passed"
+    assert fields["verification_missing"] is False
+    assert fields["resolved"] is True
 
 
 def test_extract_final_submit_text_uses_terminal_submit_tool_call_when_steps_empty() -> None:

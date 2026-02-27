@@ -79,6 +79,7 @@ def _write_python_env_probe_stub(tmp_path: Path) -> Path:
         "printf 'CUDA_VISIBLE_DEVICES=%s\\n' \"${CUDA_VISIBLE_DEVICES:-}\"\n"
         "printf 'ROCR_VISIBLE_DEVICES=%s\\n' \"${ROCR_VISIBLE_DEVICES:-}\"\n"
         "printf 'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=%s\\n' \"${RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES:-}\"\n"
+        "printf 'TVM_FFI_DISABLE_TORCH_C_DLPACK=%s\\n' \"${TVM_FFI_DISABLE_TORCH_C_DLPACK:-}\"\n"
         "exit 0\n",
         encoding="utf-8",
     )
@@ -308,6 +309,7 @@ def test_run_sdpo_script_defaults_experiment_with_slurm_job_suffix(tmp_path: Pat
     assert "EXPERIMENT=small-swe-sdpo_20260226T123456Z_job4242" in result.stdout
     assert "TASK=small-swe-sdpo" in result.stdout
     assert "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1" in result.stdout
+    assert "TVM_FFI_DISABLE_TORCH_C_DLPACK=1" in result.stdout
 
 
 def test_run_sdpo_script_allows_disabling_ray_noset_visible_devices(tmp_path: Path) -> None:
@@ -439,13 +441,28 @@ def test_run_sdpo_script_dry_run_rollout_only_respects_explicit_validation_overr
     assert "trainer.val_before_train=false" not in result.stdout
 
 
-def test_run_sdpo_script_dry_run_uses_preloaded_task_parquet_for_both_splits() -> None:
+def test_run_sdpo_script_dry_run_uses_task_sdpo_cache_defaults() -> None:
     result = _run_script("run_sdpo.sh")
     assert "data.train_files=" in result.stdout
     assert "data.val_files=" in result.stdout
-    assert "sdpo_tasks_" in result.stdout
-    assert "_train.parquet" in result.stdout
-    assert "_val.parquet" in result.stdout
+    assert "task/sdpo_task_cache/train.parquet" in result.stdout
+    assert "task/sdpo_task_cache/val.parquet" in result.stdout
+
+
+def test_run_sdpo_script_dry_run_prefers_preloaded_train_val_pair_in_cache(
+    tmp_path: Path,
+) -> None:
+    train_path = tmp_path / "sdpo_tasks_pair_train.parquet"
+    val_path = tmp_path / "sdpo_tasks_pair_val.parquet"
+    train_path.write_text("train", encoding="utf-8")
+    val_path.write_text("val", encoding="utf-8")
+
+    result = _run_script(
+        "run_sdpo.sh",
+        env_overrides={"SDPO_TASK_CACHE_DIR": str(tmp_path)},
+    )
+    assert f"data.train_files={train_path}" in result.stdout
+    assert f"data.val_files={val_path}" in result.stdout
 
 
 def test_run_sdpo_script_dry_run_mirrors_explicit_train_files_to_val_files() -> None:

@@ -657,31 +657,17 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             "trajectory_tool_validation_errors": _stable_unique_strings(validation_errors),
             "final_turn_has_submit": final_turn_has_submit,
             "final_submit_format_valid": final_submit_format_valid,
-            "fail_to_pass": _coerce_test_targets(task_sample.fail_to_pass),
-            "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
+            "bridge_error": bridge_error,
+            "timeout_error": timeout_error,
+            "executor_error": "",
         }
-        if bridge_error:
-            extra_fields["bridge_error"] = bridge_error
-        if timeout_error:
-            extra_fields["timeout_error"] = timeout_error
-        if verification_metadata:
-            extra_fields.update(
-                {
-                    "fail_to_pass": verification_metadata.get("fail_to_pass", []),
-                    "pass_to_pass": verification_metadata.get("pass_to_pass", []),
-                    "verification_feedback": verification_metadata.get("verification_feedback", ""),
-                    "fail_to_pass_results": verification_metadata.get("fail_to_pass_results", {}),
-                    "pass_to_pass_results": verification_metadata.get("pass_to_pass_results", {}),
-                    "fail_to_pass_all_passed": verification_metadata.get("fail_to_pass_all_passed"),
-                    "pass_to_pass_all_passed": verification_metadata.get("pass_to_pass_all_passed"),
-                    "fail_to_pass_verified": verification_metadata.get("fail_to_pass_verified"),
-                    "pass_to_pass_verified": verification_metadata.get("pass_to_pass_verified"),
-                    "verification_missing": verification_metadata.get("verification_missing"),
-                    "verification_error": verification_metadata.get("verification_error", ""),
-                    "submission_final_response": verification_metadata.get("submission_final_response", ""),
-                    "resolved": verification_metadata.get("resolved", False),
-                }
+        extra_fields.update(
+            _initial_verification_extra_fields(
+                fail_to_pass=task_sample.fail_to_pass,
+                pass_to_pass=task_sample.pass_to_pass,
             )
+        )
+        _apply_verification_metadata(extra_fields, verification_metadata)
 
         return AgentLoopOutput(
             prompt_ids=prompt_ids,
@@ -712,6 +698,90 @@ def _build_task_sample(*, task_context: BridgeLoopTaskContext, raw_kwargs: Mappi
             key="pass_to_pass",
         ),
         raw=dict(raw_kwargs),
+    )
+
+
+def _initial_verification_extra_fields(
+    *,
+    fail_to_pass: Sequence[Any] | None,
+    pass_to_pass: Sequence[Any] | None,
+) -> dict[str, Any]:
+    return {
+        "fail_to_pass": _coerce_test_targets(fail_to_pass),
+        "pass_to_pass": _coerce_test_targets(pass_to_pass),
+        "verification_feedback": "",
+        "fail_to_pass_results": {},
+        "pass_to_pass_results": {},
+        "fail_to_pass_all_passed": None,
+        "pass_to_pass_all_passed": None,
+        "fail_to_pass_verified": None,
+        "pass_to_pass_verified": None,
+        "verification_missing": None,
+        "verification_error": "",
+        "submission_final_response": "",
+        "resolved": False,
+    }
+
+
+def _apply_verification_metadata(
+    extra_fields: dict[str, Any],
+    verification_metadata: Mapping[str, Any] | None,
+) -> None:
+    if not verification_metadata:
+        return
+    extra_fields.update(
+        {
+            "fail_to_pass": _coerce_test_targets(
+                verification_metadata.get("fail_to_pass", extra_fields.get("fail_to_pass", []))
+            ),
+            "pass_to_pass": _coerce_test_targets(
+                verification_metadata.get("pass_to_pass", extra_fields.get("pass_to_pass", []))
+            ),
+            "verification_feedback": verification_metadata.get(
+                "verification_feedback",
+                extra_fields.get("verification_feedback", ""),
+            ),
+            "fail_to_pass_results": verification_metadata.get(
+                "fail_to_pass_results",
+                extra_fields.get("fail_to_pass_results", {}),
+            ),
+            "pass_to_pass_results": verification_metadata.get(
+                "pass_to_pass_results",
+                extra_fields.get("pass_to_pass_results", {}),
+            ),
+            "fail_to_pass_all_passed": verification_metadata.get(
+                "fail_to_pass_all_passed",
+                extra_fields.get("fail_to_pass_all_passed"),
+            ),
+            "pass_to_pass_all_passed": verification_metadata.get(
+                "pass_to_pass_all_passed",
+                extra_fields.get("pass_to_pass_all_passed"),
+            ),
+            "fail_to_pass_verified": verification_metadata.get(
+                "fail_to_pass_verified",
+                extra_fields.get("fail_to_pass_verified"),
+            ),
+            "pass_to_pass_verified": verification_metadata.get(
+                "pass_to_pass_verified",
+                extra_fields.get("pass_to_pass_verified"),
+            ),
+            "verification_missing": verification_metadata.get(
+                "verification_missing",
+                extra_fields.get("verification_missing"),
+            ),
+            "verification_error": verification_metadata.get(
+                "verification_error",
+                extra_fields.get("verification_error", ""),
+            ),
+            "submission_final_response": verification_metadata.get(
+                "submission_final_response",
+                extra_fields.get("submission_final_response", ""),
+            ),
+            "resolved": verification_metadata.get(
+                "resolved",
+                extra_fields.get("resolved", False),
+            ),
+        }
     )
 
 

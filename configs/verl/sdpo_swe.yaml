@@ -181,6 +181,9 @@ actor_rollout_ref:
 # ---------------------------------------------------------------------------
 # Algorithm
 # ---------------------------------------------------------------------------
+critic:
+  enable: false                              # GRPO path is actor-only (no value critic)
+
 algorithm:
   adv_estimator: grpo                         # outcome-level advantage, no critic
   gamma: 1.0

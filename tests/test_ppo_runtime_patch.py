@@ -388,6 +388,141 @@ def test_turn_level_actor_expansion_builds_per_turn_rows() -> None:
     assert list(expanded.non_tensor_batch["distillation_turn_index"]) == [0, 0]
 
 
+def test_turn_level_expansion_guard_skips_distributed_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeDistributed:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def is_initialized() -> bool:
+            return True
+
+        @staticmethod
+        def get_world_size() -> int:
+            return 8
+
+    class _FakeTorch:
+        distributed = _FakeDistributed()
+
+    monkeypatch.setattr(runtime_patch, "torch", _FakeTorch())
+    monkeypatch.delenv("SMALL_SWE_ENABLE_DISTRIBUTED_TURN_LEVEL_EXPANSION", raising=False)
+
+    assert runtime_patch._should_skip_turn_level_expansion_for_distributed() is True
+
+
+def test_turn_level_expansion_guard_allows_distributed_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeDistributed:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def is_initialized() -> bool:
+            return True
+
+        @staticmethod
+        def get_world_size() -> int:
+            return 8
+
+    class _FakeTorch:
+        distributed = _FakeDistributed()
+
+    monkeypatch.setattr(runtime_patch, "torch", _FakeTorch())
+    monkeypatch.setenv("SMALL_SWE_ENABLE_DISTRIBUTED_TURN_LEVEL_EXPANSION", "1")
+
+    assert runtime_patch._should_skip_turn_level_expansion_for_distributed() is False
+
+
+def test_turn_level_sequential_loss_accumulates_without_row_filtering() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _FakeActor:
+        def __init__(self) -> None:
+            self.teacher_module = object()
+            self.actor_module = object()
+
+        def _forward_micro_batch(
+            self,
+            _inputs,
+            *,
+            temperature,
+            calculate_entropy,
+            return_all_logps,
+            distill_topk,
+            topk_indices=None,
+            module=None,
+        ):
+            _ = (
+                temperature,
+                calculate_entropy,
+                return_all_logps,
+                distill_topk,
+                topk_indices,
+                module,
+            )
+            return {"log_probs": torch.zeros((1, 4), dtype=torch.float32)}
+
+    actor = _FakeActor()
+    model_inputs = {
+        "responses": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+        "response_mask": torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
+        "turn_teacher_input_ids": torch.tensor(
+            [[[10, 11, 1, 2, 3], [20, 21, 1, 2, 3], [30, 31, 1, 2, 3]]],
+            dtype=torch.long,
+        ),
+        "turn_teacher_attention_mask": torch.ones((1, 3, 5), dtype=torch.long),
+        "turn_teacher_position_ids": torch.tensor(
+            [[[0, 1, 2, 3, 4], [0, 1, 2, 3, 4], [0, 1, 2, 3, 4]]],
+            dtype=torch.long,
+        ),
+        "turn_response_mask": torch.tensor(
+            [[[1, 0, 0, 0], [0, 1, 1, 0], [0, 0, 0, 1]]],
+            dtype=torch.long,
+        ),
+        "turn_self_distillation_mask": torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float32),
+    }
+
+    calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def _fake_compute_self_distillation_loss(**kwargs):
+        calls.append(
+            (
+                kwargs["response_mask"].detach().cpu(),
+                kwargs["self_distillation_mask"].detach().cpu(),
+            )
+        )
+        turn_id = float(len(calls))
+        return torch.tensor(turn_id, dtype=torch.float32), {}
+
+    pg_loss, metrics = runtime_patch._compute_turn_level_self_distillation_pg_loss(
+        actor,
+        model_inputs=model_inputs,
+        temperature=1.0,
+        self_distillation_cfg=SimpleNamespace(full_logit_distillation=False, distillation_topk=None),
+        teacher_regularization="ema",
+        return_all_logps=False,
+        distill_topk=None,
+        student_topk_indices=None,
+        log_prob=torch.zeros((1, 4), dtype=torch.float32),
+        old_log_prob=torch.zeros((1, 4), dtype=torch.float32),
+        student_all_logps=None,
+        student_topk_logps=None,
+        loss_agg_mode="token-mean",
+        rollout_is_weights=None,
+        compute_self_distillation_loss_fn=_fake_compute_self_distillation_loss,
+    )
+
+    assert len(calls) == 3
+    assert pg_loss.item() == pytest.approx(2.0)
+    assert metrics["self_distillation/empty_target_batch"] == pytest.approx(0.0)
+    assert metrics["self_distillation/active_turn_pairs_in_micro_batch"] == pytest.approx(2.0)
+
+
 def test_patched_distillation_hook_emits_turn_level_tensors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

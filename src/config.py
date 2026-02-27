@@ -16,6 +16,10 @@ from typing import Any, Mapping, Sequence
 
 import yaml
 
+from runtime_paths import (
+    DEFAULT_SDPO_TASK_CACHE_RELATIVE_DIR,
+    resolve_sdpo_task_cache_dir,
+)
 from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent

@@ -39,16 +39,27 @@ elif ! _is_executable_cmd "${PYTHON_BIN}"; then
 fi
 
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+DEFAULT_SDPO_TASK_CACHE_DIR="$("${PYTHON_BIN}" - "${PROJECT_ROOT}" <<'PY'
+import sys
+from pathlib import Path
+
+project_root = Path(sys.argv[1])
+sys.path.insert(0, str(project_root / "src"))
+
+from runtime_paths import resolve_sdpo_task_cache_dir
+
+print(resolve_sdpo_task_cache_dir(project_root=project_root))
+PY
+)"
 SDPO_TRAINER_MODULE="${SDPO_TRAINER_MODULE:-verl_integration.main_ppo_entry}"
 export SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH="${SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH:-1}"
 # Prevent tokenizer-thread deadlocks in forked Ray worker processes.
 # verl's PPO runtime sets TOKENIZERS_PARALLELISM=true by default unless this is preset.
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+# Optional torch-c-dlpack JIT extension is noisy when unavailable and not required for correctness.
+export TVM_FFI_DISABLE_TORCH_C_DLPACK="${TVM_FFI_DISABLE_TORCH_C_DLPACK:-1}"
 SDPO_ROLLOUT_ONLY_E2E="${SDPO_ROLLOUT_ONLY_E2E:-0}"
-SDPO_DATA_CONFIG_NAME="${SDPO_DATA_CONFIG_NAME:-on_policy_swe_smith}"
-SDPO_TASK_CACHE_DIR="${SDPO_TASK_CACHE_DIR:-${PROJECT_ROOT}/data/sdpo_task_cache}"
-SDPO_EVAL_SPLIT_FRACTION="${SDPO_EVAL_SPLIT_FRACTION:-}"
-SDPO_EVAL_MIN_ROWS="${SDPO_EVAL_MIN_ROWS:-}"
+SDPO_TASK_CACHE_DIR="${SDPO_TASK_CACHE_DIR:-${DEFAULT_SDPO_TASK_CACHE_DIR}}"
 SDPO_PRELOADED_TASK_PARQUET="${SDPO_PRELOADED_TASK_PARQUET:-}"
 SDPO_RFT_CHECKPOINT="${SDPO_RFT_CHECKPOINT:-${RFT_CKPT:-}}"
 SDPO_RFT_MANIFEST="${SDPO_RFT_MANIFEST:-${RFT_MANIFEST:-}}"
@@ -62,6 +73,109 @@ fi
 SDPO_RUN_LABEL="${SDPO_RUN_LABEL:-${DEFAULT_SDPO_RUN_LABEL}}"
 export EXPERIMENT="${EXPERIMENT:-${SDPO_TASK_NAME}_${SDPO_RUN_LABEL}}"
 export TASK="${TASK:-${SDPO_TASK_NAME}}"
+SDPO_CLEANUP_ON_EXIT="${SDPO_CLEANUP_ON_EXIT:-1}"
+SDPO_CLEANUP_GRACE_SEC="${SDPO_CLEANUP_GRACE_SEC:-5}"
+_SDPO_CLEANUP_COMPLETED=0
+
+_resolve_slurm_job_id() {
+  local job_id="${SLURM_JOB_ID:-${SLURM_JOBID:-}}"
+  if [[ "${job_id}" =~ ^[0-9]+$ ]]; then
+    printf '%s' "${job_id}"
+    return 0
+  fi
+  return 1
+}
+
+_collect_slurm_job_ray_pids() {
+  local job_id="$1"
+  if [[ -z "${job_id}" ]] || ! command -v pgrep >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Include Ray core daemons/workers plus vLLM engine/resource-tracker children
+  # that can outlive the trainer when a Slurm job fails mid-shutdown.
+  local process_pattern
+  process_pattern="ray::|raylet|gcs_server|dashboard|runtime_env_agent|default_worker|plasma_store|VLLM::EngineCore|multiprocessing\\.resource_tracker"
+
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+    [[ "${pid}" != "$$" ]] || continue
+    [[ -r "/proc/${pid}/environ" ]] || continue
+    if tr '\0' '\n' <"/proc/${pid}/environ" \
+      | grep -Eq "^SLURM_JOB_ID=${job_id}$|^SLURM_JOBID=${job_id}$"; then
+      printf '%s\n' "${pid}"
+    fi
+  done < <(pgrep -u "$(id -u)" -f "${process_pattern}" || true)
+}
+
+_cleanup_slurm_job_ray_processes() {
+  local job_id="$1"
+  [[ -n "${job_id}" ]] || return 0
+
+  local -a pids=()
+  local -a still_running=()
+  local pid
+  mapfile -t pids < <(_collect_slurm_job_ray_pids "${job_id}")
+  if [[ "${#pids[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  echo "run_sdpo.sh cleanup: sending SIGTERM to ${#pids[@]} runtime process(es) for SLURM job ${job_id}."
+  kill "${pids[@]}" 2>/dev/null || true
+  sleep "${SDPO_CLEANUP_GRACE_SEC}"
+
+  for pid in "${pids[@]}"; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      still_running+=("${pid}")
+    fi
+  done
+
+  if [[ "${#still_running[@]}" -gt 0 ]]; then
+    echo "run_sdpo.sh cleanup: force-killing ${#still_running[@]} lingering process(es)."
+    kill -9 "${still_running[@]}" 2>/dev/null || true
+  fi
+}
+
+_cleanup_sdpo_runtime_once() {
+  if [[ "${_SDPO_CLEANUP_COMPLETED}" == "1" ]]; then
+    return 0
+  fi
+  _SDPO_CLEANUP_COMPLETED=1
+
+  if [[ "${DRY_RUN}" == "1" ]] || [[ "${SDPO_CLEANUP_ON_EXIT}" != "1" ]]; then
+    return 0
+  fi
+
+  local slurm_job_id=""
+  slurm_job_id="$(_resolve_slurm_job_id || true)"
+  if [[ -n "${slurm_job_id}" ]]; then
+    _cleanup_slurm_job_ray_processes "${slurm_job_id}"
+  fi
+}
+
+_on_sdpo_exit() {
+  local exit_code=$?
+  _cleanup_sdpo_runtime_once
+  return "${exit_code}"
+}
+
+_on_sdpo_int() {
+  trap - EXIT INT TERM
+  _cleanup_sdpo_runtime_once
+  exit 130
+}
+
+_on_sdpo_term() {
+  trap - EXIT INT TERM
+  _cleanup_sdpo_runtime_once
+  exit 143
+}
+
+trap _on_sdpo_exit EXIT
+trap _on_sdpo_int INT
+trap _on_sdpo_term TERM
 
 # Some cluster environments export ROCR/HIP selectors even on CUDA nodes.
 # verl workers reject simultaneous ROCR + CUDA/HIP visibility variables.
@@ -240,69 +354,84 @@ _resolve_sdpo_rft_checkpoint() {
   _checkpoint_from_manifest "${manifest_path}"
 }
 
-_resolve_sdpo_dataset_overrides() {
-  "${PYTHON_BIN}" - "${PROJECT_ROOT}" "${SDPO_DATA_CONFIG_NAME}" "${SDPO_TASK_CACHE_DIR}" "${SDPO_EVAL_SPLIT_FRACTION}" "${SDPO_EVAL_MIN_ROWS}" <<'PY'
+_resolve_sdpo_dataset_overrides_from_cache() {
+  "${PYTHON_BIN}" - "${SDPO_TASK_CACHE_DIR}" "${DRY_RUN}" <<'PY'
 import sys
 from pathlib import Path
-from typing import Any, Mapping
 
-project_root = Path(sys.argv[1])
-data_config_name = str(sys.argv[2]).strip()
-cache_dir = str(sys.argv[3]).strip()
-eval_split_fraction_raw = str(sys.argv[4]).strip()
-eval_min_rows_raw = str(sys.argv[5]).strip()
+cache_dir = Path(sys.argv[1])
+dry_run = str(sys.argv[2]).strip() == "1"
 
-sys.path.insert(0, str(project_root / "src"))
+def _emit(train_path: Path, val_path: Path) -> None:
+    print(f"data.train_files={train_path}")
+    print(f"data.val_files={val_path}")
 
-from config import rft_runtime_defaults, resolve_on_policy_settings
-from env.task_dataset import resolve_sdpo_task_split_cache_paths
+def _canonical_paths() -> tuple[Path, Path]:
+    return cache_dir / "train.parquet", cache_dir / "val.parquet"
 
-def _coerce_eval_split_fraction(value: Any, *, fallback: float) -> float:
-    if isinstance(value, bool):
-        return fallback
-    if isinstance(value, (int, float)):
-        candidate = float(value)
-        if 0.0 <= candidate < 1.0:
-            return candidate
-    return fallback
-
-def _coerce_eval_min_rows(value: Any, *, fallback: int) -> int:
-    if isinstance(value, bool):
-        return fallback
-    if isinstance(value, int) and value >= 0:
-        return int(value)
-    return fallback
-
-defaults = rft_runtime_defaults()
-loop_defaults = defaults.get("loop") if isinstance(defaults, Mapping) else None
-fallback_eval_split_fraction = 0.1
-fallback_eval_min_rows = 1
-if isinstance(loop_defaults, Mapping):
-    fallback_eval_split_fraction = _coerce_eval_split_fraction(
-        loop_defaults.get("eval_split_fraction"),
-        fallback=fallback_eval_split_fraction,
+if cache_dir.is_dir():
+    # Preferred fixed filenames for turn-level SDPO preload output.
+    preferred_pairs = (
+        (cache_dir / "train.parquet", cache_dir / "val.parquet"),
+        (cache_dir / "turn_sdpo_train.parquet", cache_dir / "turn_sdpo_val.parquet"),
     )
-    fallback_eval_min_rows = _coerce_eval_min_rows(
-        loop_defaults.get("eval_min_rows"),
-        fallback=fallback_eval_min_rows,
+    for train_path, val_path in preferred_pairs:
+        if train_path.is_file() and val_path.is_file():
+            _emit(train_path, val_path)
+            raise SystemExit(0)
+
+    # Backward compatibility for deterministic split-cache naming.
+    val_by_prefix: dict[str, Path] = {}
+    for val_path in cache_dir.glob("*_val.parquet"):
+        if not val_path.is_file() or not val_path.name.endswith("_val.parquet"):
+            continue
+        prefix = val_path.name[: -len("_val.parquet")]
+        current = val_by_prefix.get(prefix)
+        if current is None or val_path.stat().st_mtime > current.stat().st_mtime:
+            val_by_prefix[prefix] = val_path
+
+    train_candidates = sorted(
+        (
+            train_path
+            for train_path in cache_dir.glob("*_train.parquet")
+            if train_path.is_file() and train_path.name.endswith("_train.parquet")
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for train_path in train_candidates:
+        prefix = train_path.name[: -len("_train.parquet")]
+        val_path = val_by_prefix.get(prefix)
+        if val_path is not None:
+            _emit(train_path, val_path)
+            raise SystemExit(0)
+
+    all_parquet_files = sorted(
+        (path for path in cache_dir.glob("*.parquet") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if len(all_parquet_files) == 1:
+        only_path = all_parquet_files[0]
+        _emit(only_path, only_path)
+        raise SystemExit(0)
+
+if dry_run:
+    train_path, val_path = _canonical_paths()
+    _emit(train_path, val_path)
+    raise SystemExit(0)
+
+if not cache_dir.is_dir():
+    raise SystemExit(
+        f"SDPO task cache directory does not exist: {cache_dir}. "
+        "Run the preload script first or pass explicit data.train_files/data.val_files overrides."
     )
 
-eval_split_fraction = (
-    float(eval_split_fraction_raw)
-    if eval_split_fraction_raw
-    else fallback_eval_split_fraction
+raise SystemExit(
+    "Unable to resolve preloaded SDPO parquet files from "
+    f"{cache_dir}. Expected either train.parquet+val.parquet, "
+    "turn_sdpo_train.parquet+turn_sdpo_val.parquet, or a matching *_train/_val pair."
 )
-eval_min_rows = int(eval_min_rows_raw) if eval_min_rows_raw else fallback_eval_min_rows
-
-settings = resolve_on_policy_settings(data_config_name=data_config_name)
-train_path, val_path = resolve_sdpo_task_split_cache_paths(
-    config=settings.data,
-    cache_dir=cache_dir,
-    eval_split_fraction=eval_split_fraction,
-    min_eval_rows=eval_min_rows,
-)
-print(f"data.train_files={train_path}")
-print(f"data.val_files={val_path}")
 PY
 }
 
@@ -345,7 +474,7 @@ elif [[ -z "${TRAIN_FILES_OVERRIDE}" && -z "${VAL_FILES_OVERRIDE}" ]]; then
       "data.val_files=${SDPO_PRELOADED_TASK_PARQUET}"
     )
   else
-    mapfile -t SDPO_DATA_OVERRIDES < <(_resolve_sdpo_dataset_overrides)
+    mapfile -t SDPO_DATA_OVERRIDES < <(_resolve_sdpo_dataset_overrides_from_cache)
   fi
   if [[ "${#SDPO_DATA_OVERRIDES[@]}" -lt 2 ]]; then
     echo "Failed to resolve SDPO data.train_files/data.val_files overrides."
