@@ -291,6 +291,7 @@ def reward_fn(
         parsed_has_submit = False
         parsed_format_valid = False
         terminal_submission_ok = False
+        submit_contract_ok = True
         final_submit_text = ""
         envelope: ActionEnvelope | None = None
 
@@ -306,6 +307,8 @@ def reward_fn(
             tool_count_valid = 1 <= len(tool_calls) <= max_tool_calls
             submit_count = sum(1 for call in tool_calls if call.tool == TERMINAL_TOOL_NAME)
             submit_singleton_ok = submit_count in {0, 1} and not (submit_count == 1 and len(tool_calls) != 1)
+            if submit_count > 0 and not submit_singleton_ok:
+                submit_contract_ok = False
 
             call_error_lists = [validate_tool_call(call) for call in tool_calls]
             sample_errors.extend(error for errors in call_error_lists for error in errors)
@@ -345,7 +348,9 @@ def reward_fn(
         format_valid = parsed_format_valid
         if final_submit_format_valid is not None:
             format_valid = bool(final_submit_format_valid)
-        terminal_submission_ok = bool(has_submit and format_valid)
+        if not parse_valid and final_turn_has_submit:
+            submit_contract_ok = False
+        terminal_submission_ok = bool(has_submit and format_valid and submit_contract_ok)
         if not has_submit:
             final_submit_text = ""
 
