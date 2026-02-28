@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+import time
 
 import pytest
 
@@ -8,6 +10,9 @@ from prompts import build_sdpo_rollout_followup_user_message
 from verl_integration.swe_bridge_agent_loop import (
     BridgeLoopTaskContext,
     _apply_verification_metadata,
+    _acquire_container_slot,
+    _await_with_attempt_timeout,
+    _remaining_attempt_timeout_sec,
     _extract_final_submit_text,
     _initial_verification_extra_fields,
     _clip_prompt_for_rollout_context,
@@ -351,5 +356,45 @@ def test_container_slot_gate_enforces_capacity() -> None:
     assert acquired is True
     try:
         assert gate.acquire(blocking=False) is False
+    finally:
+        gate.release()
+
+
+def test_remaining_attempt_timeout_sec_accounts_for_elapsed_time() -> None:
+    started_at = time.monotonic() - 1.5
+    remaining = _remaining_attempt_timeout_sec(started_at=started_at, attempt_timeout_sec=5)
+    assert 3.0 <= remaining <= 4.5
+
+
+def test_await_with_attempt_timeout_includes_stage_in_error_message() -> None:
+    async def _exercise() -> None:
+        with pytest.raises(TimeoutError, match="stage 'acquire_container'"):
+            await _await_with_attempt_timeout(
+                asyncio.sleep(0),
+                task_id="task-17",
+                stage="acquire_container",
+                started_at=time.monotonic() - 2.0,
+                attempt_timeout_sec=1,
+            )
+
+    asyncio.run(_exercise())
+
+
+def test_acquire_container_slot_times_out_with_stage_context() -> None:
+    gate = _get_container_slot_gate(1)
+    assert gate.acquire(blocking=False) is True
+
+    async def _exercise() -> None:
+        with pytest.raises(TimeoutError, match="stage 'wait_container_slot'"):
+            await _acquire_container_slot(
+                gate,
+                task_id="task-17",
+                stage="wait_container_slot",
+                started_at=time.monotonic() - 2.0,
+                attempt_timeout_sec=1,
+            )
+
+    try:
+        asyncio.run(_exercise())
     finally:
         gate.release()

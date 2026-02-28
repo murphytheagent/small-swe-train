@@ -71,11 +71,22 @@ else
   DEFAULT_SDPO_RUN_LABEL="${SDPO_RUN_TIMESTAMP}_pid$$"
 fi
 SDPO_RUN_LABEL="${SDPO_RUN_LABEL:-${DEFAULT_SDPO_RUN_LABEL}}"
+export SDPO_RUN_LABEL
 export EXPERIMENT="${EXPERIMENT:-${SDPO_TASK_NAME}_${SDPO_RUN_LABEL}}"
 export TASK="${TASK:-${SDPO_TASK_NAME}}"
 SDPO_CLEANUP_ON_EXIT="${SDPO_CLEANUP_ON_EXIT:-1}"
 SDPO_CLEANUP_GRACE_SEC="${SDPO_CLEANUP_GRACE_SEC:-5}"
+SDPO_CONTAINER_CLEANUP_ENABLE="${SDPO_CONTAINER_CLEANUP_ENABLE:-1}"
+SDPO_CONTAINER_NAME_PREFIX="${SDPO_CONTAINER_NAME_PREFIX:-sdpo-swe-bridge}"
+SDPO_MONITOR_ENABLE="${SDPO_MONITOR_ENABLE:-1}"
+SDPO_MONITOR_INTERVAL_SEC="${SDPO_MONITOR_INTERVAL_SEC:-120}"
+SDPO_STALL_WARN_SEC="${SDPO_STALL_WARN_SEC:-900}"
+SDPO_MONITOR_GPU_SNAPSHOT="${SDPO_MONITOR_GPU_SNAPSHOT:-1}"
+SDPO_MONITOR_LOG_DIR="${SDPO_MONITOR_LOG_DIR:-${PROJECT_ROOT}/outputs/slurm/sdpo_monitor}"
+SDPO_TRAINER_LOG_PATH="${SDPO_TRAINER_LOG_PATH:-}"
 _SDPO_CLEANUP_COMPLETED=0
+_SDPO_MONITOR_PID=""
+_SDPO_TRAINER_PID=""
 
 _resolve_slurm_job_id() {
   local job_id="${SLURM_JOB_ID:-${SLURM_JOBID:-}}"
@@ -138,6 +149,48 @@ _cleanup_slurm_job_ray_processes() {
   fi
 }
 
+_collect_sdpo_bridge_container_ids() {
+  local job_id="$1"
+  if ! command -v docker >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local -a docker_cmd=(
+    docker ps -aq
+    --filter "label=small_swe.managed=1"
+    --filter "label=small_swe.pool_name=${SDPO_CONTAINER_NAME_PREFIX}"
+  )
+  if [[ -n "${job_id}" ]]; then
+    docker_cmd+=(--filter "label=small_swe.slurm_job_id=${job_id}")
+  elif [[ -n "${SDPO_RUN_LABEL:-}" ]]; then
+    docker_cmd+=(--filter "label=small_swe.run_label=${SDPO_RUN_LABEL}")
+  fi
+  "${docker_cmd[@]}" 2>/dev/null || true
+}
+
+_cleanup_sdpo_bridge_containers() {
+  local job_id="$1"
+  if [[ "${SDPO_CONTAINER_CLEANUP_ENABLE}" != "1" ]]; then
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local -a container_ids=()
+  mapfile -t container_ids < <(_collect_sdpo_bridge_container_ids "${job_id}")
+  if [[ "${#container_ids[@]}" -eq 0 ]]; then
+    # Fallback for older runs that did not attach cleanup labels.
+    mapfile -t container_ids < <(docker ps -aq --filter "name=${SDPO_CONTAINER_NAME_PREFIX}-" 2>/dev/null || true)
+  fi
+  if [[ "${#container_ids[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  echo "run_sdpo.sh cleanup: removing ${#container_ids[@]} ${SDPO_CONTAINER_NAME_PREFIX} container(s)."
+  docker rm -f "${container_ids[@]}" >/dev/null 2>&1 || true
+}
+
 _cleanup_sdpo_runtime_once() {
   if [[ "${_SDPO_CLEANUP_COMPLETED}" == "1" ]]; then
     return 0
@@ -153,22 +206,164 @@ _cleanup_sdpo_runtime_once() {
   if [[ -n "${slurm_job_id}" ]]; then
     _cleanup_slurm_job_ray_processes "${slurm_job_id}"
   fi
+  _cleanup_sdpo_bridge_containers "${slurm_job_id}"
+}
+
+_resolve_file_mtime_epoch() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    printf '0'
+    return 0
+  fi
+
+  local mtime
+  if mtime="$(stat -c %Y "${path}" 2>/dev/null)"; then
+    printf '%s' "${mtime}"
+    return 0
+  fi
+  if mtime="$(stat -f %m "${path}" 2>/dev/null)"; then
+    printf '%s' "${mtime}"
+    return 0
+  fi
+
+  printf '0'
+}
+
+_format_sdpo_process_snapshot() {
+  local pid="$1"
+  local snapshot
+  snapshot="$(
+    ps -p "${pid}" -o stat=,etimes=,%cpu=,rss=,comm= 2>/dev/null \
+      | tr -s ' ' \
+      | sed 's/^ //'
+  )"
+  if [[ -z "${snapshot}" ]]; then
+    printf 'proc=unavailable'
+    return 0
+  fi
+  printf 'proc=%s' "${snapshot}"
+}
+
+_format_sdpo_gpu_snapshot() {
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local snapshot
+  snapshot="$(
+    nvidia-smi \
+      --query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu \
+      --format=csv,noheader,nounits 2>/dev/null \
+      | tr '\n' ';' \
+      | sed 's/;*$//'
+  )"
+  if [[ -n "${snapshot}" ]]; then
+    printf '%s' "${snapshot}"
+  fi
+}
+
+_start_sdpo_watchdog() {
+  local trainer_pid="$1"
+  local trainer_log_path="$2"
+  local interval_sec="$3"
+  local stall_warn_sec="$4"
+  local monitor_gpu="$5"
+
+  (
+    set +e
+
+    local last_log_epoch
+    local last_warn_epoch
+    local now_epoch
+    local now_iso
+    local log_mtime
+    local idle_sec
+    local process_snapshot
+    local gpu_snapshot
+
+    last_log_epoch="$(_resolve_file_mtime_epoch "${trainer_log_path}")"
+    if ! [[ "${last_log_epoch}" =~ ^[0-9]+$ ]] || [[ "${last_log_epoch}" == "0" ]]; then
+      last_log_epoch="$(date +%s)"
+    fi
+    last_warn_epoch=0
+
+    while kill -0 "${trainer_pid}" 2>/dev/null; do
+      sleep "${interval_sec}"
+      if ! kill -0 "${trainer_pid}" 2>/dev/null; then
+        break
+      fi
+
+      now_epoch="$(date +%s)"
+      now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      log_mtime="$(_resolve_file_mtime_epoch "${trainer_log_path}")"
+      if [[ "${log_mtime}" =~ ^[0-9]+$ ]] && (( log_mtime > last_log_epoch )); then
+        last_log_epoch="${log_mtime}"
+      fi
+      idle_sec=$(( now_epoch - last_log_epoch ))
+      process_snapshot="$(_format_sdpo_process_snapshot "${trainer_pid}")"
+
+      echo "run_sdpo.sh watchdog: ts=${now_iso} trainer_pid=${trainer_pid} ${process_snapshot} idle_log_sec=${idle_sec}"
+      if [[ "${monitor_gpu}" == "1" ]]; then
+        gpu_snapshot="$(_format_sdpo_gpu_snapshot)"
+        if [[ -n "${gpu_snapshot}" ]]; then
+          echo "run_sdpo.sh watchdog: gpu=${gpu_snapshot}"
+        fi
+      fi
+      if (( idle_sec >= stall_warn_sec )) && (( now_epoch - last_warn_epoch >= interval_sec )); then
+        echo "run_sdpo.sh watchdog WARN: no trainer log updates for ${idle_sec}s (threshold=${stall_warn_sec}s); job may be stalled."
+        last_warn_epoch="${now_epoch}"
+      fi
+    done
+  ) &
+  _SDPO_MONITOR_PID="$!"
+}
+
+_stop_sdpo_watchdog() {
+  local monitor_pid="${_SDPO_MONITOR_PID:-}"
+  if [[ -z "${monitor_pid}" ]]; then
+    return 0
+  fi
+  if kill -0 "${monitor_pid}" 2>/dev/null; then
+    kill "${monitor_pid}" 2>/dev/null || true
+    wait "${monitor_pid}" 2>/dev/null || true
+  fi
+  _SDPO_MONITOR_PID=""
+}
+
+_terminate_sdpo_trainer_if_running() {
+  local trainer_pid="${_SDPO_TRAINER_PID:-}"
+  if [[ -z "${trainer_pid}" ]]; then
+    return 0
+  fi
+  if ! kill -0 "${trainer_pid}" 2>/dev/null; then
+    return 0
+  fi
+  kill "${trainer_pid}" 2>/dev/null || true
+  sleep 2
+  if kill -0 "${trainer_pid}" 2>/dev/null; then
+    kill -9 "${trainer_pid}" 2>/dev/null || true
+  fi
 }
 
 _on_sdpo_exit() {
   local exit_code=$?
+  _stop_sdpo_watchdog
   _cleanup_sdpo_runtime_once
   return "${exit_code}"
 }
 
 _on_sdpo_int() {
   trap - EXIT INT TERM
+  _stop_sdpo_watchdog
+  _terminate_sdpo_trainer_if_running
   _cleanup_sdpo_runtime_once
   exit 130
 }
 
 _on_sdpo_term() {
   trap - EXIT INT TERM
+  _stop_sdpo_watchdog
+  _terminate_sdpo_trainer_if_running
   _cleanup_sdpo_runtime_once
   exit 143
 }
@@ -435,6 +630,29 @@ raise SystemExit(
 PY
 }
 
+_validate_sdpo_parquet_schema() {
+  local parquet_path="$1"
+  "${PYTHON_BIN}" - "${parquet_path}" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    import pyarrow.parquet as pq
+except Exception as exc:  # pragma: no cover - runtime dependency check
+    raise SystemExit(f"Unable to validate parquet schema for {path}: pyarrow unavailable ({exc})")
+
+schema = pq.read_schema(path)
+columns = {str(name) for name in schema.names}
+required = {"prompt", "task_id", "image_name", "data_source", "reward_model"}
+missing = sorted(required - columns)
+if missing:
+    raise SystemExit(
+        f"Parquet schema missing required columns for SDPO runtime: {', '.join(missing)} (file={path})"
+    )
+PY
+}
+
 AUTO_OVERRIDES=()
 
 if ! _has_override_with_prefix "ray_kwargs.ray_init.num_cpus" "$@"; then
@@ -444,8 +662,8 @@ if ! _has_override_with_prefix "ray_kwargs.ray_init.num_cpus" "$@"; then
   fi
 fi
 
-if ! _has_override_for_key "data.apply_chat_template_kwargs.enable_thinking" "$@"; then
-  AUTO_OVERRIDES+=("~data.apply_chat_template_kwargs.enable_thinking")
+if ! _has_override_with_prefix "data.apply_chat_template_kwargs.enable_thinking" "$@"; then
+  AUTO_OVERRIDES+=("++data.apply_chat_template_kwargs.enable_thinking=false")
 fi
 
 if ! _has_override_with_prefix "data.filter_overlong_prompts" "$@"; then
@@ -495,6 +713,13 @@ elif [[ -z "${TRAIN_FILES_OVERRIDE}" && -z "${VAL_FILES_OVERRIDE}" ]]; then
       echo "Preload dataset artifacts in advance or pass explicit data.train_files/data.val_files overrides."
       exit 1
     fi
+    if [[ "${DRY_RUN}" -ne 1 ]]; then
+      if ! _validate_sdpo_parquet_schema "${value}"; then
+        echo "Resolved SDPO parquet is incompatible with current runtime: ${value}"
+        echo "Regenerate cache with force refresh (for example: python -m env.preload_sdpo_dataset --emit-split --force-refresh --cache-dir data/sdpo_task_cache)."
+        exit 1
+      fi
+    fi
     AUTO_OVERRIDES+=("${override}")
   done
 fi
@@ -539,4 +764,59 @@ if ! "${PYTHON_BIN}" -c "import verl" >/dev/null 2>&1; then
   exit 1
 fi
 
-"${CMD[@]}"
+if [[ "${SDPO_MONITOR_ENABLE}" != "0" && "${SDPO_MONITOR_ENABLE}" != "1" ]]; then
+  echo "SDPO_MONITOR_ENABLE must be 0 or 1 (got: ${SDPO_MONITOR_ENABLE})."
+  exit 1
+fi
+if ! [[ "${SDPO_MONITOR_INTERVAL_SEC}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SDPO_MONITOR_INTERVAL_SEC must be a positive integer (got: ${SDPO_MONITOR_INTERVAL_SEC})."
+  exit 1
+fi
+if ! [[ "${SDPO_STALL_WARN_SEC}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SDPO_STALL_WARN_SEC must be a positive integer (got: ${SDPO_STALL_WARN_SEC})."
+  exit 1
+fi
+if [[ "${SDPO_MONITOR_GPU_SNAPSHOT}" != "0" && "${SDPO_MONITOR_GPU_SNAPSHOT}" != "1" ]]; then
+  echo "SDPO_MONITOR_GPU_SNAPSHOT must be 0 or 1 (got: ${SDPO_MONITOR_GPU_SNAPSHOT})."
+  exit 1
+fi
+if (( SDPO_STALL_WARN_SEC < SDPO_MONITOR_INTERVAL_SEC )); then
+  SDPO_STALL_WARN_SEC="${SDPO_MONITOR_INTERVAL_SEC}"
+fi
+
+if [[ -z "${SDPO_TRAINER_LOG_PATH}" ]]; then
+  SDPO_TRAINER_LOG_PATH="${SDPO_MONITOR_LOG_DIR}/${SDPO_TASK_NAME}_${SDPO_RUN_LABEL}.trainer.log"
+fi
+
+RESOLVED_TOTAL_STEPS="$(_extract_override_value "trainer.total_training_steps" "${CMD[@]}" || true)"
+RESOLVED_CHECKPOINT="$(_extract_override_value "actor_rollout_ref.model.path" "${CMD[@]}" || true)"
+RESOLVED_TRAIN_FILES="$(_extract_override_value "data.train_files" "${CMD[@]}" || true)"
+RESOLVED_VAL_FILES="$(_extract_override_value "data.val_files" "${CMD[@]}" || true)"
+
+echo "run_sdpo.sh launch: task=${TASK} experiment=${EXPERIMENT} slurm_job_id=${SLURM_JOB_ID:-none} host=$(hostname)"
+echo "run_sdpo.sh launch: trainer_module=${SDPO_TRAINER_MODULE} total_steps=${RESOLVED_TOTAL_STEPS:-<config-default>}"
+echo "run_sdpo.sh launch: checkpoint=${RESOLVED_CHECKPOINT:-<config-default>}"
+echo "run_sdpo.sh launch: train_files=${RESOLVED_TRAIN_FILES:-<config-default>} val_files=${RESOLVED_VAL_FILES:-<config-default>}"
+
+if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
+  mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"
+  : > "${SDPO_TRAINER_LOG_PATH}"
+  echo "run_sdpo.sh watchdog: enabled interval=${SDPO_MONITOR_INTERVAL_SEC}s stall_warn=${SDPO_STALL_WARN_SEC}s trainer_log=${SDPO_TRAINER_LOG_PATH}"
+  set +e
+  "${CMD[@]}" > >(tee -a "${SDPO_TRAINER_LOG_PATH}") 2>&1 &
+  _SDPO_TRAINER_PID="$!"
+  _start_sdpo_watchdog "${_SDPO_TRAINER_PID}" "${SDPO_TRAINER_LOG_PATH}" "${SDPO_MONITOR_INTERVAL_SEC}" "${SDPO_STALL_WARN_SEC}" "${SDPO_MONITOR_GPU_SNAPSHOT}"
+  wait "${_SDPO_TRAINER_PID}"
+  TRAINER_EXIT_CODE=$?
+  set -e
+  _SDPO_TRAINER_PID=""
+  _stop_sdpo_watchdog
+else
+  echo "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)"
+  set +e
+  "${CMD[@]}"
+  TRAINER_EXIT_CODE=$?
+  set -e
+fi
+
+exit "${TRAINER_EXIT_CODE}"

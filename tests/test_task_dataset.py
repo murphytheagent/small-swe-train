@@ -201,8 +201,10 @@ def test_build_sdpo_task_rows_uses_full_split_with_prompt_metadata() -> None:
     assert [row["task_id"] for row in sdpo_rows] == ["task-0", "task-2"]
     assert sdpo_rows[0]["prompt"] == [{"role": "user", "content": "fix bug 0"}]
     assert sdpo_rows[0]["image_name"] == "img:0"
+    assert sdpo_rows[0]["data_source"] == "dummy/dataset"
     assert sdpo_rows[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
     assert sdpo_rows[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
+    assert sdpo_rows[0]["reward_model"]["ground_truth"]["data_source"] == "dummy/dataset"
 
 
 def test_build_sdpo_task_rows_filters_problem_statement_length_under_4k() -> None:

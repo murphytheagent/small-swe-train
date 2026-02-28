@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-DEFAULT_SDPO_TASK_CACHE_RELATIVE_DIR = Path("task") / "sdpo_task_cache"
+DEFAULT_SDPO_TASK_CACHE_RELATIVE_DIR = Path("data") / "sdpo_task_cache"
 
 
 def resolve_sdpo_task_cache_dir(*, project_root: str | Path) -> Path:

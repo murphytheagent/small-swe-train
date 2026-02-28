@@ -94,15 +94,21 @@ Run SDPO runtime (`run_sdpo.sh`) through Slurm only:
 ```bash
 # Required on this machine for SDPO:
 # 1) put Ray temp on scratch, not /tmp
-# 2) clean stale /tmp/ray/session_* only when no Ray daemons are running
-if ! pgrep -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then
-  rm -rf /tmp/ray/session_*
-fi
+# 2) optional: clean stale user-owned sessions under that scratch dir
 export RAY_TMPDIR=/data/scratch/$USER/ray_tmp/${SLURM_JOB_ID:-manual}
 mkdir -p "$RAY_TMPDIR"
+if ! pgrep -u "$(id -u)" -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then
+  find "$RAY_TMPDIR" -mindepth 1 -maxdepth 1 -type d -name 'session_*' -exec rm -rf {} + 2>/dev/null || true
+fi
 bash scripts/run_sdpo.sh trainer.total_training_steps=2
 ```
 `run_sdpo.sh` defaults `TOKENIZERS_PARALLELISM=false` for Ray SDPO workers.
+`run_sdpo.sh` also prints a launch summary and watchdog heartbeats to stdout, and warns if trainer logs stay unchanged for too long.
+Useful knobs when checking for stalls:
+- `SDPO_MONITOR_INTERVAL_SEC` (default `120`)
+- `SDPO_STALL_WARN_SEC` (default `900`)
+- `SDPO_MONITOR_ENABLE=0` to disable the watchdog
+- `SDPO_TRAINER_LOG_PATH=/path/to/trainer.log` to control the mirrored trainer log path
 See `scripts/SLURM_GPU_LAUNCH.md` for full 8-GPU submit examples and SDPO-specific launcher defaults.
 
 Rebuild flash-attn through Slurm:

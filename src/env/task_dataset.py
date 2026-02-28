@@ -15,6 +15,7 @@ from config import OnPolicyDataConfig
 
 DatasetLoader = Callable[[str, str], Sequence[Mapping[str, Any]]]
 SDPO_DEFAULT_MAX_PROBLEM_STATEMENT_CHARS = 4000
+SDPO_TASK_ROWS_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,13 @@ def _normalize_test_targets(value: Any) -> list[str]:
     return []
 
 
+def _resolve_sdpo_data_source(config: OnPolicyDataConfig) -> str:
+    dataset_id = str(config.dataset_id).strip()
+    if dataset_id:
+        return dataset_id
+    return "small_swe_phase_d"
+
+
 def load_task_batch(
     *,
     step_index: int,
@@ -224,6 +232,7 @@ def build_sdpo_task_rows(
     _validate_required_columns(dataset, config=config)
 
     prompt_char_limit = _coerce_sdpo_prompt_char_limit(max_problem_statement_chars)
+    data_source = _resolve_sdpo_data_source(config)
     rows: list[dict[str, Any]] = []
     last_error: ValueError | None = None
     skipped_for_prompt_length = 0
@@ -249,12 +258,14 @@ def build_sdpo_task_rows(
                 "prompt": [{"role": "user", "content": task.problem_statement}],
                 "task_id": task.task_id,
                 "image_name": task.image_name,
+                "data_source": data_source,
                 "fail_to_pass": fail_to_pass,
                 "pass_to_pass": pass_to_pass,
                 "reward_model": {
                     "ground_truth": {
                         "task_id": task.task_id,
                         "image_name": task.image_name,
+                        "data_source": data_source,
                         "fail_to_pass": fail_to_pass,
                         "pass_to_pass": pass_to_pass,
                     }
@@ -286,6 +297,7 @@ def resolve_sdpo_task_rows_cache_path(
     """Resolve deterministic parquet cache path for SDPO prompt rows."""
     prompt_char_limit = _coerce_sdpo_prompt_char_limit(max_problem_statement_chars)
     config_fingerprint = {
+        "schema_version": SDPO_TASK_ROWS_SCHEMA_VERSION,
         "dataset_id": config.dataset_id,
         "dataset_split": config.dataset_split,
         "columns": {
@@ -387,6 +399,7 @@ def resolve_sdpo_task_split_cache_paths(
     """Resolve deterministic train/eval parquet cache paths for SDPO task rows."""
     prompt_char_limit = _coerce_sdpo_prompt_char_limit(max_problem_statement_chars)
     split_fingerprint = {
+        "schema_version": SDPO_TASK_ROWS_SCHEMA_VERSION,
         "dataset_id": config.dataset_id,
         "dataset_split": config.dataset_split,
         "columns": {

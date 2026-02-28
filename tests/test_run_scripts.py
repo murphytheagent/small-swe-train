@@ -378,6 +378,36 @@ def test_run_sdpo_script_unsets_rocr_visible_devices_when_cuda_visible(tmp_path:
     assert "ROCR_VISIBLE_DEVICES=0,1" not in result.stdout
 
 
+def test_run_sdpo_script_allows_disabling_watchdog_monitor(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_env_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_PRELOADED_TASK_PARQUET": str(fake_parquet),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)" in result.stdout
+
+
 def test_run_sdpo_script_dry_run_sets_ray_num_cpus_from_slurm_cpus_per_task() -> None:
     result = _run_script(
         "run_sdpo.sh",
@@ -455,8 +485,7 @@ def test_run_sdpo_script_dry_run_uses_task_sdpo_cache_defaults() -> None:
     result = _run_script("run_sdpo.sh")
     assert "data.train_files=" in result.stdout
     assert "data.val_files=" in result.stdout
-    assert "task/sdpo_task_cache/train.parquet" in result.stdout
-    assert "task/sdpo_task_cache/val.parquet" in result.stdout
+    assert "/data/sdpo_task_cache/" in result.stdout
 
 
 def test_run_sdpo_script_dry_run_prefers_preloaded_train_val_pair_in_cache(

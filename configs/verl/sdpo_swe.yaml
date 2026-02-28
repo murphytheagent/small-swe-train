@@ -213,7 +213,8 @@ data:
 
 # Avoid hardcoded external reward module paths from upstream defaults.
 custom_reward_function:
-  path: null
+  path: ${oc.env:PROJECT_ROOT}/src/verl_integration/reward_loop_score.py
+  name: compute_score
 
 # ---------------------------------------------------------------------------
 # Trainer

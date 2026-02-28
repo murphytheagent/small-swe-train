@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence, TypeVar
 from uuid import uuid4
 
 from env.container_pool import BatchContainerPool, ContainerHandle
@@ -193,6 +193,9 @@ _DEFAULT_CLEANUP_TIMEOUT_SEC = _RUNTIME_DEFAULTS["cleanup_timeout_sec"]
 _DEFAULT_ATTEMPT_TIMEOUT_SEC = _RUNTIME_DEFAULTS["attempt_timeout_sec"]
 _DEFAULT_MAX_TOOL_CALLS_PER_TURN = _RUNTIME_DEFAULTS["max_tool_calls_per_turn"]
 _DEFAULT_VERIFIER_TIMEOUT_SEC = _RUNTIME_DEFAULTS["verifier_timeout_sec"]
+_DEFAULT_STAGE_HEARTBEAT_SEC = 60
+
+_T = TypeVar("_T")
 
 
 def build_bridge_task_context(kwargs: Mapping[str, Any]) -> BridgeLoopTaskContext:
@@ -245,6 +248,78 @@ def resolve_bridge_loop_runtime_config(
             fallback=_DEFAULT_VERIFIER_TIMEOUT_SEC,
         ),
     )
+
+
+def _remaining_attempt_timeout_sec(*, started_at: float, attempt_timeout_sec: int) -> float:
+    return attempt_timeout_sec - (time.monotonic() - started_at)
+
+
+async def _await_with_attempt_timeout(
+    awaitable: Awaitable[_T],
+    *,
+    task_id: str,
+    stage: str,
+    started_at: float,
+    attempt_timeout_sec: int,
+) -> _T:
+    remaining_sec = _remaining_attempt_timeout_sec(started_at=started_at, attempt_timeout_sec=attempt_timeout_sec)
+    if remaining_sec <= 0:
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        raise TimeoutError(
+            f"swe_bridge_agent attempt timed out after {attempt_timeout_sec}s for task {task_id!r} before stage {stage!r}."
+        )
+    try:
+        return await asyncio.wait_for(awaitable, timeout=remaining_sec)
+    except asyncio.TimeoutError as exc:
+        elapsed_sec = time.monotonic() - started_at
+        raise TimeoutError(
+            f"swe_bridge_agent attempt timed out after {elapsed_sec:.1f}s/{attempt_timeout_sec}s "
+            f"for task {task_id!r} in stage {stage!r}."
+        ) from exc
+
+
+async def _emit_stage_heartbeats(
+    *,
+    task_id: str,
+    image_name: str,
+    started_at: float,
+    stage_getter: Callable[[], str],
+    stop_event: asyncio.Event,
+    interval_sec: int = _DEFAULT_STAGE_HEARTBEAT_SEC,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_sec)
+            continue
+        except asyncio.TimeoutError:
+            logger.warning(
+                "swe_bridge_agent heartbeat task_id=%s image_name=%s stage=%s elapsed=%.1fs",
+                task_id,
+                image_name,
+                stage_getter(),
+                time.monotonic() - started_at,
+            )
+
+
+async def _acquire_container_slot(
+    gate: threading.BoundedSemaphore,
+    *,
+    task_id: str,
+    stage: str,
+    started_at: float,
+    attempt_timeout_sec: int,
+    poll_interval_sec: float = 0.05,
+) -> None:
+    while True:
+        if gate.acquire(blocking=False):
+            return
+        remaining_sec = _remaining_attempt_timeout_sec(started_at=started_at, attempt_timeout_sec=attempt_timeout_sec)
+        if remaining_sec <= 0:
+            raise TimeoutError(
+                f"swe_bridge_agent attempt timed out after {attempt_timeout_sec}s for task {task_id!r} in stage {stage!r}."
+            )
+        await asyncio.sleep(min(poll_interval_sec, max(0.01, remaining_sec)))
 
 
 def build_agent_loop_messages(kwargs: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -383,15 +458,55 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         self.verifier_timeout_sec = runtime_config.verifier_timeout_sec
 
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
+        task_context = build_bridge_task_context(kwargs)
+        started_at = time.monotonic()
+        current_stage = "init"
+        stage_stop_event = asyncio.Event()
+        heartbeat_task: asyncio.Task[None] | None = None
+
+        def _set_stage(stage: str) -> None:
+            nonlocal current_stage
+            if stage == current_stage:
+                return
+            current_stage = stage
+            logger.warning(
+                "swe_bridge_agent stage task_id=%s image_name=%s stage=%s elapsed=%.1fs",
+                task_context.task_id,
+                task_context.image_name,
+                current_stage,
+                time.monotonic() - started_at,
+            )
+
+        logger.warning(
+            "swe_bridge_agent start task_id=%s image_name=%s",
+            task_context.task_id,
+            task_context.image_name,
+        )
+
+        _set_stage("build_messages")
         messages = build_agent_loop_messages(kwargs)
-        multi_modal_data = await self.process_vision_info(messages)
+        _set_stage("process_vision_info")
+        multi_modal_data = await _await_with_attempt_timeout(
+            self.process_vision_info(messages),
+            task_id=task_context.task_id,
+            stage=current_stage,
+            started_at=started_at,
+            attempt_timeout_sec=self.attempt_timeout_sec,
+        )
         images = multi_modal_data.get("images")
         videos = multi_modal_data.get("videos")
 
-        raw_prompt_ids = await self.apply_chat_template(
-            messages,
-            images=images,
-            videos=videos,
+        _set_stage("tokenize_prompt")
+        raw_prompt_ids = await _await_with_attempt_timeout(
+            self.apply_chat_template(
+                messages,
+                images=images,
+                videos=videos,
+            ),
+            task_id=task_context.task_id,
+            stage=current_stage,
+            started_at=started_at,
+            attempt_timeout_sec=self.attempt_timeout_sec,
         )
         raw_prompt_token_ids = _coerce_token_ids(raw_prompt_ids)
         canonical_prompt_ids = _clip_prompt_for_rollout_context(
@@ -412,12 +527,6 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         response_logprobs: list[float] = []
         metrics = {"generate_sequences": 0.0, "tool_calls": 0.0}
 
-        task_context = build_bridge_task_context(kwargs)
-        logger.info(
-            "swe_bridge_agent start task_id=%s image_name=%s",
-            task_context.task_id,
-            task_context.image_name,
-        )
         task_sample = _build_task_sample(task_context=task_context, raw_kwargs=kwargs)
         request_id = uuid4().hex
         assistant_turns = 0
@@ -437,7 +546,6 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         verification_metadata: dict[str, Any] = {}
 
         container_slot_gate = _get_container_slot_gate(self.env_pool_size)
-        await asyncio.to_thread(container_slot_gate.acquire)
         pool = BatchContainerPool(
             # One loop invocation operates on one task sample; shared slot gating
             # enforces global env_pool_size concurrency across concurrent loop runs.
@@ -447,18 +555,57 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             name_prefix="sdpo-swe-bridge",
         )
         handle: ContainerHandle | None = None
+        container_slot_acquired = False
+        heartbeat_task = asyncio.create_task(
+            _emit_stage_heartbeats(
+                task_id=task_context.task_id,
+                image_name=task_context.image_name,
+                started_at=started_at,
+                stage_getter=lambda: current_stage,
+                stop_event=stage_stop_event,
+            )
+        )
         try:
-            handles = await asyncio.to_thread(pool.acquire, [task_sample])
+            _set_stage("wait_container_slot")
+            await _acquire_container_slot(
+                container_slot_gate,
+                task_id=task_context.task_id,
+                stage=current_stage,
+                started_at=started_at,
+                attempt_timeout_sec=self.attempt_timeout_sec,
+            )
+            container_slot_acquired = True
+
+            _set_stage("acquire_container")
+            handles = await _await_with_attempt_timeout(
+                asyncio.to_thread(pool.acquire, [task_sample]),
+                task_id=task_context.task_id,
+                stage=current_stage,
+                started_at=started_at,
+                attempt_timeout_sec=self.attempt_timeout_sec,
+            )
             if len(handles) != 1:
                 raise RuntimeError("swe_bridge_agent requires exactly one container handle per sample.")
             handle = handles[0]
+            logger.warning(
+                "swe_bridge_agent container_ready task_id=%s container_id=%s elapsed=%.1fs",
+                task_context.task_id,
+                handle.container_id,
+                time.monotonic() - started_at,
+            )
             executor = DockerToolExecutor(
                 container_id=handle.container_id,
                 tool_timeout_sec=self.tool_timeout_sec,
             )
-            await asyncio.to_thread(_maybe_apply_patch, executor, task_context.patch, self.tool_timeout_sec)
+            _set_stage("maybe_apply_patch")
+            await _await_with_attempt_timeout(
+                asyncio.to_thread(_maybe_apply_patch, executor, task_context.patch, self.tool_timeout_sec),
+                task_id=task_context.task_id,
+                stage=current_stage,
+                started_at=started_at,
+                attempt_timeout_sec=self.attempt_timeout_sec,
+            )
 
-            started_at = time.monotonic()
             while len(response_mask) < self.response_length:
                 if self.max_assistant_turns and assistant_turns >= self.max_assistant_turns:
                     loop_exit_reason = "max_assistant_turns_reached"
@@ -466,10 +613,13 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 if self.max_user_turns and user_turns >= self.max_user_turns:
                     loop_exit_reason = "max_user_turns_reached"
                     break
-                if (time.monotonic() - started_at) > self.attempt_timeout_sec:
+                if _remaining_attempt_timeout_sec(
+                    started_at=started_at,
+                    attempt_timeout_sec=self.attempt_timeout_sec,
+                ) <= 0:
                     timeout_error = (
                         f"swe_bridge_agent timed out after {self.attempt_timeout_sec}s "
-                        f"for task {task_context.task_id!r}."
+                        f"for task {task_context.task_id!r} in stage {current_stage!r}."
                     )
                     loop_exit_reason = "attempt_timeout"
                     break
@@ -500,12 +650,20 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 turn_sampling_params["max_tokens"] = max(1, min(available_tokens, requested_tokens))
 
                 generate_started = time.monotonic()
-                generation_output = await self.server_manager.generate(
-                    request_id=request_id,
-                    prompt_ids=full_token_ids,
-                    sampling_params=turn_sampling_params,
-                    image_data=images,
-                    video_data=videos,
+                turn_idx = assistant_turns + 1
+                _set_stage(f"generate_turn_{turn_idx}")
+                generation_output = await _await_with_attempt_timeout(
+                    self.server_manager.generate(
+                        request_id=request_id,
+                        prompt_ids=full_token_ids,
+                        sampling_params=turn_sampling_params,
+                        image_data=images,
+                        video_data=videos,
+                    ),
+                    task_id=task_context.task_id,
+                    stage=current_stage,
+                    started_at=started_at,
+                    attempt_timeout_sec=self.attempt_timeout_sec,
                 )
                 metrics["generate_sequences"] += time.monotonic() - generate_started
 
@@ -530,9 +688,16 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     token_logprobs=clipped_generated_logprobs,
                 )
                 assistant_turn_ids = clipped_generated_ids
-                assistant_text = await self.loop.run_in_executor(
-                    None,
-                    lambda: self.tokenizer.decode(assistant_turn_ids, skip_special_tokens=True),
+                _set_stage(f"decode_turn_{turn_idx}")
+                assistant_text = await _await_with_attempt_timeout(
+                    self.loop.run_in_executor(
+                        None,
+                        lambda: self.tokenizer.decode(assistant_turn_ids, skip_special_tokens=True),
+                    ),
+                    task_id=task_context.task_id,
+                    stage=current_stage,
+                    started_at=started_at,
+                    attempt_timeout_sec=self.attempt_timeout_sec,
                 )
                 assistant_turns += 1
                 trajectory_assistant_turns.append(assistant_text)
@@ -544,13 +709,31 @@ class SWEBridgeAgentLoop(AgentLoopBase):
 
                 bridge_started = time.monotonic()
                 try:
-                    bridge_result = await asyncio.to_thread(
-                        run_env_bridge_step,
-                        assistant_text,
-                        executor=executor,
-                        max_tool_calls=self.max_tool_calls_per_turn,
-                        step_index_start=bridge_step_index,
+                    _set_stage(f"bridge_turn_{turn_idx}")
+                    bridge_result = await _await_with_attempt_timeout(
+                        asyncio.to_thread(
+                            run_env_bridge_step,
+                            assistant_text,
+                            executor=executor,
+                            max_tool_calls=self.max_tool_calls_per_turn,
+                            step_index_start=bridge_step_index,
+                        ),
+                        task_id=task_context.task_id,
+                        stage=current_stage,
+                        started_at=started_at,
+                        attempt_timeout_sec=self.attempt_timeout_sec,
                     )
+                except TimeoutError as exc:
+                    timeout_error = str(exc)
+                    loop_exit_reason = "attempt_timeout"
+                    logger.warning(
+                        "swe_bridge_agent bridge timeout task_id=%s assistant_turn=%d stage=%s error=%s",
+                        task_context.task_id,
+                        assistant_turns,
+                        current_stage,
+                        exc,
+                    )
+                    break
                 except Exception as exc:
                     bridge_error = f"swe_bridge_agent bridge failure: {exc}"
                     loop_exit_reason = "bridge_failure"
@@ -577,13 +760,20 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                         bridge_result.envelope.tool_calls,
                         bridge_result.steps,
                     )
-                    verification_metadata = await asyncio.to_thread(
-                        _verify_terminal_submission,
-                        executor,
-                        task_sample,
-                        self.verifier_timeout_sec,
-                        final_submit_format_valid,
-                        final_response_text,
+                    _set_stage("verify_submission")
+                    verification_metadata = await _await_with_attempt_timeout(
+                        asyncio.to_thread(
+                            _verify_terminal_submission,
+                            executor,
+                            task_sample,
+                            self.verifier_timeout_sec,
+                            final_submit_format_valid,
+                            final_response_text,
+                        ),
+                        task_id=task_context.task_id,
+                        stage=current_stage,
+                        started_at=started_at,
+                        attempt_timeout_sec=self.attempt_timeout_sec,
                     )
                     if serialized_steps:
                         metadata = serialized_steps[-1].setdefault("metadata", {})
@@ -596,9 +786,16 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     trajectory_turn_tool_response_blocks[-1] = current_turn_tool_blocks
                     tool_messages = build_tool_response_messages(bridge_result.tool_response_blocks)
                     if tool_messages:
-                        tool_ids = await self.apply_chat_template(
-                            tool_messages,
-                            remove_system_prompt=True,
+                        _set_stage(f"tokenize_tool_feedback_turn_{assistant_turns}")
+                        tool_ids = await _await_with_attempt_timeout(
+                            self.apply_chat_template(
+                                tool_messages,
+                                remove_system_prompt=True,
+                            ),
+                            task_id=task_context.task_id,
+                            stage=current_stage,
+                            started_at=started_at,
+                            attempt_timeout_sec=self.attempt_timeout_sec,
                         )
                         append_response_tokens(
                             full_token_ids=full_token_ids,
@@ -613,17 +810,59 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 if bridge_result.is_terminal:
                     loop_exit_reason = "terminal"
                     break
+        except TimeoutError as exc:
+            timeout_error = str(exc)
+            loop_exit_reason = "attempt_timeout"
+            logger.warning(
+                "swe_bridge_agent timeout task_id=%s stage=%s elapsed=%.1fs error=%s",
+                task_context.task_id,
+                current_stage,
+                time.monotonic() - started_at,
+                exc,
+            )
+        except Exception as exc:
+            bridge_error = f"swe_bridge_agent setup failure: {exc}"
+            loop_exit_reason = "setup_failure"
+            logger.exception(
+                "swe_bridge_agent setup failure task_id=%s stage=%s error=%s",
+                task_context.task_id,
+                current_stage,
+                exc,
+            )
         finally:
-            await asyncio.to_thread(pool.release_all)
-            container_slot_gate.release()
+            _set_stage("cleanup")
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(pool.release_all),
+                    timeout=max(5, self.cleanup_timeout_sec + 5),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "swe_bridge_agent cleanup issue task_id=%s stage=%s error=%s",
+                    task_context.task_id,
+                    current_stage,
+                    exc,
+                )
+            if container_slot_acquired:
+                try:
+                    container_slot_gate.release()
+                except ValueError:
+                    logger.warning(
+                        "swe_bridge_agent container slot release mismatch task_id=%s",
+                        task_context.task_id,
+                    )
+            stage_stop_event.set()
+            if heartbeat_task is not None:
+                await heartbeat_task
 
-        logger.info(
-            "swe_bridge_agent stop task_id=%s reason=%s assistant_turns=%d user_turns=%d tool_response_blocks=%d",
+        logger.warning(
+            "swe_bridge_agent stop task_id=%s reason=%s assistant_turns=%d user_turns=%d tool_response_blocks=%d elapsed=%.1fs",
             task_context.task_id,
             loop_exit_reason,
             assistant_turns,
             user_turns,
             len(tool_response_blocks),
+            time.monotonic() - started_at,
         )
 
         _validate_rollout_context_alignment(

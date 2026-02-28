@@ -132,7 +132,7 @@ Length knobs in `configs/verl/sdpo_swe.yaml`:
   - latest `outputs/rft_runtime/*/rft_runtime_loop_manifest.json` (`final_model_path` fallback keys).
 - SDPO prompt parquet overrides:
   - if `data.train_files`/`data.val_files` are not passed, it resolves preloaded
-    parquet paths from `task/sdpo_task_cache` by default.
+    parquet paths from `data/sdpo_task_cache` by default.
 - Ray CPU budget (`ray_kwargs.ray_init.num_cpus`) from:
   - explicit Hydra override (highest priority), or
   - `SDPO_RAY_NUM_CPUS`, or
@@ -153,17 +153,26 @@ Length knobs in `configs/verl/sdpo_swe.yaml`:
   connection error / EOF details.
 - Set `RAY_TMPDIR` to a high-capacity scratch path (for this machine: `/data/scratch/$USER/ray_tmp/$SLURM_JOB_ID`).
 - Optional cleanup before launch (only when no Ray jobs are running):
-  - `if ! pgrep -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then rm -rf /tmp/ray/session_*; fi`
+  - `if ! pgrep -u "$(id -u)" -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then find "$RAY_TMPDIR" -mindepth 1 -maxdepth 1 -type d -name 'session_*' -exec rm -rf {} + 2>/dev/null || true; fi`
 
 If no checkpoint can be resolved, the launcher exits early. If no data overrides are passed,
 the launcher expects those parquet files to already exist; `run_sdpo.sh` does not preload/build them.
 
 Common environment knobs:
-- `SDPO_TASK_CACHE_DIR` (default: `$PWD/task/sdpo_task_cache`)
+- `SDPO_TASK_CACHE_DIR` (default: `$PWD/data/sdpo_task_cache`)
 - `SDPO_PRELOADED_TASK_PARQUET=/path/file.parquet` to use one file for both train/val
 - `SDPO_ROLLOUT_ONLY_E2E=1` to auto-set `trainer.test_freq=0` and `trainer.val_before_train=false`
 - `SDPO_RAY_NUM_CPUS=<N>` to pin Ray CPU count when cluster Slurm env vars are non-standard
 - `RAY_TMPDIR=/data/scratch/$USER/ray_tmp/$SLURM_JOB_ID` to keep Ray temp/spill files off `/tmp`
+- Watchdog / stall visibility:
+  - `SDPO_MONITOR_INTERVAL_SEC=120` heartbeat period in seconds
+  - `SDPO_STALL_WARN_SEC=900` warn when trainer log is unchanged for this long
+  - `SDPO_MONITOR_ENABLE=0` disable watchdog
+  - `SDPO_TRAINER_LOG_PATH=/path/to/trainer.log` set trainer log mirror file
+
+Watchdog log lines in Slurm output look like:
+- `run_sdpo.sh watchdog: ts=... trainer_pid=... proc=... idle_log_sec=...`
+- `run_sdpo.sh watchdog WARN: no trainer log updates for ...; job may be stalled.`
 
 For stable Slurm behavior, keep CPU requests proportional to GPU requests (same CPUs per GPU).
 Example: `GPUS=8`, `CPUS_PER_GPU=8`, `--cpus-per-task=$((GPUS * CPUS_PER_GPU))`.
@@ -173,7 +182,7 @@ One-time preload (manual, outside `run_sdpo.sh`):
 ```bash
 PYTHONPATH=src ./.venv/bin/python -m env.preload_sdpo_dataset \
   --data-config-name on_policy_swe_smith \
-  --cache-dir task/sdpo_task_cache \
+  --cache-dir data/sdpo_task_cache \
   --emit-split \
   --emit-hydra-overrides \
   --force-refresh
@@ -182,8 +191,10 @@ PYTHONPATH=src ./.venv/bin/python -m env.preload_sdpo_dataset \
 Example submit (auto-checkpoint + default data cache paths):
 
 ```bash
-if ! pgrep -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then
-  rm -rf /tmp/ray/session_*
+export RAY_TMPDIR=/data/scratch/$USER/ray_tmp/${SLURM_JOB_ID:-manual}
+mkdir -p "$RAY_TMPDIR"
+if ! pgrep -u "$(id -u)" -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then
+  find "$RAY_TMPDIR" -mindepth 1 -maxdepth 1 -type d -name 'session_*' -exec rm -rf {} + 2>/dev/null || true
 fi
 
 sbatch \
