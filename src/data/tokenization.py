@@ -35,7 +35,17 @@ def load_qwen_tokenizer(model_name: str) -> SupportsOffsetsTokenizer:
             "Install with `pip install transformers`."
         ) from exc
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+    kwargs: dict[str, Any] = {
+        "use_fast": True,
+        "fix_mistral_regex": True,
+    }
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, **kwargs)
+    except TypeError as exc:
+        if "fix_mistral_regex" not in str(exc):
+            raise
+        kwargs.pop("fix_mistral_regex", None)
+        tokenizer = AutoTokenizer.from_pretrained(model_name, **kwargs)
     return cast(SupportsOffsetsTokenizer, tokenizer)
 
 

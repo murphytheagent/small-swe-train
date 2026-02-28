@@ -1,5 +1,6 @@
-# User-local path overrides for verl.
-# Copy this file and adjust paths to match your environment.
+# Optional local overlay for manual Hydra composition.
+# Note: `sdpo_swe.yaml` and `rft_swe.yaml` do NOT include this file in defaults.
+# Keep values here only if you explicitly compose `+user` yourself.
 
 vars:
   dir: /home/${oc.env:USER}/small-swe-train       # project root

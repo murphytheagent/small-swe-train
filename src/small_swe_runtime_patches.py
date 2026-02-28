@@ -280,11 +280,32 @@ def _install_verl_tokenizer_compat_patches() -> None:
     original_hf_processor = tokenizer_module.hf_processor
 
     def _small_swe_hf_tokenizer(name_or_path, *args, **kwargs):
-        if "fix_mistral_regex" not in kwargs:
-            default_fix_flag = _resolve_fix_mistral_regex_default(name_or_path)
-            if default_fix_flag is not None:
-                kwargs["fix_mistral_regex"] = default_fix_flag
-        tokenizer = original_hf_tokenizer(name_or_path, *args, **kwargs)
+        tokenizer_kwargs = dict(kwargs)
+        if "fix_mistral_regex" not in tokenizer_kwargs:
+            # Some merged checkpoints preserve a non-Mistral model_type in
+            # config.json while shipping a tokenizer that still needs the
+            # regex fix. Prefer the safe default unless explicitly disabled.
+            force_fix_mistral_regex = _coerce_bool_env(
+                "SMALL_SWE_FORCE_FIX_MISTRAL_REGEX",
+                default=True,
+            )
+            if force_fix_mistral_regex:
+                tokenizer_kwargs["fix_mistral_regex"] = True
+            else:
+                default_fix_flag = _resolve_fix_mistral_regex_default(name_or_path)
+                if default_fix_flag is not None:
+                    tokenizer_kwargs["fix_mistral_regex"] = default_fix_flag
+        try:
+            tokenizer = original_hf_tokenizer(name_or_path, *args, **tokenizer_kwargs)
+        except TypeError as exc:
+            if (
+                "fix_mistral_regex" in tokenizer_kwargs
+                and "fix_mistral_regex" in str(exc)
+            ):
+                tokenizer_kwargs.pop("fix_mistral_regex", None)
+                tokenizer = original_hf_tokenizer(name_or_path, *args, **tokenizer_kwargs)
+            else:
+                raise
         _suppress_fast_tokenizer_pad_warning(tokenizer)
         return tokenizer
 

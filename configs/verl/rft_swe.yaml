@@ -11,7 +11,6 @@
 defaults:
   - model_defaults
   - sft_trainer
-  - user
   - _self_
 
 actor_rollout_ref:
@@ -61,10 +60,13 @@ actor_rollout_ref:
     max_num_seqs: 64
     max_num_batched_tokens: 262144
 
+# RFT token budget per packed training row.
+# This is consumed by data.max_length and by run_rft.sh overrides.
 max_model_len: 8192
 
 data:
   micro_batch_size_per_gpu: 1
+  # SFT row truncation/padding length.
   max_length: ${max_model_len}
   apply_chat_template_kwargs: {}
   train_files: /tmp/onpolicy-rft-train.parquet
@@ -79,6 +81,9 @@ data:
     output_dir: null
 
 trainer:
+  project_name: small-swe-rft
+  experiment_name: ${oc.env:EXPERIMENT,rft}
+  default_local_dir: ${oc.env:PROJECT_ROOT}/outputs/rft_runtime/${trainer.experiment_name}
   save_freq: 100
   test_freq: 100
   group_name: small-swe-rft

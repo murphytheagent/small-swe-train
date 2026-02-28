@@ -113,6 +113,7 @@ bash scripts/run_flash_attn_rebuild.sh
 ## Runtime defaults
 
 Centralized defaults are sourced from `configs/runtime/training_policy_defaults.v1.json`.
+Config layout and field semantics are documented in `configs/README.md`.
 For 8-GPU runs (`NPROC_PER_NODE=8`), the locked rollout defaults are:
 - `rft_runtime.loop.collector_max_in_flight_tasks=32`
 - `rft_runtime.vllm_parallelism.by_nproc_per_node.8.tensor_parallel_size=2`

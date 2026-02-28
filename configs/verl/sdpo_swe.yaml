@@ -11,15 +11,17 @@
 defaults:
   - model_defaults
   - ppo_trainer
-  - user
   - _self_
 
 # ---------------------------------------------------------------------------
 # Sequence budget
 # ---------------------------------------------------------------------------
-# Runtime prompt clipping should not trigger for the current preloaded
-# SWE-smith split cache (max observed initial rollout context: 12885 tokens),
-# so max_prompt_length is set above that value in `data` below.
+# Length semantics (single source of truth in this file):
+# - max_model_len: total model context cap for one rollout sequence
+#   (prompt context + generated response tokens).
+# - data.max_prompt_length: prompt-context budget before rollout (left-clipped).
+# - data.max_response_length: generated-token budget during rollout.
+# Keep max_model_len >= data.max_prompt_length + data.max_response_length.
 max_model_len: 18944
 
 # ---------------------------------------------------------------------------
@@ -92,8 +94,8 @@ actor_rollout_ref:
       min_lr_ratio: 0.1                     # keep LR floor at 10% of base LR
 
     # -- Mini-batch / micro-batch ----------------------------------------------
-    ppo_mini_batch_size: 64
-    ppo_micro_batch_size_per_gpu: 1
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 2
     ppo_max_token_len_per_gpu: 24576
     ppo_epochs: 1                             # on-policy: single pass
 
@@ -125,15 +127,17 @@ actor_rollout_ref:
   # -- Rollout (vLLM) --------------------------------------------------------
   rollout:
     name: vllm
+    # Keep rollout budgets tied to local data.* values (not package user defaults).
     prompt_length: ${data.max_prompt_length}
     response_length: ${data.max_response_length}
+    max_model_len: ${max_model_len}
     dtype: bfloat16
     enforce_eager: true
     free_cache_engine: true
     tensor_model_parallel_size: 1
     data_parallel_size: 1
     n: 16                                      # rollouts per prompt
-    temperature: 0.6
+    temperature: 0.7
     top_p: 0.95
     gpu_memory_utilization: 0.9
     max_num_batched_tokens: 262144
@@ -199,7 +203,10 @@ algorithm:
 data:
   train_batch_size: 128                        # prompts per global batch
   prompt_key: prompt                          # RFT handoff parquet exports metadata-rich `prompt` chats
-  max_prompt_length: 4000                  # > 12885 observed initial context max on default SDPO split cache
+  max_prompt_length: 4000
+  max_response_length: 8192
+  # Preload stage owns any dataset filtering; do not re-filter at SDPO runtime launch.
+  filter_overlong_prompts: false
   apply_chat_template_kwargs: {}
   return_raw_chat: true
   # train_files / val_files set at launch time
@@ -212,11 +219,13 @@ custom_reward_function:
 # Trainer
 # ---------------------------------------------------------------------------
 trainer:
+  project_name: small-swe-sdpo
+  experiment_name: ${oc.env:EXPERIMENT,sdpo}
   n_gpus_per_node: 8
   total_epochs: 1
   total_training_steps: null                  # set at launch
   default_local_dir: ${oc.env:PROJECT_ROOT}/outputs/turn_sdpo_runtime/${trainer.experiment_name}
   val_before_train: true
-  save_freq: 1
+  save_freq: 100
   test_freq: 10                          # PPO validation frequency is step-based
   group_name: small-swe-sdpo

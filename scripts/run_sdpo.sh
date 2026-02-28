@@ -448,6 +448,10 @@ if ! _has_override_for_key "data.apply_chat_template_kwargs.enable_thinking" "$@
   AUTO_OVERRIDES+=("~data.apply_chat_template_kwargs.enable_thinking")
 fi
 
+if ! _has_override_with_prefix "data.filter_overlong_prompts" "$@"; then
+  AUTO_OVERRIDES+=("data.filter_overlong_prompts=false")
+fi
+
 if ! _has_override_with_prefix "actor_rollout_ref.model.path" "$@"; then
   if ! SDPO_RFT_CHECKPOINT="$(_resolve_sdpo_rft_checkpoint)"; then
     echo "Unable to resolve SDPO RFT checkpoint. Set SDPO_RFT_CHECKPOINT or SDPO_RFT_MANIFEST (or pass actor_rollout_ref.model.path=...)."

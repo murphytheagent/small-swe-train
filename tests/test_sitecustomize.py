@@ -256,7 +256,7 @@ def test_sitecustomize_installs_model_type_aware_mistral_regex_default(monkeypat
     fake_tokenizer_module.hf_tokenizer(str(mistral_dir))
     fake_tokenizer_module.hf_tokenizer(str(qwen_dir), fix_mistral_regex=True)
 
-    assert calls["tokenizer"][0]["fix_mistral_regex"] is False
+    assert calls["tokenizer"][0]["fix_mistral_regex"] is True
     assert calls["tokenizer"][1]["fix_mistral_regex"] is True
     assert calls["tokenizer"][2]["fix_mistral_regex"] is True
     assert fake_utils_pkg.hf_tokenizer is fake_tokenizer_module.hf_tokenizer
@@ -342,8 +342,47 @@ def test_sitecustomize_marks_fast_tokenizer_pad_warning_as_handled(monkeypatch, 
     sitecustomize.apply_small_swe_runtime_patches()
 
     tokenizer = fake_tokenizer_module.hf_tokenizer(str(qwen_dir))
-    assert calls["kwargs"][-1]["fix_mistral_regex"] is False
+    assert calls["kwargs"][-1]["fix_mistral_regex"] is True
     assert tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] is True
+
+
+def test_sitecustomize_tokenizer_patch_falls_back_when_fix_flag_is_unsupported(monkeypatch) -> None:
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_utils_pkg = types.ModuleType("verl.utils")
+    fake_utils_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_tokenizer_module = types.ModuleType("verl.utils.tokenizer")
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_hf_tokenizer(name_or_path, *args, **kwargs):
+        _ = name_or_path, args
+        calls.append(dict(kwargs))
+        if "fix_mistral_regex" in kwargs:
+            raise TypeError("__init__() got an unexpected keyword argument 'fix_mistral_regex'")
+        return {}
+
+    def _fake_hf_processor(name_or_path, *args, **kwargs):
+        _ = name_or_path, args, kwargs
+        return None
+
+    fake_tokenizer_module.hf_tokenizer = _fake_hf_tokenizer
+    fake_tokenizer_module.hf_processor = _fake_hf_processor
+    fake_utils_pkg.tokenizer = fake_tokenizer_module
+    fake_utils_pkg.hf_tokenizer = _fake_hf_tokenizer
+    fake_utils_pkg.hf_processor = _fake_hf_processor
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.tokenizer", fake_tokenizer_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+    assert fake_tokenizer_module.hf_tokenizer("/tmp/model") == {}
+
+    assert len(calls) == 2
+    assert calls[0]["fix_mistral_regex"] is True
+    assert "fix_mistral_regex" not in calls[1]
 
 
 def test_sitecustomize_patches_transformers_torch_dtype_property(monkeypatch) -> None:
