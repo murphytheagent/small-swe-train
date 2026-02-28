@@ -4580,7 +4580,7 @@ requires-dist = [
     { name = "setuptools", marker = "extra == 'train'", specifier = ">=80.0" },
     { name = "torch", marker = "extra == 'train'", specifier = ">=2.9.1,<2.10" },
     { name = "transformers", marker = "extra == 'train'", specifier = ">=4.57.3" },
-    { name = "verl", marker = "extra == 'train'", git = "https://github.com/lasgroup/SDPO.git" },
+    { name = "verl", marker = "extra == 'train'", git = "https://github.com/lasgroup/SDPO.git?rev=c52586ba45633a817879f59e2612cc62c55c8479" },
     { name = "vllm", marker = "extra == 'train'", specifier = ">=0.8.4" },
     { name = "wandb", marker = "extra == 'train'", specifier = ">=0.23.1" },
     { name = "wheel", marker = "extra == 'train'", specifier = ">=0.46.0" },
@@ -5118,7 +5118,7 @@ wheels = [
 [[package]]
 name = "verl"
 version = "0.7.0.dev0"
-source = { git = "https://github.com/lasgroup/SDPO.git#c52586ba45633a817879f59e2612cc62c55c8479" }
+source = { git = "https://github.com/lasgroup/SDPO.git?rev=c52586ba45633a817879f59e2612cc62c55c8479#c52586ba45633a817879f59e2612cc62c55c8479" }
 dependencies = [
     { name = "accelerate" },
     { name = "codetiming" },

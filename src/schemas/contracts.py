@@ -82,7 +82,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "constraints": {
             "command": {"min_length": 1},
             "cwd": {"min_length": 1},
-            "timeout_sec": {"minimum": 1, "maximum": 600},
+            "timeout_sec": {"minimum": 1, "maximum": 7200},
         },
     },
     SEARCH_TOOL_NAME: {

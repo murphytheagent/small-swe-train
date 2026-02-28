@@ -9,6 +9,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+export PROJECT_ROOT
 CONFIG_DIR="${PROJECT_ROOT}/configs/verl"
 VENV_PYTHON="${PROJECT_ROOT}/.venv/bin/python"
 
@@ -41,6 +42,7 @@ CMD=(
   "${PYTHON_BIN}" -m verl.trainer.main_ppo
   --config-name sdpo_swe
   --config-dir "${CONFIG_DIR}"
+  "~data.apply_chat_template_kwargs.enable_thinking"
   actor_rollout_ref.actor.policy_loss.loss_mode=sdft
   "$@"
 )

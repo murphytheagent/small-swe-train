@@ -11,17 +11,17 @@
 defaults:
   - model_defaults
   - ppo_trainer
-  - user
   - _self_
 
 # ---------------------------------------------------------------------------
 # Sequence budget
 # ---------------------------------------------------------------------------
-# MAX_PROMPT_LENGTH   = 2048   (system + task)
-# MAX_RESPONSE_LENGTH = 8192   (multi-turn tool-call trajectory)
-# MAX_FEEDBACK_LENGTH = 8192   (teacher reprompt includes feedback + attempt)
-# TEMPLATE_OVERHEAD   = 512
-# TOTAL               = 18944
+# Length semantics (single source of truth in this file):
+# - max_model_len: total model context cap for one rollout sequence
+#   (prompt context + generated response tokens).
+# - data.max_prompt_length: prompt-context budget before rollout (left-clipped).
+# - data.max_response_length: generated-token budget during rollout.
+# Keep max_model_len >= data.max_prompt_length + data.max_response_length.
 max_model_len: 18944
 
 # ---------------------------------------------------------------------------
@@ -35,10 +35,17 @@ actor_rollout_ref:
     trust_remote_code: false
     external_lib: null
     override_config: {}
+    # Mirror LoRA knobs into legacy HFModelConfig fields consumed by verl
+    # workers, so runtime always receives explicit adapter parameters.
+    lora_rank: 16
+    lora_alpha: 32
+    # Keep model.target_modules aligned with RFT defaults (attn + MLP modules)
+    # so LoRA propagation is explicit in both legacy and nested config paths.
+    target_modules: ".*(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$"
     lora:
       enable: true
-      rank: 64
-      alpha: 128
+      rank: 16
+      alpha: 32
       target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
       dropout: 0.05
 
@@ -61,6 +68,7 @@ actor_rollout_ref:
       distillation_add_tail: true             # tail-bucket for residual mass
       is_clip: 2.0                            # importance-sampling ratio clip
       max_reprompt_len: 10240                 # teacher prompt token budget
+      num_recent_raw_blocks: 3                # number of preceding turn blocks in RECENT_RAW_BLOCK
       reprompt_truncation: right
       dont_reprompt_on_self_success: true      # always include student attempt (§9.2.4)
       remove_thinking_from_demonstration: true
@@ -71,7 +79,7 @@ actor_rollout_ref:
       # Python adapter layer; the templates below are verl-native fallbacks.
       reprompt_template: "{prompt}\n{solution}\n{feedback}"
       solution_template: |
-        [SUCCESSFUL PREVIOUS ATTEMPT]
+        [PREVIOUS ATTEMPT]
         {successful_previous_attempt}
       feedback_template: |
         [ENVIRONMENT FEEDBACK]
@@ -82,11 +90,12 @@ actor_rollout_ref:
       lr: 1.0e-5
       lr_warmup_steps: 10
       weight_decay: 0.0
-      lr_scheduler_type: constant_with_warmup
+      lr_scheduler_type: cosine
+      min_lr_ratio: 0.1                     # keep LR floor at 10% of base LR
 
     # -- Mini-batch / micro-batch ----------------------------------------------
-    ppo_mini_batch_size: 128
-    ppo_micro_batch_size_per_gpu: 1
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 2
     ppo_max_token_len_per_gpu: 24576
     ppo_epochs: 1                             # on-policy: single pass
 
@@ -118,14 +127,16 @@ actor_rollout_ref:
   # -- Rollout (vLLM) --------------------------------------------------------
   rollout:
     name: vllm
+    # Keep rollout budgets tied to local data.* values (not package user defaults).
     prompt_length: ${data.max_prompt_length}
     response_length: ${data.max_response_length}
+    max_model_len: ${max_model_len}
     dtype: bfloat16
     enforce_eager: true
     free_cache_engine: true
-    tensor_model_parallel_size: 2
-    data_parallel_size: 4
-    n: 8                                      # rollouts per prompt
+    tensor_model_parallel_size: 1
+    data_parallel_size: 1
+    n: 16                                      # rollouts per prompt
     temperature: 0.7
     top_p: 0.95
     gpu_memory_utilization: 0.9
@@ -138,8 +149,15 @@ actor_rollout_ref:
     calculate_log_probs: true
     engine_kwargs:
       vllm:
-        data_parallel_size: 4
+        data_parallel_size: 1
       sglang: {}
+    multi_turn:
+      enable: true
+      max_assistant_turns: 16
+      max_user_turns: 32
+    agent:
+      default_agent_loop: swe_bridge_agent
+      agent_loop_config_path: configs/verl/agent_loops/swe_bridge_agent.yaml
     val_kwargs:
       top_k: -1
       top_p: 1.0
@@ -167,6 +185,9 @@ actor_rollout_ref:
 # ---------------------------------------------------------------------------
 # Algorithm
 # ---------------------------------------------------------------------------
+critic:
+  enable: false                              # GRPO path is actor-only (no value critic)
+
 algorithm:
   adv_estimator: grpo                         # outcome-level advantage, no critic
   gamma: 1.0
@@ -180,16 +201,32 @@ algorithm:
 # Data
 # ---------------------------------------------------------------------------
 data:
-  train_batch_size: 32                        # prompts per global batch
+  train_batch_size: 128                        # prompts per global batch
+  prompt_key: prompt                          # RFT handoff parquet exports metadata-rich `prompt` chats
+  max_prompt_length: 4000
+  max_response_length: 8192
+  # Preload stage owns any dataset filtering; do not re-filter at SDPO runtime launch.
+  filter_overlong_prompts: false
+  apply_chat_template_kwargs: {}
+  return_raw_chat: true
   # train_files / val_files set at launch time
+
+# Avoid hardcoded external reward module paths from upstream defaults.
+custom_reward_function:
+  path: ${oc.env:PROJECT_ROOT,${hydra:runtime.cwd}}/src/verl_integration/reward_loop_score.py
+  name: compute_score
 
 # ---------------------------------------------------------------------------
 # Trainer
 # ---------------------------------------------------------------------------
 trainer:
+  project_name: small-swe-sdpo
+  experiment_name: ${oc.env:EXPERIMENT,sdpo}
+  n_gpus_per_node: 8
   total_epochs: 1
   total_training_steps: null                  # set at launch
-  val_before_train: false
-  save_freq: 50
-  val_freq: 25
+  default_local_dir: ${oc.env:PROJECT_ROOT,${hydra:runtime.cwd}}/outputs/turn_sdpo_runtime/${trainer.experiment_name}
+  val_before_train: true
+  save_freq: 100
+  test_freq: 10                          # PPO validation frequency is step-based
   group_name: small-swe-sdpo

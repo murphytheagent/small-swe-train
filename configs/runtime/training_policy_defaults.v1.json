@@ -14,7 +14,7 @@
     ]
   },
   "output_contract": {
-    "format_mode": "chatml_with_delimited_thinking_and_multi_tool_calls",
+    "format_mode": "chatml_with_multi_tool_calls",
     "chat_template": "qwen3_chatml",
     "chatml_turn_delimiters": [
       "<|im_start|>",
@@ -32,11 +32,12 @@
       "<tool_response>",
       "</tool_response>"
     ],
-    "allow_optional_thinking": true,
+    "allow_optional_thinking": false,
     "min_tool_calls_per_turn": 1,
     "max_tool_calls_per_turn": 3,
     "terminal_tool": "submit",
     "submit_must_be_only_tool_call": true,
+    "terminal_validity_penalty": 0.2,
     "legacy_answer_alias_for_canonicalization": true
   },
   "teacher": {
@@ -71,7 +72,7 @@
       "include_tool_call_tokens": true
     },
     "step_sdpo": {
-      "include_thinking_tokens": true,
+      "include_thinking_tokens": false,
       "include_tool_call_tokens": true
     }
   },

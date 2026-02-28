@@ -14,8 +14,6 @@ from .model_delimiters import ModelDelimiters, default_delimiters
 _d = default_delimiters()
 CHATML_START: str = _d.role_start
 CHATML_END: str = _d.role_end
-THINK_START: str = _d.think_start
-THINK_END: str = _d.think_end
 TOOL_CALL_START: str = _d.tool_call_start
 TOOL_CALL_END: str = _d.tool_call_end
 TOOL_RESPONSE_START: str = _d.tool_response_start
@@ -26,6 +24,10 @@ _DEFAULT_SYSTEM_PROMPT_PREFIX = (
     "You are a software engineering agent working in a real repository.\n"
     "Inspect code, run tools, apply targeted patches, and validate behavior with tests.\n"
     "Return one assistant turn at a time and follow the tool-output contract exactly.\n"
+)
+_SDPO_ROLLOUT_FOLLOWUP_USER_MESSAGE = (
+    "Return the next assistant turn now. Use bash/search/edit while still working. "
+    "If solved, return one submit tool call with a concise final_response."
 )
 
 
@@ -161,15 +163,15 @@ def build_assistant_contract_prompt(
     return (
         "Assistant output contract:\n"
         "1) Surround each tool action with a tool-call delimiter block.\n"
-        f"2) Optional reasoning span: {d.think_start}...{d.think_end}\n"
-        f"3) Emit 1..{max_tool_calls} ordered tool calls: "
+        f"2) Emit 1..{max_tool_calls} ordered tool calls: "
         f"{d.tool_call_start}{{\"tool\":\"...\",\"args\":{{...}}}}{d.tool_call_end}\n"
-        "   Every tool-call JSON object MUST include both keys: 'tool' and 'args'.\n"
+        "3) Every tool-call JSON object MUST include both keys: 'tool' and 'args'.\n"
         "   'args' MUST be a JSON object (never put command/query/path at top level).\n"
         f"4) Allowed tools: {allowed_tools_text}.\n"
         f"{_build_required_args_prompt()}"
         "6) Do not invent tool names or wrapper labels.\n"
         f"7) Terminal tool is '{terminal_tool}', you must end conversation with this tool, and if present it must be the only tool call.\n"
+        "Do not repeat an identical previously-failed command without a new hypothesis.\n"
         f"{suffix}"
     )
 
@@ -177,6 +179,11 @@ def build_assistant_contract_prompt(
 def build_onpolicy_system_prompt() -> str:
     """Build the default system prompt for on-policy runtime rollouts."""
     return _DEFAULT_SYSTEM_PROMPT_PREFIX + build_assistant_contract_prompt()
+
+
+def build_sdpo_rollout_followup_user_message() -> str:
+    """Build the continuation nudge for bridge-loop SDPO rollouts."""
+    return _SDPO_ROLLOUT_FOLLOWUP_USER_MESSAGE
 
 
 def build_onpolicy_initial_user_message(

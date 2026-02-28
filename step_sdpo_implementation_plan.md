@@ -347,9 +347,13 @@ Checkpoint must resolve to a valid directory containing model export artifacts.
 - `actor_rollout_ref.rollout.agent.agent_loop_config_path=<repo>/configs/verl/agent_loops/swe_bridge_agent.yaml`
 - `trainer.total_training_steps=1`
 - `trainer.default_local_dir=<outputs/integration/<run_label>>`
-- run dataset paths (`data.train_files`, `data.val_files`)
+- rollout prompt dataset path (`data.train_files`)
+- config-compatibility validation path (`data.val_files`) should mirror `data.train_files` (no separate offline split)
+- for RL-style e2e acceptance, disable validation rollouts (`trainer.test_freq=0`)
 
 ### 7.3 Canonical Dry-run Example
+
+Dry-run only resolves launch overrides; it does not start Ray.
 
 ```bash
 RFT_MANIFEST="/path/to/rft_runtime_loop_manifest.json"
@@ -395,12 +399,21 @@ Under `outputs/integration/<run_label>/`:
 ### Suggested Slurm Envelope for Acceptance Run
 
 Heavy runtime must run in Slurm with explicit memory.
+For SDPO on this node, set `RAY_TMPDIR` to scratch and clean stale `/tmp/ray/session_*`
+only when no Ray jobs are running, to avoid Ray disk-pressure crashes.
+Also keep `TOKENIZERS_PARALLELISM=false` for Ray SDPO workers to avoid forked-worker
+tokenizer deadlocks (`run_sdpo.sh` now defaults this automatically).
 
 ```bash
 srun --mem=384G --gres=gpu:8 --cpus-per-task=32 --time=04:00:00 bash -lc '
   set -euo pipefail
   cd /home/murphy/projects/small-swe-train-runtime
   export NPROC_PER_NODE=8
+  if ! pgrep -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then
+    rm -rf /tmp/ray/session_*
+  fi
+  export RAY_TMPDIR=/data/scratch/$USER/ray_tmp/${SLURM_JOB_ID:-manual}
+  mkdir -p "$RAY_TMPDIR"
 
   RFT_MANIFEST=/path/to/rft_runtime_loop_manifest.json
   RFT_CKPT="$(jq -r ".final_model_path" "${RFT_MANIFEST}")"
@@ -415,7 +428,8 @@ srun --mem=384G --gres=gpu:8 --cpus-per-task=32 --time=04:00:00 bash -lc '
     trainer.total_training_steps=1 \
     trainer.default_local_dir="${RUN_DIR}" \
     data.train_files=/path/to/train_data \
-    data.val_files=/path/to/val_data \
+    data.val_files=/path/to/train_data \
+    trainer.test_freq=0 \
     2>&1 | tee "${RUN_DIR}/train.log"
 '
 ```
@@ -449,4 +463,3 @@ This planning PR phase is complete when:
 1. This root guiding plan is tracked and reviewed.
 2. Implementation work follows Sections 5-8 in order.
 3. Runtime coding starts only after collaborator confirms this guiding doc is acceptable.
-

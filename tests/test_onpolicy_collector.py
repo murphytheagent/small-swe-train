@@ -166,29 +166,29 @@ def _four_task_dataset_loader(_dataset_id: str, _split: str) -> list[dict[str, o
             "task_id": "task-a",
             "image_name": "img:1",
             "problem_statement": "Fix A",
-            "FAIL_TO_PASS": [],
-            "PASS_TO_PASS": [],
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+            "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
         },
         {
             "task_id": "task-b",
             "image_name": "img:2",
             "problem_statement": "Fix B",
-            "FAIL_TO_PASS": [],
-            "PASS_TO_PASS": [],
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+            "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
         },
         {
             "task_id": "task-c",
             "image_name": "img:3",
             "problem_statement": "Fix C",
-            "FAIL_TO_PASS": [],
-            "PASS_TO_PASS": [],
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+            "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
         },
         {
             "task_id": "task-d",
             "image_name": "img:4",
             "problem_statement": "Fix D",
-            "FAIL_TO_PASS": [],
-            "PASS_TO_PASS": [],
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+            "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
         },
     ]
 
@@ -219,6 +219,8 @@ def test_onpolicy_collector_collects_terminal_attempt_rows() -> None:
     assert row["is_terminal"] is True
     assert row["task_id"] == "task-1"
     assert row["image_name"] == "img:1"
+    assert row["fail_to_pass"] == ["a"]
+    assert row["pass_to_pass"] == ["b"]
     assert row["trajectory_steps"]
     assert row["trajectory_history"]
     assert row["trajectory_assistant_turns"]
@@ -299,7 +301,7 @@ def test_onpolicy_collector_keeps_failed_rows() -> None:
     assert rows[1]["resolved"] is False
 
 
-def test_onpolicy_collector_tracks_invalid_terminal_submit_metadata() -> None:
+def test_onpolicy_collector_tracks_invalid_submit_metadata_without_forcing_terminal_stop() -> None:
     pool = _FakePool()
     executor = _FakeExecutor()
 
@@ -315,8 +317,8 @@ def test_onpolicy_collector_tracks_invalid_terminal_submit_metadata() -> None:
 
     assert len(rows) == 1
     row = rows[0]
-    assert row["is_terminal"] is True
-    assert row["final_turn_has_submit"] is True
+    assert row["is_terminal"] is False
+    assert row["final_turn_has_submit"] is False
     assert row["final_submit_format_valid"] is False
     assert row["trajectory_format_valid"] is False
     assert row["trajectory_tool_validation_errors"]
@@ -418,15 +420,15 @@ def test_onpolicy_collector_dispatches_one_task_per_trajectory_attempt() -> None
                 "task_id": "task-a",
                 "image_name": "img:1",
                 "problem_statement": "Fix A",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             },
             {
                 "task_id": "task-b",
                 "image_name": "img:2",
                 "problem_statement": "Fix B",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             },
         ],
         pool_factory=lambda _runtime: pool,
@@ -584,8 +586,8 @@ def test_onpolicy_collector_applies_task_patch_before_rollout_turns() -> None:
                 "image_name": "img:1",
                 "problem_statement": "Fix patch flow",
                 "patch": task_patch,
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             }
         ],
         pool_factory=lambda _runtime: pool,
@@ -632,8 +634,8 @@ def test_onpolicy_collector_retries_task_patch_init_once_on_transient_executor_e
                 "image_name": "img:1",
                 "problem_statement": "Fix patch flow",
                 "patch": task_patch,
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             }
         ],
         pool_factory=lambda _runtime: pool,
@@ -677,16 +679,16 @@ def test_onpolicy_collector_keeps_batch_running_when_patch_init_executor_raises(
                 "image_name": "img:1",
                 "problem_statement": "Fix A",
                 "patch": "diff --git a/a.txt b/a.txt\n",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             },
             {
                 "task_id": "task-b",
                 "image_name": "img:2",
                 "problem_statement": "Fix B",
                 "patch": "diff --git a/b.txt b/b.txt\n",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             },
         ],
         pool_factory=lambda _runtime: pool,

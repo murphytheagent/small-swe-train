@@ -101,8 +101,8 @@ def test_collect_rollouts_for_steps_writes_jsonl_artifacts(tmp_path: Path) -> No
                 "task_id": "task-1",
                 "image_name": "img:1",
                 "problem_statement": "Fix bug",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             }
         ],
         pool_factory=lambda _runtime: _FakePool(),
@@ -369,8 +369,8 @@ def test_collect_rft_sft_batch_for_steps_filters_failed_attempts(tmp_path: Path)
                 "task_id": "task-1",
                 "image_name": "img:1",
                 "problem_statement": "Fix bug",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             }
         ],
         pool_factory=lambda _runtime: _FakePool(),
@@ -463,8 +463,8 @@ def test_collect_rft_sft_batch_for_steps_all_rejected_returns_empty_selected_bat
                 "task_id": "task-1",
                 "image_name": "img:1",
                 "problem_statement": "Fix bug",
-                "FAIL_TO_PASS": [],
-                "PASS_TO_PASS": [],
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
             }
         ],
         pool_factory=lambda _runtime: _FakePool(),
@@ -487,6 +487,31 @@ def test_collect_rft_sft_batch_for_steps_all_rejected_returns_empty_selected_bat
     meta = json.loads((tmp_path / "rft_sft_meta.json").read_text(encoding="utf-8"))
     assert meta["selected_count"] == 0
     assert meta["rejected_count"] == 2
+
+
+def test_merge_rollout_and_preprocessed_rows_propagates_verifier_targets() -> None:
+    merged = merge_rollout_and_preprocessed_rows(
+        rollout_rows=[
+            {
+                "task_id": "task-1",
+                "attempt_index": 0,
+                "turn_index": 0,
+                "step_index": 3,
+                "resolved": False,
+                "is_terminal": True,
+                "format_valid": True,
+                "final_turn_has_submit": True,
+                "final_submit_format_valid": True,
+                "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+                "pass_to_pass": ["tests/test_ok.py::test_regression"],
+            }
+        ],
+        preprocessed_rows=[{"input_ids": [1, 2], "action_mask_rft": [1, 1]}],
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
+    assert merged[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
 
 
 def test_merge_rollout_and_preprocessed_rows_requires_non_empty_task_id() -> None:

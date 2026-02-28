@@ -343,6 +343,8 @@ class OnPolicyRolloutCollector:
             "assistant_response": row_assistant_response,
             "tool_output": tool_output,
             "resolved": bool(resolved),
+            "fail_to_pass": task.fail_to_pass,
+            "pass_to_pass": task.pass_to_pass,
             "step_index": row_step_index,
             "task_id": task.task_id,
             "image_name": task.image_name,

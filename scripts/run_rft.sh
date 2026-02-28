@@ -9,6 +9,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+export PROJECT_ROOT
 CONFIG_DIR="${PROJECT_ROOT}/configs/verl"
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 VENV_PYTHON="${PROJECT_ROOT}/.venv/bin/python"
@@ -20,6 +21,11 @@ _is_executable_cmd() {
     return
   fi
   command -v "${candidate}" >/dev/null 2>&1
+}
+
+_to_lower_ascii() {
+  local value="${1:-}"
+  printf '%s' "${value}" | tr '[:upper:]' '[:lower:]'
 }
 
 if [[ -z "${PYTHON_BIN:-}" ]]; then
@@ -358,7 +364,7 @@ if ! [[ "${RFT_LORA_ALPHA}" =~ ^[1-9][0-9]*$ ]]; then
   echo "RFT_LORA_ALPHA must be a positive integer (got: ${RFT_LORA_ALPHA})."
   exit 1
 fi
-RFT_COMPUTE_PRECISION="${RFT_COMPUTE_PRECISION,,}"
+RFT_COMPUTE_PRECISION="$(_to_lower_ascii "${RFT_COMPUTE_PRECISION}")"
 case "${RFT_COMPUTE_PRECISION}" in
   bf16|bfloat16)
     RFT_MODEL_DTYPE="bf16"
@@ -417,6 +423,7 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
     -m "${RFT_TRAINER_MODULE}"
     --config-name rft_swe
     --config-dir "${CONFIG_DIR}"
+    "~data.apply_chat_template_kwargs.enable_thinking"
     max_model_len="${RFT_MAX_SEQUENCE_LENGTH}"
     trainer.total_epochs="${RFT_SFT_NUM_EPOCH_PER_BATCH}"
     trainer.total_training_steps="${RFT_STEPS}"
@@ -494,6 +501,7 @@ LOOP_CMD=(
   --trainer-override "actor_rollout_ref.model.lora.rank=${RFT_LORA_RANK}"
   --trainer-override "actor_rollout_ref.model.lora.alpha=${RFT_LORA_ALPHA}"
   --trainer-override "actor_rollout_ref.model.lora.target_modules=${RFT_LORA_TARGET_MODULES_HYDRA}"
+  --trainer-override "~data.apply_chat_template_kwargs.enable_thinking"
 )
 
 if [[ -n "${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}" ]]; then

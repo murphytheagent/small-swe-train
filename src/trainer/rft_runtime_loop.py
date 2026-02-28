@@ -1105,7 +1105,17 @@ def _load_tokenizer(model_path: str):
             "RFT runtime loop requires transformers. Install training extras (`pip install -e \".[train]\"`)."
         ) from exc
 
-    return AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
+    kwargs = {
+        "trust_remote_code": False,
+        "fix_mistral_regex": True,
+    }
+    try:
+        return AutoTokenizer.from_pretrained(model_path, **kwargs)
+    except TypeError as exc:
+        if "fix_mistral_regex" not in str(exc):
+            raise
+        kwargs.pop("fix_mistral_regex", None)
+        return AutoTokenizer.from_pretrained(model_path, **kwargs)
 
 
 def _build_models_url(base_url: str) -> str:

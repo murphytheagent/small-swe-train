@@ -7,8 +7,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class TeacherPromptInputs:
-    system_block: str
-    task_block: str
+    initial_prompt_block: str
     recent_raw_block: str
     compressed_memory_block: str
     critical_facts_block: str
@@ -41,10 +40,8 @@ def build_teacher_prompt(inputs: TeacherPromptInputs) -> str:
     )
 
     return (
-        "[SYSTEM_BLOCK]\n"
-        f"{inputs.system_block}\n\n"
-        "[TASK_BLOCK]\n"
-        f"{inputs.task_block}\n\n"
+        "[INITIAL_PROMPT_BLOCK]\n"
+        f"{inputs.initial_prompt_block}\n\n"
         f"{trajectory_block}\n"
         "[CURRENT_ATTEMPT_BLOCK]\n"
         f"{inputs.current_attempt_block}\n\n"

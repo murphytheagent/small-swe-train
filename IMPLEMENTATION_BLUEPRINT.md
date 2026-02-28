@@ -440,6 +440,14 @@ Step 6: EMA UPDATE
 | `pyproject.toml` | Add optional `[train]` dependencies | torch, transformers, vllm, flash-attn, peft, ray, verl |
 | `scripts/run_rft.sh`, `scripts/run_sdft.sh`, `scripts/run_sdpo.sh` | Replace echo stubs with verl launcher wrappers | Allows direct config-based job startup when verl is installed |
 
+Operational note for `scripts/run_sdpo.sh` on this node:
+- Set `RAY_TMPDIR=/data/scratch/$USER/ray_tmp/$SLURM_JOB_ID` (avoid Ray disk pressure under `/tmp/ray`).
+- Keep tokenizer parallelism disabled in Ray workers (`TOKENIZERS_PARALLELISM=false`) to avoid
+  forked-worker tokenizer deadlocks.
+- Clean stale `/tmp/ray/session_*` only when no Ray daemons are running:
+  `if ! pgrep -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then rm -rf /tmp/ray/session_*; fi`
+- Canonical launch examples live in `scripts/SLURM_GPU_LAUNCH.md`.
+
 ### 8.3 Files unchanged (protocol layer — already complete)
 
 All files in `src/schemas/`, `src/prompts/`, `src/rollout/`,

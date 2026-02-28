@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -73,6 +74,7 @@ class BatchContainerPool:
     def _start_container(self, task: TaskSample) -> ContainerHandle:
         suffix = uuid.uuid4().hex[:8]
         container_name = f"{self._name_prefix}-{suffix}"
+        label_args = self._build_container_label_args()
         command = [
             "docker",
             "run",
@@ -80,6 +82,7 @@ class BatchContainerPool:
             "--rm",
             "--name",
             container_name,
+            *label_args,
             task.image_name,
             "sh",
             "-lc",
@@ -105,6 +108,31 @@ class BatchContainerPool:
             container_id=container_id,
             container_name=container_name,
         )
+
+    def _build_container_label_args(self) -> list[str]:
+        labels = {
+            "small_swe.managed": "1",
+            "small_swe.pool_name": self._name_prefix,
+        }
+        slurm_job_id = os.environ.get("SLURM_JOB_ID", "").strip() or os.environ.get(
+            "SLURM_JOBID", ""
+        ).strip()
+        if slurm_job_id:
+            labels["small_swe.slurm_job_id"] = slurm_job_id
+
+        env_to_label = {
+            "SDPO_RUN_LABEL": "small_swe.run_label",
+            "EXPERIMENT": "small_swe.experiment",
+        }
+        for env_key, label_key in env_to_label.items():
+            value = os.environ.get(env_key, "").strip()
+            if value:
+                labels[label_key] = value
+
+        args: list[str] = []
+        for key, value in labels.items():
+            args.extend(["--label", f"{key}={value}"])
+        return args
 
     def release_all(self) -> None:
         handles = list(self._active_handles)

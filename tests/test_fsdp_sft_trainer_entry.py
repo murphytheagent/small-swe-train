@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 
 import pytest
+import config
 
 
 def _load_entry_module():
@@ -27,7 +28,7 @@ def test_patched_from_pretrained_uses_sdpa_fallback_when_flash_attn_disabled(
     monkeypatch.delenv("SMALL_SWE_RFT_ATTN_IMPL", raising=False)
     monkeypatch.delenv("SMALL_SWE_FALLBACK_ATTN_IMPL", raising=False)
 
-    payload = entry._patched_from_pretrained("Qwen/Qwen3-4B-Instruct-2507")
+    payload = entry._patched_from_pretrained(config.DEFAULT_TRAINING_MODEL_NAME)
 
     assert payload["attn_implementation"] == "sdpa"
     assert captured["attn_implementation"] == "sdpa"
@@ -49,7 +50,7 @@ def test_patched_from_pretrained_honors_explicit_attn_impl_override(monkeypatch)
     monkeypatch.setattr(entry, "_FLASH_ATTN_DISABLED", True)
     monkeypatch.setenv("SMALL_SWE_RFT_ATTN_IMPL", "flash_attention_2")
 
-    payload = entry._patched_from_pretrained("Qwen/Qwen3-4B-Instruct-2507")
+    payload = entry._patched_from_pretrained(config.DEFAULT_TRAINING_MODEL_NAME)
 
     assert payload["attn_implementation"] == "flash_attention_2"
     assert "use_flash_attention_2" not in payload
@@ -72,7 +73,7 @@ def test_patched_from_pretrained_replaces_flash_attn_impl_when_disabled(monkeypa
     monkeypatch.setenv("SMALL_SWE_FALLBACK_ATTN_IMPL", "sdpa")
 
     payload = entry._patched_from_pretrained(
-        "Qwen/Qwen3-4B-Instruct-2507",
+        config.DEFAULT_TRAINING_MODEL_NAME,
         attn_implementation="flash_attention_2",
     )
 
@@ -98,7 +99,7 @@ def test_patched_from_pretrained_sets_model_dtype_for_flash_attn(monkeypatch) ->
     monkeypatch.setenv("SMALL_SWE_RFT_MODEL_DTYPE", "bf16")
 
     payload = entry._patched_from_pretrained(
-        "Qwen/Qwen3-4B-Instruct-2507",
+        config.DEFAULT_TRAINING_MODEL_NAME,
         attn_implementation="flash_attention_2",
     )
 
@@ -121,7 +122,7 @@ def test_patched_from_pretrained_does_not_override_explicit_dtype(monkeypatch) -
     monkeypatch.setenv("SMALL_SWE_RFT_MODEL_DTYPE", "bf16")
 
     payload = entry._patched_from_pretrained(
-        "Qwen/Qwen3-4B-Instruct-2507",
+        config.DEFAULT_TRAINING_MODEL_NAME,
         attn_implementation="flash_attention_2",
         torch_dtype="auto",
     )
@@ -150,7 +151,7 @@ def test_patched_from_pretrained_falls_back_to_torch_dtype_for_legacy_transforme
     monkeypatch.setenv("SMALL_SWE_RFT_MODEL_DTYPE", "bf16")
 
     payload = entry._patched_from_pretrained(
-        "Qwen/Qwen3-4B-Instruct-2507",
+        config.DEFAULT_TRAINING_MODEL_NAME,
         attn_implementation="flash_attention_2",
     )
 

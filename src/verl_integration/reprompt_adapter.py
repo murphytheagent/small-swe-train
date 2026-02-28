@@ -5,10 +5,14 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from data.feedback_canonicalizer import build_feedback_packet
+from prompts.teacher_messages import build_teacher_output_contract_block
+from teacher.memory_builder import build_teacher_memory_blocks
 from teacher.prompt_builder import TeacherPromptInputs, build_teacher_prompt
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
+DEFAULT_NUM_RECENT_RAW_BLOCKS = 3
+_DEFAULT_OUTPUT_CONTRACT_BLOCK = build_teacher_output_contract_block()
 
 
 def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str, bool]:
@@ -85,7 +89,263 @@ def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
     return fallback
 
 
-def _build_prompt_for_sample(
+def _coerce_text_list(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    rows: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            rows.append(text)
+    return rows
+
+
+def _coerce_nested_text_list(value: Any) -> list[list[str]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    rows: list[list[str]] = []
+    for item in value:
+        rows.append(_coerce_text_list(item))
+    return rows
+
+
+def _coerce_int_list(value: Any) -> list[int]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    rows: list[int] = []
+    for item in value:
+        if isinstance(item, bool):
+            rows.append(int(item))
+        elif isinstance(item, int):
+            rows.append(item)
+        elif isinstance(item, float) and item.is_integer():
+            rows.append(int(item))
+        else:
+            rows.append(0)
+    return rows
+
+
+def _coerce_binary_mask(value: Any) -> list[int]:
+    rows = _coerce_int_list(value)
+    return [1 if item else 0 for item in rows]
+
+
+def _resolve_output_contract_block(sample: Mapping[str, Any]) -> str:
+    explicit = sample.get("output_contract_block")
+    if explicit is None:
+        return _DEFAULT_OUTPUT_CONTRACT_BLOCK
+    rendered = str(explicit).strip()
+    if not rendered:
+        return _DEFAULT_OUTPUT_CONTRACT_BLOCK
+    return rendered
+
+
+def _format_initial_prompt_block(sample: Mapping[str, Any]) -> str:
+    explicit = str(sample.get("initial_prompt_block", "")).strip()
+    if explicit:
+        return explicit
+
+    raw_prompt_messages = sample.get("_raw_prompt_messages")
+    if isinstance(raw_prompt_messages, Sequence) and not isinstance(raw_prompt_messages, (str, bytes)):
+        blocks: list[str] = []
+        for item in raw_prompt_messages:
+            if not isinstance(item, Mapping):
+                continue
+            role = str(item.get("role", "")).strip().upper()
+            content = str(item.get("content", "")).strip()
+            if not role or not content:
+                continue
+            blocks.append(f"[{role}]\n{content}")
+        if blocks:
+            return "\n\n".join(blocks)
+
+    fallback = str(sample.get("prompt") or sample.get("task_block") or "").strip()
+    if fallback:
+        return f"[USER]\n{fallback}"
+    return "[USER]\nSWE task prompt unavailable."
+
+
+def _format_turn_block(*, turn_index: int, assistant_text: str, tool_response_blocks: Sequence[str]) -> str:
+    parts = [
+        f"[TURN_{turn_index}]",
+        "[ASSISTANT]",
+        assistant_text.strip(),
+    ]
+    for tool_index, block in enumerate(tool_response_blocks, start=1):
+        block_text = str(block).strip()
+        if not block_text:
+            continue
+        parts.extend(
+            [
+                f"[TOOL_RESPONSE_{tool_index}]",
+                block_text,
+            ]
+        )
+    return "\n".join(parts).strip()
+
+
+def _normalize_turn_tool_blocks(
+    turn_tool_blocks: Sequence[Sequence[str]],
+    *,
+    target_len: int,
+) -> list[list[str]]:
+    normalized = [_coerce_text_list(blocks) for blocks in turn_tool_blocks]
+    if len(normalized) < target_len:
+        normalized.extend([[] for _ in range(target_len - len(normalized))])
+    elif len(normalized) > target_len:
+        normalized = normalized[:target_len]
+    return normalized
+
+
+def _build_recent_raw_block(
+    turn_blocks: Sequence[str],
+    *,
+    current_turn_index: int,
+    num_recent_raw_blocks: int,
+) -> str:
+    window = max(int(num_recent_raw_blocks), 0)
+    if current_turn_index <= 0 or window == 0:
+        return ""
+    start = max(0, current_turn_index - window)
+    return "\n\n".join(block for block in turn_blocks[start:current_turn_index] if block.strip())
+
+
+def _build_assistant_turn_spans(
+    response_mask: Sequence[int],
+    *,
+    turn_count: int,
+    turn_token_lengths: Sequence[int],
+) -> list[tuple[int, int] | None]:
+    if turn_count <= 0:
+        return []
+
+    generated_positions = [index for index, flag in enumerate(response_mask) if int(flag) != 0]
+    if len(turn_token_lengths) >= turn_count and generated_positions:
+        spans: list[tuple[int, int] | None] = []
+        cursor = 0
+        for turn_index in range(turn_count):
+            token_length = max(int(turn_token_lengths[turn_index]), 0)
+            if token_length <= 0 or cursor >= len(generated_positions):
+                spans.append(None)
+                continue
+            selected = generated_positions[cursor : cursor + token_length]
+            if not selected:
+                spans.append(None)
+                continue
+            spans.append((selected[0], selected[-1] + 1))
+            cursor += len(selected)
+        if any(span is not None for span in spans):
+            return spans
+
+    spans = []
+    current_start: int | None = None
+    for index, flag in enumerate(response_mask):
+        is_generated = int(flag) != 0
+        if is_generated and current_start is None:
+            current_start = index
+        elif not is_generated and current_start is not None:
+            spans.append((current_start, index))
+            current_start = None
+    if current_start is not None:
+        spans.append((current_start, len(response_mask)))
+
+    padded_spans: list[tuple[int, int] | None] = [None for _ in range(turn_count)]
+    for index in range(min(turn_count, len(spans))):
+        padded_spans[index] = spans[index]
+    return padded_spans
+
+
+def _build_mask_from_span(*, width: int, span: tuple[int, int] | None) -> list[int]:
+    if width <= 0:
+        return []
+    if span is None:
+        return [0 for _ in range(width)]
+    start, end = span
+    clipped_start = max(0, min(int(start), width))
+    clipped_end = max(clipped_start, min(int(end), width))
+    mask = [0 for _ in range(width)]
+    for index in range(clipped_start, clipped_end):
+        mask[index] = 1
+    return mask
+
+
+def _build_feedback_for_turn(
+    *,
+    tool: str,
+    turn_index: int,
+    tool_response_blocks: Sequence[str],
+    include_student_attempt_for_teacher: bool,
+) -> tuple[str, bool, dict[str, Any]]:
+    feedback_text = "\n\n".join(block.strip() for block in tool_response_blocks if str(block).strip())
+    tool_output: dict[str, Any]
+    if feedback_text:
+        tool_output = {"stdout": feedback_text, "stderr": "", "exit_code": 0}
+    else:
+        tool_output = {}
+
+    feedback_packet = build_feedback_packet(
+        step_index=turn_index,
+        tool=tool,
+        tool_input={},
+        tool_output=tool_output,
+        include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+    )
+    feedback_block = (
+        feedback_packet.canonical_feedback.actionable_error_text
+        or feedback_packet.canonical_feedback.normalized_text
+    )
+    has_teacher_signal = feedback_packet.self_containment_checks.has_actionable_error_text
+    return feedback_block, has_teacher_signal, feedback_packet.to_dict()
+
+
+def _build_turn_prompt(
+    sample: Mapping[str, Any],
+    *,
+    current_turn_index: int,
+    turn_blocks: Sequence[str],
+    turn_tool_blocks: Sequence[Sequence[str]],
+    include_student_attempt_for_teacher: bool,
+    max_reprompt_len: int,
+    num_recent_raw_blocks: int,
+) -> tuple[str, bool, dict[str, Any]]:
+    tool = str(sample.get("feedback_tool", "bash"))
+    feedback_block, has_teacher_signal, feedback_packet = _build_feedback_for_turn(
+        tool=tool,
+        turn_index=current_turn_index,
+        tool_response_blocks=turn_tool_blocks[current_turn_index],
+        include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+    )
+
+    memory_blocks = build_teacher_memory_blocks(sample, current_turn_index=current_turn_index)
+    recent_raw_block = _build_recent_raw_block(
+        turn_blocks,
+        current_turn_index=current_turn_index,
+        num_recent_raw_blocks=num_recent_raw_blocks,
+    )
+
+    current_attempt_block = turn_blocks[current_turn_index]
+    if not include_student_attempt_for_teacher:
+        current_attempt_block = ""
+
+    prompt = build_teacher_prompt(
+        TeacherPromptInputs(
+            initial_prompt_block=_format_initial_prompt_block(sample),
+            recent_raw_block=recent_raw_block,
+            compressed_memory_block=memory_blocks.compressed_memory_block,
+            critical_facts_block=memory_blocks.critical_facts_block,
+            current_attempt_block=current_attempt_block,
+            feedback_block=feedback_block,
+            output_contract_block=_resolve_output_contract_block(sample),
+        )
+    )
+    truncated_prompt, was_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
+    return truncated_prompt, has_teacher_signal, {
+        "feedback_packet": feedback_packet,
+        "prompt_truncated": was_truncated,
+    }
+
+
+def _build_legacy_prompt_for_sample(
     sample: Mapping[str, Any],
     *,
     step_index: int,
@@ -107,44 +367,27 @@ def _build_prompt_for_sample(
         tool_output=tool_output,
         include_student_attempt_for_teacher=include_student_attempt_for_teacher,
     )
-
     feedback_block = (
         feedback_packet.canonical_feedback.actionable_error_text
         or feedback_packet.canonical_feedback.normalized_text
     )
-
     current_attempt_block = str(sample.get("current_attempt_block") or sample.get("assistant_response") or "")
     if not include_student_attempt_for_teacher:
         current_attempt_block = ""
 
+    memory_blocks = build_teacher_memory_blocks(sample, current_turn_index=step_index)
     prompt = build_teacher_prompt(
         TeacherPromptInputs(
-            system_block=str(
-                sample.get(
-                    "system_block",
-                    "You are a SWE coding agent. Follow the tool-use contract exactly.",
-                )
-            ),
-            task_block=str(sample.get("task_block") or sample.get("prompt") or ""),
+            initial_prompt_block=_format_initial_prompt_block(sample),
             recent_raw_block=str(sample.get("recent_raw_block", "")),
-            compressed_memory_block=str(sample.get("compressed_memory_block", "")),
-            critical_facts_block=str(sample.get("critical_facts_block", "")),
+            compressed_memory_block=memory_blocks.compressed_memory_block,
+            critical_facts_block=memory_blocks.critical_facts_block,
             current_attempt_block=current_attempt_block,
             feedback_block=feedback_block,
-            output_contract_block=str(
-                sample.get(
-                    "output_contract_block",
-                    "Return optional <think> and one-or-more <tool_call> blocks.",
-                )
-            ),
+            output_contract_block=_resolve_output_contract_block(sample),
         )
     )
-
-    truncated_prompt, was_truncated = _truncate_prompt_tokens(
-        prompt,
-        max_reprompt_len=max_reprompt_len,
-    )
-
+    truncated_prompt, was_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
     has_teacher_signal = feedback_packet.self_containment_checks.has_actionable_error_text
     return truncated_prompt, has_teacher_signal, {
         "feedback_packet": feedback_packet.to_dict(),
@@ -157,6 +400,7 @@ def build_self_distillation_batch(
     *,
     include_student_attempt_for_teacher: bool = True,
     max_reprompt_len: int = 10240,
+    num_recent_raw_blocks: int = DEFAULT_NUM_RECENT_RAW_BLOCKS,
 ) -> dict[str, Any]:
     """Build deterministic teacher prompts and mask fields for verl hooks."""
     teacher_prompts: list[str] = []
@@ -165,6 +409,12 @@ def build_self_distillation_batch(
     prompt_truncated: list[bool] = []
     step_index_warnings: list[str] = []
 
+    turn_teacher_prompts: list[list[str]] = []
+    turn_response_masks: list[list[list[int]]] = []
+    turn_distillation_mask: list[list[bool]] = []
+    turn_feedback_packets: list[list[dict[str, Any]]] = []
+    turn_prompt_truncated: list[list[bool]] = []
+
     for idx, sample in enumerate(samples):
         warning = ""
         try:
@@ -172,23 +422,85 @@ def build_self_distillation_batch(
         except ValueError as exc:
             step_index = idx
             warning = str(exc)
+        step_index_warnings.append(warning)
 
-        teacher_prompt, has_teacher_signal, metadata = _build_prompt_for_sample(
+        assistant_turns = _coerce_text_list(sample.get("trajectory_assistant_turns"))
+        per_turn_tool_blocks = _normalize_turn_tool_blocks(
+            _coerce_nested_text_list(sample.get("trajectory_turn_tool_response_blocks")),
+            target_len=len(assistant_turns),
+        )
+        response_mask = _coerce_binary_mask(sample.get("_response_mask"))
+        turn_token_lengths = _coerce_int_list(sample.get("trajectory_assistant_turn_token_lengths"))
+
+        sample_turn_teacher_prompts: list[str] = []
+        sample_turn_response_masks: list[list[int]] = []
+        sample_turn_mask: list[bool] = []
+        sample_turn_feedback_packets: list[dict[str, Any]] = []
+        sample_turn_prompt_truncated: list[bool] = []
+
+        if len(assistant_turns) >= 2:
+            turn_blocks = [
+                _format_turn_block(
+                    turn_index=turn_index,
+                    assistant_text=assistant_turns[turn_index],
+                    tool_response_blocks=per_turn_tool_blocks[turn_index],
+                )
+                for turn_index in range(len(assistant_turns))
+            ]
+            spans = _build_assistant_turn_spans(
+                response_mask,
+                turn_count=len(assistant_turns),
+                turn_token_lengths=turn_token_lengths,
+            )
+            for current_turn_index in range(len(assistant_turns) - 1):
+                prompt, _has_teacher_signal, metadata = _build_turn_prompt(
+                    sample,
+                    current_turn_index=current_turn_index,
+                    turn_blocks=turn_blocks,
+                    turn_tool_blocks=per_turn_tool_blocks,
+                    include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+                    max_reprompt_len=max_reprompt_len,
+                    num_recent_raw_blocks=num_recent_raw_blocks,
+                )
+                target_span = spans[current_turn_index + 1] if current_turn_index + 1 < len(spans) else None
+                target_mask = _build_mask_from_span(width=len(response_mask), span=target_span)
+                is_active = any(target_mask)
+
+                sample_turn_teacher_prompts.append(prompt)
+                sample_turn_response_masks.append(target_mask)
+                sample_turn_mask.append(is_active)
+                sample_turn_feedback_packets.append(metadata["feedback_packet"])
+                sample_turn_prompt_truncated.append(bool(metadata["prompt_truncated"]))
+
+        turn_teacher_prompts.append(sample_turn_teacher_prompts)
+        turn_response_masks.append(sample_turn_response_masks)
+        turn_distillation_mask.append(sample_turn_mask)
+        turn_feedback_packets.append(sample_turn_feedback_packets)
+        turn_prompt_truncated.append(sample_turn_prompt_truncated)
+
+        if sample_turn_teacher_prompts:
+            teacher_prompts.append(sample_turn_teacher_prompts[-1])
+            feedback_packets.append(
+                sample_turn_feedback_packets[-1] if sample_turn_feedback_packets else {}
+            )
+            prompt_truncated.append(any(sample_turn_prompt_truncated))
+            self_distillation_mask.append(any(sample_turn_mask))
+            continue
+
+        legacy_prompt, has_teacher_signal, metadata = _build_legacy_prompt_for_sample(
             sample,
             step_index=step_index,
             include_student_attempt_for_teacher=include_student_attempt_for_teacher,
             max_reprompt_len=max_reprompt_len,
         )
-        teacher_prompts.append(teacher_prompt)
+        teacher_prompts.append(legacy_prompt)
 
-        # Keep alignment with SDPO batch semantics: enable distillation only
-        # when we have either explicit success labels or actionable feedback.
+        # Keep alignment with SDPO batch semantics for non-turn trajectories.
         sample_resolved = _coerce_bool_flag(sample.get("resolved"), fallback=False)
         self_distillation_mask.append(sample_resolved or has_teacher_signal)
 
         feedback_packets.append(metadata["feedback_packet"])
         prompt_truncated.append(bool(metadata["prompt_truncated"]))
-        step_index_warnings.append(warning)
 
     return {
         "teacher_prompts": teacher_prompts,
@@ -196,4 +508,9 @@ def build_self_distillation_batch(
         "feedback_packets": feedback_packets,
         "prompt_truncated": prompt_truncated,
         "step_index_warnings": step_index_warnings,
+        "turn_teacher_prompts": turn_teacher_prompts,
+        "turn_response_masks": turn_response_masks,
+        "turn_distillation_mask": turn_distillation_mask,
+        "turn_feedback_packets": turn_feedback_packets,
+        "turn_prompt_truncated": turn_prompt_truncated,
     }

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
+import types
 from pathlib import Path
 from urllib.error import HTTPError
 
 import pytest
 
+import config
 import trainer.rft_runtime_loop as rft_runtime_loop
 from trainer.rft_runtime_loop import (
     RFTLoopConfig,
@@ -44,6 +47,60 @@ class _StubTokenizer:
         return input_ids
 
 
+def test_load_tokenizer_sets_fix_mistral_regex_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class _FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_path: str, **kwargs):
+            calls.append((model_path, dict(kwargs)))
+            return {"tokenizer": "ok"}
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoTokenizer = _FakeAutoTokenizer
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    tokenizer = rft_runtime_loop._load_tokenizer("/tmp/model")
+    assert tokenizer == {"tokenizer": "ok"}
+    assert calls == [
+        (
+            "/tmp/model",
+            {
+                "trust_remote_code": False,
+                "fix_mistral_regex": True,
+            },
+        )
+    ]
+
+
+def test_load_tokenizer_retries_without_fix_mistral_regex_when_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_path: str, **kwargs):
+            _ = model_path
+            calls.append(dict(kwargs))
+            if "fix_mistral_regex" in kwargs:
+                raise TypeError("__init__() got an unexpected keyword argument 'fix_mistral_regex'")
+            return {"tokenizer": "fallback"}
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoTokenizer = _FakeAutoTokenizer
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    tokenizer = rft_runtime_loop._load_tokenizer("/tmp/model")
+    assert tokenizer == {"tokenizer": "fallback"}
+    assert calls == [
+        {"trust_remote_code": False, "fix_mistral_regex": True},
+        {"trust_remote_code": False},
+    ]
+
+
 def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_overrides(
     tmp_path: Path,
 ) -> None:
@@ -54,7 +111,7 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
         trainer_module="verl.trainer.fsdp_sft_trainer",
         config_name="rft_swe",
         config_dir=tmp_path / "configs",
-        model_path="Qwen/Qwen3-4B-Instruct-2507",
+        model_path=config.DEFAULT_TRAINING_MODEL_NAME,
         train_parquet_path=tmp_path / "accepted.parquet",
         val_parquet_path=tmp_path / "accepted_eval.parquet",
         trainer_output_dir=tmp_path / "checkpoints",
@@ -74,7 +131,7 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
     assert "data.custom_cls.path=null" in command_text
     assert f"data.train_files={tmp_path / 'accepted.parquet'}" in command_text
     assert f"data.val_files={tmp_path / 'accepted_eval.parquet'}" in command_text
-    assert "model.partial_pretrain=Qwen/Qwen3-4B-Instruct-2507" in command_text
+    assert f"model.partial_pretrain={config.DEFAULT_TRAINING_MODEL_NAME}" in command_text
 
 
 def test_build_vllm_server_command_uses_host_and_port_from_base_url() -> None:
@@ -83,7 +140,7 @@ def test_build_vllm_server_command_uses_host_and_port_from_base_url() -> None:
         launch_module="vllm.entrypoints.openai.api_server",
         base_url="http://127.0.0.1:8000/v1",
         model_path="/tmp/model",
-        served_model_name="Qwen/Qwen3-4B-Instruct-2507",
+        served_model_name=config.DEFAULT_TRAINING_MODEL_NAME,
         extra_args=("--dtype", "bfloat16"),
     )
 
@@ -99,7 +156,7 @@ def test_build_vllm_server_command_uses_host_and_port_from_base_url() -> None:
     assert "--model" in command
     assert "/tmp/model" in command
     assert "--served-model-name" in command
-    assert "Qwen/Qwen3-4B-Instruct-2507" in command
+    assert config.DEFAULT_TRAINING_MODEL_NAME in command
     assert command[-2:] == ["--dtype", "bfloat16"]
 
 
