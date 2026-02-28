@@ -155,17 +155,30 @@ _collect_sdpo_bridge_container_ids() {
     return 0
   fi
 
-  local -a docker_cmd=(
+  local -a base_docker_cmd=(
     docker ps -aq
     --filter "label=small_swe.managed=1"
     --filter "label=small_swe.pool_name=${SDPO_CONTAINER_NAME_PREFIX}"
   )
+  local -a container_ids=()
   if [[ -n "${job_id}" ]]; then
-    docker_cmd+=(--filter "label=small_swe.slurm_job_id=${job_id}")
+    mapfile -t container_ids < <(
+      "${base_docker_cmd[@]}" --filter "label=small_swe.slurm_job_id=${job_id}" 2>/dev/null || true
+    )
+    if [[ "${#container_ids[@]}" -eq 0 ]] && [[ -n "${SDPO_RUN_LABEL:-}" ]]; then
+      mapfile -t container_ids < <(
+        "${base_docker_cmd[@]}" --filter "label=small_swe.run_label=${SDPO_RUN_LABEL}" 2>/dev/null || true
+      )
+    fi
   elif [[ -n "${SDPO_RUN_LABEL:-}" ]]; then
-    docker_cmd+=(--filter "label=small_swe.run_label=${SDPO_RUN_LABEL}")
+    mapfile -t container_ids < <(
+      "${base_docker_cmd[@]}" --filter "label=small_swe.run_label=${SDPO_RUN_LABEL}" 2>/dev/null || true
+    )
   fi
-  "${docker_cmd[@]}" 2>/dev/null || true
+
+  if [[ "${#container_ids[@]}" -gt 0 ]]; then
+    printf '%s\n' "${container_ids[@]}"
+  fi
 }
 
 _cleanup_sdpo_bridge_containers() {

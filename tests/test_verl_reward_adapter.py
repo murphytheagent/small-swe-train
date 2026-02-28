@@ -136,3 +136,24 @@ def test_rows_to_reward_tensor_marks_last_valid_response_token_when_torch_availa
     assert "feedback" in reward_extra_infos
     assert len(reward_extra_infos["feedback"]) == 2
     _ = torch  # silence lint for optional import in skip environments
+
+
+def test_dataproto_to_rows_decodes_generated_tokens_only_from_response_mask() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 90, 12, 91]],
+            "response_mask": [[1, 0, 1, 0]],
+        },
+        non_tensor_batch={
+            "raw_prompt": [[{"role": "user", "content": "Fix task"}]],
+            "task_id": ["task-1"],
+            "image_name": ["img-1"],
+        },
+    )
+
+    rows = reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+    assert len(rows) == 1
+    assert rows[0]["response_text"] == "11 12"
+    assert rows[0]["assistant_response"] == "11 12"
+    assert rows[0]["_response_mask"] == [1, 0, 1, 0]

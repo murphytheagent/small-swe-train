@@ -12,6 +12,7 @@ from verl_integration.swe_bridge_agent_loop import (
     _apply_verification_metadata,
     _acquire_container_slot,
     _await_with_attempt_timeout,
+    _cleanup_container_pool_after_acquire,
     _remaining_attempt_timeout_sec,
     _extract_final_submit_text,
     _initial_verification_extra_fields,
@@ -398,3 +399,33 @@ def test_acquire_container_slot_times_out_with_stage_context() -> None:
         asyncio.run(_exercise())
     finally:
         gate.release()
+
+
+def test_cleanup_container_pool_waits_for_timed_out_acquire_task() -> None:
+    call_order: list[str] = []
+
+    class _FakePool:
+        def acquire(self, _tasks: object) -> tuple[object, ...]:
+            call_order.append("acquire_start")
+            time.sleep(0.1)
+            call_order.append("acquire_done")
+            return ()
+
+        def release_all(self) -> None:
+            call_order.append("release_all")
+
+    async def _exercise() -> None:
+        pool = _FakePool()
+        acquire_task = asyncio.create_task(asyncio.to_thread(pool.acquire, object()))
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(acquire_task), timeout=0.01)
+        await _cleanup_container_pool_after_acquire(
+            pool=pool,
+            acquire_task=acquire_task,
+            task_id="task-17",
+            stage="cleanup",
+            cleanup_timeout_sec=1,
+        )
+
+    asyncio.run(_exercise())
+    assert call_order.index("acquire_done") < call_order.index("release_all")

@@ -175,6 +175,16 @@ def test_sdpo_config_disables_runtime_prompt_length_filter() -> None:
     assert data_cfg["filter_overlong_prompts"] is False
 
 
+def test_verl_configs_fallback_project_root_when_env_unset() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    sdpo_payload = yaml.safe_load((repo_root / "configs/verl/sdpo_swe.yaml").read_text(encoding="utf-8"))
+    rft_payload = yaml.safe_load((repo_root / "configs/verl/rft_swe.yaml").read_text(encoding="utf-8"))
+
+    assert "${oc.env:PROJECT_ROOT," in sdpo_payload["trainer"]["default_local_dir"]
+    assert "${oc.env:PROJECT_ROOT," in sdpo_payload["custom_reward_function"]["path"]
+    assert "${oc.env:PROJECT_ROOT," in rft_payload["trainer"]["default_local_dir"]
+
+
 def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     settings = config.resolve_on_policy_settings()
     data_defaults = config.on_policy_data_defaults()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 
 from env.runtime_protocol import ToolResponse
 from verl_integration.submission_verifier import run_submission_verifier
@@ -118,3 +119,34 @@ def test_run_submission_verifier_uses_generous_group_timeout_budget() -> None:
     # 2 tests * 180s each + 120s buffer
     assert request.args["timeout_sec"] == 480
     assert "SMALL_SWE_PER_TEST_TIMEOUT_SEC=180" in request.args["command"]
+
+
+def test_run_submission_verifier_parses_large_json_payload_from_full_stdout() -> None:
+    payload = {
+        "results": {"tests/test_bug.py::test_fix": True},
+        "executed": 1,
+        "all_passed": True,
+        "failures": {},
+        "padding": "x" * 6000,
+    }
+    executor = _FakeExecutor(
+        responses=[
+            ToolResponse(
+                stdout=json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
+                stderr="",
+                exit_code=0,
+            )
+        ]
+    )
+
+    result = run_submission_verifier(
+        executor=executor,
+        fail_to_pass=["tests/test_bug.py::test_fix"],
+        pass_to_pass=[],
+        verifier_timeout_sec=120,
+        final_response="patched",
+    )
+
+    assert result["resolved"] is True
+    assert result["verification_error"] == ""
+    assert result["fail_to_pass_results"] == {"tests/test_bug.py::test_fix": True}

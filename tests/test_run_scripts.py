@@ -87,6 +87,38 @@ def _write_python_env_probe_stub(tmp_path: Path) -> Path:
     return stub_path
 
 
+def _write_docker_cleanup_probe_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "docker"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "log_file=\"${FAKE_DOCKER_LOG_FILE:?}\"\n"
+        "cmd=\"$*\"\n"
+        "printf '%s\\n' \"${cmd}\" >>\"${log_file}\"\n"
+        "if [[ \"${1:-}\" == \"ps\" ]]; then\n"
+        "  if [[ \"${cmd}\" == *\"label=small_swe.slurm_job_id=4242\"* ]]; then\n"
+        "    exit 0\n"
+        "  fi\n"
+        "  if [[ \"${cmd}\" == *\"label=small_swe.run_label=run-fallback-4242\"* ]]; then\n"
+        "    printf '%s\\n' 'container-from-run-label'\n"
+        "    exit 0\n"
+        "  fi\n"
+        "  if [[ \"${cmd}\" == *\"name=sdpo-swe-bridge-\"* ]]; then\n"
+        "    printf '%s\\n' 'container-from-name-fallback'\n"
+        "    exit 0\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"rm\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
 def test_run_rft_script_dry_run_prints_verl_command() -> None:
     result = _run_script("run_rft.sh", "trainer.total_training_steps=1")
     assert "-m torch.distributed.run" in result.stdout
@@ -406,6 +438,49 @@ def test_run_sdpo_script_allows_disabling_watchdog_monitor(tmp_path: Path) -> No
     )
 
     assert "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)" in result.stdout
+
+
+def test_run_sdpo_script_cleanup_falls_back_to_run_label_when_slurm_label_lookup_empty(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_env_probe_stub(tmp_path)
+    _write_docker_cleanup_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    docker_log_path = tmp_path / "docker-invocations.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "PATH": f"{tmp_path}{os.pathsep}{env.get('PATH', '')}",
+            "FAKE_DOCKER_LOG_FILE": str(docker_log_path),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_PRELOADED_TASK_PARQUET": str(fake_parquet),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SLURM_JOB_ID": "",
+            "SLURM_JOBID": "4242",
+            "SDPO_RUN_LABEL": "run-fallback-4242",
+        }
+    )
+    subprocess.run(
+        ["bash", str(script_path)],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    invocations = docker_log_path.read_text(encoding="utf-8").splitlines()
+    assert any("label=small_swe.slurm_job_id=4242" in line for line in invocations)
+    assert any("label=small_swe.run_label=run-fallback-4242" in line for line in invocations)
+    assert not any("name=sdpo-swe-bridge-" in line for line in invocations)
+    assert any("rm -f container-from-run-label" in line for line in invocations)
 
 
 def test_run_sdpo_script_dry_run_sets_ray_num_cpus_from_slurm_cpus_per_task() -> None:

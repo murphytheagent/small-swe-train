@@ -184,6 +184,7 @@ def _verify_test_group(
     )
     response = executor.run(request)
 
+    stdout_text = str(response.stdout or "")
     stdout_tail = str(response.stdout or "")[-4000:]
     stderr_tail = str(response.stderr or "")[-4000:]
     if int(response.exit_code) != 0:
@@ -196,7 +197,7 @@ def _verify_test_group(
             "stderr_tail": stderr_tail,
         }
 
-    payload = _decode_verifier_payload(stdout_tail)
+    payload = _decode_verifier_payload(stdout_text)
     if payload is None:
         return {
             "results": {name: False for name in tests},

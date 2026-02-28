@@ -24,7 +24,15 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index in range(batch_size):
         response_ids = _coerce_int_list(_select_index(responses, index))
-        response_text = _decode_response(tokenizer=tokenizer, token_ids=response_ids)
+        response_mask_row = _resolve_response_mask(
+            raw_mask_value=_select_index(response_mask, index),
+            fallback_length=max(len(response_ids), 1),
+        )
+        generated_response_ids = _filter_generated_token_ids(
+            token_ids=response_ids,
+            response_mask=response_mask_row,
+        )
+        response_text = _decode_response(tokenizer=tokenizer, token_ids=generated_response_ids)
 
         raw_prompt_messages = _normalize_messages(_select_non_tensor(non_tensor_batch, "raw_prompt", index))
         prompt_text = _extract_prompt_text(
@@ -106,10 +114,7 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
                 fallback=True,
             ),
             "_raw_prompt_messages": raw_prompt_messages,
-            "_response_mask": _resolve_response_mask(
-                raw_mask_value=_select_index(response_mask, index),
-                fallback_length=max(len(response_ids), 1),
-            ),
+            "_response_mask": response_mask_row,
         }
 
         for key in (
@@ -233,6 +238,20 @@ def _decode_response(*, tokenizer: Any, token_ids: Sequence[int]) -> str:
     except TypeError:
         decoded = tokenizer.decode(token_ids)
     return _as_text(decoded)
+
+
+def _filter_generated_token_ids(*, token_ids: Sequence[int], response_mask: Sequence[int]) -> list[int]:
+    if not token_ids:
+        return []
+    if not response_mask:
+        return [int(token) for token in token_ids]
+    generated_ids: list[int] = []
+    for index, token in enumerate(token_ids):
+        if index >= len(response_mask):
+            break
+        if int(response_mask[index]) != 0:
+            generated_ids.append(int(token))
+    return generated_ids
 
 
 def _normalize_messages(raw_messages: Any) -> list[dict[str, str]]:

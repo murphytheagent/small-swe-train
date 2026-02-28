@@ -114,8 +114,13 @@ class BatchContainerPool:
             "small_swe.managed": "1",
             "small_swe.pool_name": self._name_prefix,
         }
+        slurm_job_id = os.environ.get("SLURM_JOB_ID", "").strip() or os.environ.get(
+            "SLURM_JOBID", ""
+        ).strip()
+        if slurm_job_id:
+            labels["small_swe.slurm_job_id"] = slurm_job_id
+
         env_to_label = {
-            "SLURM_JOB_ID": "small_swe.slurm_job_id",
             "SDPO_RUN_LABEL": "small_swe.run_label",
             "EXPERIMENT": "small_swe.experiment",
         }

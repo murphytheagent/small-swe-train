@@ -9,6 +9,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+export PROJECT_ROOT
 CONFIG_DIR="${PROJECT_ROOT}/configs/verl"
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 VENV_PYTHON="${PROJECT_ROOT}/.venv/bin/python"

@@ -322,6 +322,33 @@ async def _acquire_container_slot(
         await asyncio.sleep(min(poll_interval_sec, max(0.01, remaining_sec)))
 
 
+async def _cleanup_container_pool_after_acquire(
+    *,
+    pool: BatchContainerPool,
+    acquire_task: asyncio.Task[tuple[ContainerHandle, ...]] | None,
+    task_id: str,
+    stage: str,
+    cleanup_timeout_sec: int,
+) -> None:
+    """Ensure background container acquisition finishes before pool teardown."""
+
+    if acquire_task is not None:
+        try:
+            await asyncio.shield(acquire_task)
+        except Exception as exc:
+            logger.warning(
+                "swe_bridge_agent acquire wait issue during cleanup task_id=%s stage=%s error=%s",
+                task_id,
+                stage,
+                exc,
+            )
+
+    await asyncio.wait_for(
+        asyncio.to_thread(pool.release_all),
+        timeout=max(5, cleanup_timeout_sec + 5),
+    )
+
+
 def build_agent_loop_messages(kwargs: Mapping[str, Any]) -> list[dict[str, str]]:
     """Normalize prompt messages and enforce a tool-contract-guided generation state."""
     parsed_messages: list[dict[str, str]] = []
@@ -555,6 +582,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             name_prefix="sdpo-swe-bridge",
         )
         handle: ContainerHandle | None = None
+        acquire_handles_task: asyncio.Task[tuple[ContainerHandle, ...]] | None = None
         container_slot_acquired = False
         heartbeat_task = asyncio.create_task(
             _emit_stage_heartbeats(
@@ -577,8 +605,9 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             container_slot_acquired = True
 
             _set_stage("acquire_container")
+            acquire_handles_task = asyncio.create_task(asyncio.to_thread(pool.acquire, [task_sample]))
             handles = await _await_with_attempt_timeout(
-                asyncio.to_thread(pool.acquire, [task_sample]),
+                asyncio.shield(acquire_handles_task),
                 task_id=task_context.task_id,
                 stage=current_stage,
                 started_at=started_at,
@@ -832,9 +861,12 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         finally:
             _set_stage("cleanup")
             try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(pool.release_all),
-                    timeout=max(5, self.cleanup_timeout_sec + 5),
+                await _cleanup_container_pool_after_acquire(
+                    pool=pool,
+                    acquire_task=acquire_handles_task,
+                    task_id=task_context.task_id,
+                    stage=current_stage,
+                    cleanup_timeout_sec=self.cleanup_timeout_sec,
                 )
             except Exception as exc:
                 logger.warning(
