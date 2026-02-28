@@ -213,7 +213,7 @@ data:
 
 # Avoid hardcoded external reward module paths from upstream defaults.
 custom_reward_function:
-  path: ${oc.env:PROJECT_ROOT,${hydra:runtime.cwd}}/src/verl_integration/reward_loop_score.py
+  path: ${oc.env:PROJECT_ROOT,${oc.env:PWD,.}}/src/verl_integration/reward_loop_score.py
   name: compute_score
 
 # ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ trainer:
   n_gpus_per_node: 8
   total_epochs: 1
   total_training_steps: null                  # set at launch
-  default_local_dir: ${oc.env:PROJECT_ROOT,${hydra:runtime.cwd}}/outputs/turn_sdpo_runtime/${trainer.experiment_name}
+  default_local_dir: ${oc.env:PROJECT_ROOT,${oc.env:PWD,.}}/outputs/turn_sdpo_runtime/${trainer.experiment_name}
   val_before_train: true
   save_freq: 100
   test_freq: 10                          # PPO validation frequency is step-based

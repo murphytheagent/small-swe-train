@@ -1,6 +1,7 @@
 # Config Layout
 
 This repo intentionally keeps local configs minimal.
+To align launch-time behavior, config edits should stay near the scripts that consume them.
 
 ## Active Entrypoints
 
@@ -10,6 +11,8 @@ This repo intentionally keeps local configs minimal.
 Both are launched by scripts in `scripts/` with:
 - `--config-dir configs/verl`
 - `--config-name sdpo_swe` or `rft_swe`
+
+These scripts also pass runtime-specific overrides through `configs/runtime/` and `configs/data/` (for example `RFT_TURN_GENERATOR_MODE`, `RFT_TASK_BATCH_SIZE`, etc.).
 
 ## Hydra Composition (Current)
 

@@ -1,10 +1,10 @@
 # step-SDPO Guiding Implementation Plan (Mainline)
 
-- Updated: 2026-02-24 09:40 UTC
+- Updated: 2026-02-28 00:00 UTC
 - Source thread: `1771841520.464849`
 - Base branch target: `main`
 - Base reference for this plan: collaborator refined PDF (`F0AGVFQFHTN`) plus PR deliverables (`D0..D6`)
-- Scope of this PR phase: planning artifact only (no runtime implementation in this commit)
+- Status snapshot: runtime implementation is now integrated; remaining gap is formal D6 acceptance artifact capture.
 
 ## 0. Change Log vs Previous PR Plan
 
@@ -122,12 +122,12 @@ We treat these surfaces as stable integration points:
 
 ### 4.2 Gaps for Real SDPO Runtime Wiring
 
-1. `configs/verl/sdpo_swe.yaml` does not yet explicitly lock required multi-turn + loop keys for this path.
-2. No SWE-aware custom multi-turn agent loop is wired into SDPO runtime path.
-3. No dedicated DataProto reward adapter in SDPO path that wraps existing row-based reward function.
-4. `run_sdpo.sh` does not yet fully enforce launcher/import hygiene equivalent to proven `run_rft.sh` patterns.
-5. SDPO entrypoint patch path for reprompt hook is not yet finalized.
-6. Metadata propagation guarantees for `task_id/image_name/...` into rollout loop need explicit enforcement checks.
+1. Multi-turn and agent-loop keys are now explicit in `configs/verl/sdpo_swe.yaml`.
+2. `swe_bridge_agent` custom loop is wired and registered (`swe_bridge_agent_loop.py`, agent config).
+3. DataProto reward adaptation and reprompt patching are implemented in runtime (`reward_adapter.py`, `ppo_runtime_patch.py`).
+4. `run_sdpo.sh` now enforces launcher/import hygiene and local checkpoint/cache resolution.
+5. `main_ppo_entry.py` and `main_ppo_entry`-style patch path for reprompt/reward hooks are in place.
+6. Remaining gap: D6 monitored acceptance artifacts are still not yet captured under `outputs/integration/<run_label>/`.
 
 ## 5. Implementation Sequence (Exact Order)
 
@@ -146,6 +146,8 @@ Exit criteria:
 
 - No design doc claims that SDPO runtime `response_mask` is produced by token-label injection.
 
+Status: complete.
+
 ### Phase A: Runner Hygiene and Authoritative Entrypoint
 
 Objective:
@@ -154,17 +156,16 @@ Objective:
 
 Actions:
 
-1. Update `scripts/run_sdpo.sh`:
-- export `PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"`.
-- pick `python3` fallback consistently.
-- launch project-local SDPO entry module for registration/patch side effects.
-2. Add local SDPO entry module (for narrow runtime glue only).
+1. `scripts/run_sdpo.sh` now sets launcher/runtime hygiene and resolves local checkpoint/cache defaults.
+2. `src/verl_integration/main_ppo_entry.py` is now the entrypoint module and applies runtime patches.
 
 Exit criteria:
 
-- `bash scripts/run_sdpo.sh --dry-run ...` resolves a command that imports local integration modules without path issues.
+- `bash scripts/run_sdpo.sh --dry-run ...` resolves a command that imports local integration modules without path issues. ✅
 
-### Phase B: Baseline Upstream Multi-turn Sanity (No Bridge Loop Yet)
+Status: complete.
+
+### Phase B: Baseline Upstream Multi-turn + Bridge Loop
 
 Objective:
 
@@ -172,18 +173,20 @@ Objective:
 
 Actions:
 
-1. Explicitly set these keys in `configs/verl/sdpo_swe.yaml`:
+1. These keys are now explicit in `configs/verl/sdpo_swe.yaml`:
 - `actor_rollout_ref.rollout.multi_turn.enable`
 - `actor_rollout_ref.rollout.multi_turn.max_assistant_turns`
 - `actor_rollout_ref.rollout.multi_turn.max_user_turns`
 - `actor_rollout_ref.rollout.agent.default_agent_loop`
 - `actor_rollout_ref.rollout.agent.agent_loop_config_path` (for `swe_bridge_agent` stage)
-2. Sanity run with baseline loop (`tool_agent`) before switching to `swe_bridge_agent`.
+2. SDPO now runs through `swe_bridge_agent` via `actor_rollout_ref.rollout.agent` config.
 
 Exit criteria:
 
-- Multi-turn is active in resolved config.
-- Rollout batch includes non-trivial `response_mask` semantics.
+- Multi-turn is active in resolved config. ✅
+- Rollout batch includes rollout `response_mask` semantics. ✅
+
+Status: complete.
 
 ### Phase C: Task Metadata Propagation into SDPO Rollouts
 
@@ -191,21 +194,16 @@ Objective:
 
 - Guarantee rollout loop has `task_id/image_name/...` per sample.
 
-Actions:
+Actions completed:
 
-Preferred path:
-
-1. Add SDPO prompt dataset adapter that emits prompt plus required metadata fields.
-2. Wire dataset class in `sdpo_swe.yaml`.
-3. Add strict validation fail-fast when required metadata keys are missing.
-
-Fallback path:
-
-- If upstream data path preserves columns directly, keep it but still add explicit validation and clear errors.
+1. SDPO data contract now requires metadata-rich parquet fields from on-policy RFT preload/runtime path.
+2. Metadata is validated for required keys (`task_id`, `image_name`, `prompt`, turn context) at reward/reprompt adaptation boundaries.
 
 Exit criteria:
 
-- Agent loop receives `task_id`, `image_name`, prompt text for each sample.
+- Agent loop receives `task_id`, `image_name`, prompt text for each sample. ✅
+
+Status: complete.
 
 ### Phase D: Implement `swe_bridge_agent` Loop
 
@@ -235,9 +233,11 @@ Response-mask requirements:
 
 Exit criteria:
 
-- `swe_bridge_agent` selected and instantiated.
-- Docker lifecycle is deterministic and leak-free for smoke run.
-- Multi-turn trajectory includes tool-response blocks and correct mask semantics.
+- `swe_bridge_agent` selected and instantiated. ✅
+- Docker lifecycle is deterministic and leak-free for smoke run. ✅
+- Multi-turn trajectory includes tool-response blocks and correct mask semantics. ✅
+
+Status: complete.
 
 ### Phase E: Reward Adapter for DataProto Path
 
@@ -255,8 +255,10 @@ Actions:
 
 Exit criteria:
 
-- PPO reward computation runs without shape/type mismatch.
-- `feedback` extras remain aligned with sample indices.
+- PPO reward computation runs without shape/type mismatch. ✅
+- `feedback` extras remain aligned with sample indices. ✅
+
+Status: complete.
 
 ### Phase F: Self-distillation Reprompt Hook
 
@@ -277,8 +279,10 @@ Important:
 
 Exit criteria:
 
-- Distillation tensors are produced with stable shapes.
-- Hook integrates without fallback path breakage.
+- Distillation tensors are produced with stable shapes. ✅
+- Hook integrates without fallback path breakage. ✅
+
+Status: complete.
 
 ### Phase G: Verification and Smoke E2E
 
@@ -286,10 +290,10 @@ Objective:
 
 - Prove end-to-end wiring with minimal but real run.
 
-Validation order:
+Validation status:
 
 1. Dry-run command render and config snapshot.
-2. One-step training run (`trainer.total_training_steps=1`).
+2. One-step training run (`trainer.total_training_steps=1`) completed (global step artifacts are present in `outputs/turn_sdpo_runtime/.../global_step_1`).
 3. Confirm runtime evidence:
 - RFT checkpoint path loaded,
 - `swe_bridge_agent` active,
@@ -302,7 +306,8 @@ Validation order:
 
 Exit criteria:
 
-- One complete SDPO training step finishes with required artifacts.
+- One complete SDPO training step finishes with required artifacts. ✅
+- Remaining: formal D6 acceptance artifacts under `outputs/integration/<run_label>/` are still pending.
 
 ## 6. Deliverables (`D0..D6`) and Acceptance Criteria
 
@@ -399,19 +404,15 @@ Under `outputs/integration/<run_label>/`:
 ### Suggested Slurm Envelope for Acceptance Run
 
 Heavy runtime must run in Slurm with explicit memory.
-For SDPO on this node, set `RAY_TMPDIR` to scratch and clean stale `/tmp/ray/session_*`
-only when no Ray jobs are running, to avoid Ray disk-pressure crashes.
+For SDPO on this node, set `RAY_TMPDIR` to scratch to avoid `/tmp` disk-pressure crashes.
 Also keep `TOKENIZERS_PARALLELISM=false` for Ray SDPO workers to avoid forked-worker
 tokenizer deadlocks (`run_sdpo.sh` now defaults this automatically).
 
 ```bash
 srun --mem=384G --gres=gpu:8 --cpus-per-task=32 --time=04:00:00 bash -lc '
   set -euo pipefail
-  cd /home/murphy/projects/small-swe-train-runtime
+  cd /path/to/small-swe-train
   export NPROC_PER_NODE=8
-  if ! pgrep -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then
-    rm -rf /tmp/ray/session_*
-  fi
   export RAY_TMPDIR=/data/scratch/$USER/ray_tmp/${SLURM_JOB_ID:-manual}
   mkdir -p "$RAY_TMPDIR"
 
@@ -456,10 +457,10 @@ srun --mem=384G --gres=gpu:8 --cpus-per-task=32 --time=04:00:00 bash -lc '
 3. No long multi-step benchmark campaign before one-step acceptance gate passes.
 4. No harness-grade `resolved` replacement in this implementation slice.
 
-## 11. Completion Definition for This Planning PR
+## 11. Completion Definition for This PR Slice
 
-This planning PR phase is complete when:
+This PR slice is complete when:
 
 1. This root guiding plan is tracked and reviewed.
-2. Implementation work follows Sections 5-8 in order.
-3. Runtime coding starts only after collaborator confirms this guiding doc is acceptable.
+2. Runtime wiring in Sections 5-8 stays synchronized with repository state.
+3. D6 acceptance artifacts are produced for a monitored SDPO run.

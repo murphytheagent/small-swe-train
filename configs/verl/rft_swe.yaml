@@ -83,7 +83,7 @@ data:
 trainer:
   project_name: small-swe-rft
   experiment_name: ${oc.env:EXPERIMENT,rft}
-  default_local_dir: ${oc.env:PROJECT_ROOT,${hydra:runtime.cwd}}/outputs/rft_runtime/${trainer.experiment_name}
+  default_local_dir: ${oc.env:PROJECT_ROOT,${oc.env:PWD,.}}/outputs/rft_runtime/${trainer.experiment_name}
   save_freq: 100
   test_freq: 100
   group_name: small-swe-rft
