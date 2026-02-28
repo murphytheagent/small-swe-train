@@ -171,6 +171,7 @@ def build_assistant_contract_prompt(
         f"{_build_required_args_prompt()}"
         "6) Do not invent tool names or wrapper labels.\n"
         f"7) Terminal tool is '{terminal_tool}', you must end conversation with this tool, and if present it must be the only tool call.\n"
+        "Do not repeat an identical previously-failed command without a new hypothesis.\n"
         f"{suffix}"
     )
 

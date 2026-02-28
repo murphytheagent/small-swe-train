@@ -48,11 +48,13 @@ def test_main_uses_config_defaults_for_split_args_when_unset(
         cache_dir: str | Path,
         eval_split_fraction: float,
         min_eval_rows: int,
+        max_problem_statement_chars: int | None,
     ) -> tuple[Path, Path]:
         captured["dataset_id"] = config.dataset_id
         captured["cache_dir"] = str(cache_dir)
         captured["eval_split_fraction"] = eval_split_fraction
         captured["min_eval_rows"] = min_eval_rows
+        captured["max_problem_statement_chars"] = max_problem_statement_chars
         return Path("/tmp/train.parquet"), Path("/tmp/val.parquet")
 
     monkeypatch.setattr(preload_module, "_resolve_eval_split_defaults", lambda: (0.33, 7))
@@ -83,6 +85,7 @@ def test_main_uses_config_defaults_for_split_args_when_unset(
     assert captured["cache_dir"] == "/tmp/sdpo-cache"
     assert captured["eval_split_fraction"] == 0.33
     assert captured["min_eval_rows"] == 7
+    assert captured["max_problem_statement_chars"] == preload_module.SDPO_DEFAULT_MAX_PROBLEM_STATEMENT_CHARS
     assert output_lines == [
         "data.train_files=/tmp/train.parquet",
         "data.val_files=/tmp/val.parquet",

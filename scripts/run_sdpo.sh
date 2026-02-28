@@ -128,7 +128,10 @@ _cleanup_slurm_job_ray_processes() {
   local -a pids=()
   local -a still_running=()
   local pid
-  mapfile -t pids < <(_collect_slurm_job_ray_pids "${job_id}")
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    pids+=("${pid}")
+  done < <(_collect_slurm_job_ray_pids "${job_id}")
   if [[ "${#pids[@]}" -eq 0 ]]; then
     return 0
   fi
@@ -161,17 +164,30 @@ _collect_sdpo_bridge_container_ids() {
     --filter "label=small_swe.pool_name=${SDPO_CONTAINER_NAME_PREFIX}"
   )
   local -a container_ids=()
+  local container_id=""
   if [[ -n "${job_id}" ]]; then
-    mapfile -t container_ids < <(
+    container_ids=()
+    while IFS= read -r container_id; do
+      [[ -n "${container_id}" ]] || continue
+      container_ids+=("${container_id}")
+    done < <(
       "${base_docker_cmd[@]}" --filter "label=small_swe.slurm_job_id=${job_id}" 2>/dev/null || true
     )
     if [[ "${#container_ids[@]}" -eq 0 ]] && [[ -n "${SDPO_RUN_LABEL:-}" ]]; then
-      mapfile -t container_ids < <(
+      container_ids=()
+      while IFS= read -r container_id; do
+        [[ -n "${container_id}" ]] || continue
+        container_ids+=("${container_id}")
+      done < <(
         "${base_docker_cmd[@]}" --filter "label=small_swe.run_label=${SDPO_RUN_LABEL}" 2>/dev/null || true
       )
     fi
   elif [[ -n "${SDPO_RUN_LABEL:-}" ]]; then
-    mapfile -t container_ids < <(
+    container_ids=()
+    while IFS= read -r container_id; do
+      [[ -n "${container_id}" ]] || continue
+      container_ids+=("${container_id}")
+    done < <(
       "${base_docker_cmd[@]}" --filter "label=small_swe.run_label=${SDPO_RUN_LABEL}" 2>/dev/null || true
     )
   fi
@@ -191,10 +207,17 @@ _cleanup_sdpo_bridge_containers() {
   fi
 
   local -a container_ids=()
-  mapfile -t container_ids < <(_collect_sdpo_bridge_container_ids "${job_id}")
+  local container_id=""
+  while IFS= read -r container_id; do
+    [[ -n "${container_id}" ]] || continue
+    container_ids+=("${container_id}")
+  done < <(_collect_sdpo_bridge_container_ids "${job_id}")
   if [[ "${#container_ids[@]}" -eq 0 ]]; then
     # Fallback for older runs that did not attach cleanup labels.
-    mapfile -t container_ids < <(docker ps -aq --filter "name=${SDPO_CONTAINER_NAME_PREFIX}-" 2>/dev/null || true)
+    while IFS= read -r container_id; do
+      [[ -n "${container_id}" ]] || continue
+      container_ids+=("${container_id}")
+    done < <(docker ps -aq --filter "name=${SDPO_CONTAINER_NAME_PREFIX}-" 2>/dev/null || true)
   fi
   if [[ "${#container_ids[@]}" -eq 0 ]]; then
     return 0
@@ -709,7 +732,11 @@ elif [[ -z "${TRAIN_FILES_OVERRIDE}" && -z "${VAL_FILES_OVERRIDE}" ]]; then
       "data.val_files=${SDPO_PRELOADED_TASK_PARQUET}"
     )
   else
-    mapfile -t SDPO_DATA_OVERRIDES < <(_resolve_sdpo_dataset_overrides_from_cache)
+    SDPO_DATA_OVERRIDES=()
+    while IFS= read -r override; do
+      [[ -n "${override}" ]] || continue
+      SDPO_DATA_OVERRIDES+=("${override}")
+    done < <(_resolve_sdpo_dataset_overrides_from_cache)
   fi
   if [[ "${#SDPO_DATA_OVERRIDES[@]}" -lt 2 ]]; then
     echo "Failed to resolve SDPO data.train_files/data.val_files overrides."

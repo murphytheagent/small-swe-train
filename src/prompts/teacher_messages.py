@@ -21,8 +21,9 @@ def build_teacher_output_contract_block(
         terminal_tool=terminal_tool,
     )
     return (
+        "Teacher objective (turn-level SDPO):\n"
         "1) The multi-turn conversation above is a previous attempt at fixing the issue stated in the task statement.\n"
-        "2) This attempt is not complete, it can be on the right track or completely wrong. \n"
+        "2) This attempt is not complete, it can be on the right track or completely wrong.\n"
         "3) Learn from the interactions from this attempt, correct mistakes, and take correct actions in the next turn.\n"
         "4) All tools in this attempt have been executed already, so assume you are working potentially modified repo.\n"
         f"{base_contract}\n"
