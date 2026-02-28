@@ -732,9 +732,6 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 trajectory_assistant_turns.append(assistant_text)
                 trajectory_assistant_turn_token_lengths.append(len(assistant_turn_ids))
                 trajectory_turn_tool_response_blocks.append([])
-                if reached_limit:
-                    loop_exit_reason = "response_length_budget_exhausted"
-                    break
 
                 bridge_started = time.monotonic()
                 try:
@@ -838,6 +835,9 @@ class SWEBridgeAgentLoop(AgentLoopBase):
 
                 if bridge_result.is_terminal:
                     loop_exit_reason = "terminal"
+                    break
+                if reached_limit:
+                    loop_exit_reason = "response_length_budget_exhausted"
                     break
         except TimeoutError as exc:
             timeout_error = str(exc)

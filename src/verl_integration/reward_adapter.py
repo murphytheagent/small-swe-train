@@ -32,8 +32,6 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
             token_ids=response_ids,
             response_mask=response_mask_row,
         )
-        response_text = _decode_response(tokenizer=tokenizer, token_ids=generated_response_ids)
-
         raw_prompt_messages = _normalize_messages(_select_non_tensor(non_tensor_batch, "raw_prompt", index))
         prompt_text = _extract_prompt_text(
             messages=raw_prompt_messages,
@@ -51,6 +49,12 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
         )
         trajectory_assistant_turn_token_lengths = _coerce_int_list(
             _select_non_tensor(non_tensor_batch, "trajectory_assistant_turn_token_lengths", index)
+        )
+        response_text = _select_final_assistant_turn_text(
+            tokenizer=tokenizer,
+            generated_token_ids=generated_response_ids,
+            trajectory_assistant_turns=trajectory_assistant_turns,
+            trajectory_assistant_turn_token_lengths=trajectory_assistant_turn_token_lengths,
         )
         trajectory_turn_tool_response_blocks = _coerce_nested_text_list(
             _select_non_tensor(non_tensor_batch, "trajectory_turn_tool_response_blocks", index)
@@ -252,6 +256,45 @@ def _filter_generated_token_ids(*, token_ids: Sequence[int], response_mask: Sequ
         if int(response_mask[index]) != 0:
             generated_ids.append(int(token))
     return generated_ids
+
+
+def _select_final_assistant_turn_text(
+    *,
+    tokenizer: Any,
+    generated_token_ids: Sequence[int],
+    trajectory_assistant_turns: Sequence[str],
+    trajectory_assistant_turn_token_lengths: Sequence[int],
+) -> str:
+    if trajectory_assistant_turns:
+        for item in reversed(trajectory_assistant_turns):
+            text = _as_text(item)
+            if text.strip():
+                return text
+    final_token_ids = _select_final_assistant_turn_token_ids(
+        generated_token_ids=generated_token_ids,
+        trajectory_assistant_turn_token_lengths=trajectory_assistant_turn_token_lengths,
+    )
+    return _decode_response(tokenizer=tokenizer, token_ids=final_token_ids)
+
+
+def _select_final_assistant_turn_token_ids(
+    *,
+    generated_token_ids: Sequence[int],
+    trajectory_assistant_turn_token_lengths: Sequence[int],
+) -> list[int]:
+    if not generated_token_ids:
+        return []
+    if not trajectory_assistant_turn_token_lengths:
+        return [int(token) for token in generated_token_ids]
+    try:
+        last_len = int(trajectory_assistant_turn_token_lengths[-1])
+    except (TypeError, ValueError):
+        return [int(token) for token in generated_token_ids]
+    if last_len <= 0:
+        return [int(token) for token in generated_token_ids]
+    if last_len > len(generated_token_ids):
+        return [int(token) for token in generated_token_ids]
+    return [int(token) for token in generated_token_ids[-last_len:]]
 
 
 def _normalize_messages(raw_messages: Any) -> list[dict[str, str]]:

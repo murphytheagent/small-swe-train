@@ -288,6 +288,8 @@ def reward_fn(
         submit_singleton_ok = False
         allowed_tools_ok = False
         required_args_ok = False
+        parsed_has_submit = False
+        parsed_format_valid = False
         terminal_submission_ok = False
         final_submit_text = ""
         envelope: ActionEnvelope | None = None
@@ -310,7 +312,8 @@ def reward_fn(
             allowed_tools_ok = all(call.tool in _ALLOWED_TOOLS_SET for call in tool_calls)
             required_args_ok = all(not errors for errors in call_error_lists)
             if len(tool_calls) == 1 and tool_calls[0].tool == TERMINAL_TOOL_NAME:
-                terminal_submission_ok = required_args_ok
+                parsed_has_submit = True
+                parsed_format_valid = required_args_ok
                 raw_final_response = tool_calls[0].args.get("final_response")
                 if isinstance(raw_final_response, str):
                     final_submit_text = raw_final_response.strip()
@@ -319,28 +322,60 @@ def reward_fn(
                 else:
                     final_submit_text = str(raw_final_response).strip()
                 if not final_submit_text:
-                    terminal_submission_ok = False
+                    parsed_format_valid = False
+
+        final_turn_has_submit = _coerce_optional_bool_flag(
+            _lookup_verification_value(sample, "final_turn_has_submit", "FINAL_TURN_HAS_SUBMIT")
+        )
+        final_submit_format_valid = _coerce_optional_bool_flag(
+            _lookup_verification_value(sample, "final_submit_format_valid", "FINAL_SUBMIT_FORMAT_VALID")
+        )
+        explicit_final_response = _lookup_verification_value(
+            sample,
+            "submission_final_response",
+            "SUBMISSION_FINAL_RESPONSE",
+        )
+        if explicit_final_response is not None:
+            explicit_text = _as_text(explicit_final_response).strip()
+            final_submit_text = explicit_text
+
+        has_submit = parsed_has_submit
+        if final_turn_has_submit is not None:
+            has_submit = bool(final_turn_has_submit)
+        format_valid = parsed_format_valid
+        if final_submit_format_valid is not None:
+            format_valid = bool(final_submit_format_valid)
+        terminal_submission_ok = bool(has_submit and format_valid)
+        if not has_submit:
+            final_submit_text = ""
 
         verification = _resolve_verifiable_resolution(sample)
         resolved_from_verification = _coerce_optional_bool_flag(verification.get("resolved"))
         has_expected_tests = bool(verification.get("has_expected_tests", False))
+        verification_missing = bool(verification.get("verification_missing", False))
         if resolved_from_verification is None:
-            resolved = False
             if has_expected_tests:
                 resolved_sources.append("missing_verifier")
             else:
                 resolved_sources.append("missing_verifier_targets")
         else:
-            resolved = bool(resolved_from_verification)
             resolved_sources.append("verifiable_tests")
 
-        fail_to_pass_verified.append(bool(verification.get("fail_to_pass_verified", False)))
-        pass_to_pass_verified.append(bool(verification.get("pass_to_pass_verified", False)))
-        reward_verification_missing.append(bool(verification.get("verification_missing", False)))
+        fail_verified_raw = _coerce_optional_bool_flag(verification.get("fail_to_pass_verified"))
+        pass_verified_raw = _coerce_optional_bool_flag(verification.get("pass_to_pass_verified"))
+        fail_verified = bool(fail_verified_raw) if fail_verified_raw is not None else False
+        pass_verified = bool(pass_verified_raw) if pass_verified_raw is not None else False
+        fail_to_pass_verified.append(fail_verified)
+        pass_to_pass_verified.append(pass_verified)
+        reward_verification_missing.append(verification_missing)
 
-        reward_value = 1.0
-        if not resolved:
-            reward_value -= 1.0
+        reward_value = 0.0
+        if has_expected_tests and not verification_missing:
+            reward_value = 1.0
+            if not fail_verified:
+                reward_value -= 1.0
+            if not pass_verified:
+                reward_value -= 1.0
         if not terminal_submission_ok:
             reward_value -= TERMINAL_VALIDITY_PENALTY
         rewards.append(reward_value)

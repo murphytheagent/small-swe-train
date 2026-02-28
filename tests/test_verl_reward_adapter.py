@@ -157,3 +157,23 @@ def test_dataproto_to_rows_decodes_generated_tokens_only_from_response_mask() ->
     assert rows[0]["response_text"] == "11 12"
     assert rows[0]["assistant_response"] == "11 12"
     assert rows[0]["_response_mask"] == [1, 0, 1, 0]
+
+
+def test_dataproto_to_rows_uses_final_assistant_turn_tokens_when_multiturn() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 12, 90, 21, 22, 23]],
+            "response_mask": [[1, 1, 0, 1, 1, 1]],
+        },
+        non_tensor_batch={
+            "raw_prompt": [[{"role": "user", "content": "Fix task"}]],
+            "task_id": ["task-1"],
+            "image_name": ["img-1"],
+            "trajectory_assistant_turn_token_lengths": [[2, 3]],
+        },
+    )
+
+    rows = reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+    assert len(rows) == 1
+    assert rows[0]["response_text"] == "21 22 23"
