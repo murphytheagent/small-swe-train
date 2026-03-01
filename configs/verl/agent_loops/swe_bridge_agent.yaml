@@ -1,9 +1,9 @@
 - name: swe_bridge_agent
   _target_: verl_integration.swe_bridge_agent_loop.SWEBridgeAgentLoop
   # Runtime knobs are explicitly configured here for SDPO swe_bridge_agent.
-  env_pool_size: 32
+  env_pool_size: 16
   tool_timeout_sec: 120
-  container_start_timeout_sec: 120
+  container_start_timeout_sec: 300
   cleanup_timeout_sec: 30
   attempt_timeout_sec: 300
   max_tool_calls_per_turn: 3

@@ -19,6 +19,7 @@ from verl_integration.swe_bridge_agent_loop import (
     _clip_prompt_for_rollout_context,
     _validate_rollout_context_alignment,
     _build_task_sample,
+    _fallback_response_token_id,
     _get_container_slot_gate,
     append_response_tokens,
     build_agent_loop_messages,
@@ -278,6 +279,24 @@ def test_append_response_tokens_clips_to_available_budget() -> None:
 def test_clip_prompt_for_rollout_context_applies_left_truncation() -> None:
     clipped = _clip_prompt_for_rollout_context([10, 11, 12, 13], prompt_length=2)
     assert clipped == [12, 13]
+
+
+def test_fallback_response_token_id_prefers_eos() -> None:
+    class _Tokenizer:
+        eos_token_id = 42
+        pad_token_id = 7
+
+    assert _fallback_response_token_id(_Tokenizer()) == 42
+
+
+def test_fallback_response_token_id_falls_back_to_zero() -> None:
+    class _Tokenizer:
+        eos_token_id = None
+        pad_token_id = None
+        bos_token_id = None
+        unk_token_id = None
+
+    assert _fallback_response_token_id(_Tokenizer()) == 0
 
 
 def test_validate_rollout_context_alignment_accepts_consistent_state() -> None:

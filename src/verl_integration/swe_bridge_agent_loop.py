@@ -897,6 +897,12 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             time.monotonic() - started_at,
         )
 
+        if not response_mask:
+            # verl postprocess expects at least one response token; keep this
+            # synthetic token masked out so setup failures carry no loss signal.
+            full_token_ids.append(_fallback_response_token_id(self.tokenizer))
+            response_mask.append(0)
+
         _validate_rollout_context_alignment(
             canonical_prompt_ids=canonical_prompt_ids,
             full_token_ids=full_token_ids,
@@ -1270,6 +1276,14 @@ def _coerce_token_ids(value: Any) -> list[int]:
         if isinstance(token, numbers.Integral):
             token_ids.append(int(token))
     return token_ids
+
+
+def _fallback_response_token_id(tokenizer: Any) -> int:
+    for key in ("eos_token_id", "pad_token_id", "bos_token_id", "unk_token_id"):
+        value = getattr(tokenizer, key, None)
+        if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+            return int(value)
+    return 0
 
 
 def _clip_prompt_for_rollout_context(prompt_ids: Any, *, prompt_length: int) -> list[int]:

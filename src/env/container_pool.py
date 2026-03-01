@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Sequence
 
 from .command_runner import CommandRunner, default_command_runner
 from .task_dataset import TaskSample
+
+_CONTAINER_START_MAX_ATTEMPTS = 3
+_CONTAINER_START_RETRY_BASE_DELAY_SEC = 1.0
+_CONTAINER_START_RETRY_MAX_DELAY_SEC = 5.0
 
 
 @dataclass(frozen=True)
@@ -75,38 +80,60 @@ class BatchContainerPool:
         suffix = uuid.uuid4().hex[:8]
         container_name = f"{self._name_prefix}-{suffix}"
         label_args = self._build_container_label_args()
-        command = [
-            "docker",
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            container_name,
-            *label_args,
-            task.image_name,
-            "sh",
-            "-lc",
-            "sleep infinity",
-        ]
-        try:
-            result = self._runner(command, timeout_sec=self._container_start_timeout_sec)
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                f"Container start timed out for task {task.task_id!r} with image {task.image_name!r}."
-            ) from exc
+        last_timeout = False
+        last_error = "<unknown error>"
+        for attempt_index in range(_CONTAINER_START_MAX_ATTEMPTS):
+            command = [
+                "docker",
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                container_name,
+                *label_args,
+                task.image_name,
+                "sh",
+                "-lc",
+                "sleep infinity",
+            ]
+            try:
+                result = self._runner(command, timeout_sec=self._container_start_timeout_sec)
+            except subprocess.TimeoutExpired:
+                last_timeout = True
+                last_error = f"docker run timed out after {self._container_start_timeout_sec}s"
+                self._best_effort_remove_container(container_name)
+            else:
+                if result.returncode == 0:
+                    container_id = (
+                        result.stdout.strip().splitlines()[0]
+                        if result.stdout.strip()
+                        else container_name
+                    )
+                    return ContainerHandle(
+                        task_id=task.task_id,
+                        image_name=task.image_name,
+                        container_id=container_id,
+                        container_name=container_name,
+                    )
 
-        if result.returncode != 0:
-            stderr = result.stderr.strip() or "<empty stderr>"
+                last_timeout = False
+                last_error = result.stderr.strip() or "<empty stderr>"
+                self._best_effort_remove_container(container_name)
+
+            if attempt_index + 1 < _CONTAINER_START_MAX_ATTEMPTS:
+                backoff_sec = min(
+                    _CONTAINER_START_RETRY_BASE_DELAY_SEC * (2**attempt_index),
+                    _CONTAINER_START_RETRY_MAX_DELAY_SEC,
+                )
+                time.sleep(backoff_sec)
+
+        if last_timeout:
             raise RuntimeError(
-                f"Failed to start container for task {task.task_id!r}: {stderr}"
+                f"Container start timed out for task {task.task_id!r} with image {task.image_name!r} "
+                f"after {_CONTAINER_START_MAX_ATTEMPTS} attempts."
             )
-
-        container_id = result.stdout.strip().splitlines()[0] if result.stdout.strip() else container_name
-        return ContainerHandle(
-            task_id=task.task_id,
-            image_name=task.image_name,
-            container_id=container_id,
-            container_name=container_name,
+        raise RuntimeError(
+            f"Failed to start container for task {task.task_id!r} after {_CONTAINER_START_MAX_ATTEMPTS} attempts: {last_error}"
         )
 
     def _build_container_label_args(self) -> list[str]:
@@ -144,3 +171,10 @@ class BatchContainerPool:
             except subprocess.TimeoutExpired:
                 # Best-effort cleanup in all error cases.
                 continue
+
+    def _best_effort_remove_container(self, container_ref: str) -> None:
+        try:
+            self._runner(["docker", "rm", "-f", container_ref], timeout_sec=self._cleanup_timeout_sec)
+        except subprocess.TimeoutExpired:
+            # Best-effort cleanup in all error cases.
+            return
