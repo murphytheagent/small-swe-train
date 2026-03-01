@@ -30,6 +30,8 @@ Requires-Dist: qwen-vl-utils>=0.0.14; extra == "train"
 
 Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO stages.
 
+Latest doc update: 2026-02-28.
+
 ## What is implemented
 - Stable protocol types for assistant tool-call envelopes and feedback packets.
 - ChatML assistant-turn parser with `<think>` and ordered `<tool_call>` support.
@@ -42,7 +44,7 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 - RFT checkpoint writes require explicit `global_step` to avoid accidental step-directory reuse.
 - RFT checkpoint argument validation is fail-fast: invalid checkpoint inputs raise before rollout/training side effects.
 - On-policy RFT output artifacts include `rollout_rows.jsonl` and `rollout_artifact_summary.json` (task IDs, task-image pairs, and trajectory counts) when `data.on_policy.output_dir` is set.
-- Live runtime handoff orchestration is centralized in `src/trainer/rft_runtime.py` and emits `rft_runtime_manifest.json` with selected/rejected counts and rejection-reason tallies.
+- Live on-policy handoff is coordinated by `src/trainer/rft_handoff.py`, summarized in `src/trainer/rft_runtime.py`, and persisted by `src/trainer/rft_runtime_loop.py` in `rft_runtime_loop_manifest.json`.
 - Default on-policy turn generation now uses a live OpenAI-compatible vLLM endpoint (`data.on_policy.turn_generator_mode=default`), with runtime settings sourced from centralized policy + `SMALL_SWE_VLLM_*` overrides.
 - RFT rejection-policy logic is centralized in `src/trainer/rft_rejection.py` with typed selection outputs/signatures.
 - RFT rejection now enforces trajectory-level checks (all tool calls formatted, terminal submit present, terminal submit args valid).
@@ -66,7 +68,8 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 
 ## Quick start
 ```bash
-python -m pytest
+MAX_JOBS=2 uv sync --python 3.13 --extra train
+uv run python -m pytest
 ```
 
 ## Build and test
@@ -83,7 +86,7 @@ MAX_JOBS=2 uv sync --python 3.13 --extra train
 
 Run the regression suite:
 ```bash
-python3 -m pytest -q
+uv run python -m pytest -q
 ```
 
 ## Run commands
@@ -118,6 +121,27 @@ Run proof-mode direct launch (single-shot trainer invocation):
 bash scripts/run_rft_onpolicy_rollout_proof.sh
 ```
 
+Run SDPO runtime (`run_sdpo.sh`) through Slurm only:
+```bash
+# Required on this machine for SDPO:
+# 1) put Ray temp on scratch, not /tmp
+# 2) optional: clean stale user-owned sessions under that scratch dir
+export RAY_TMPDIR=/data/scratch/$USER/ray_tmp/${SLURM_JOB_ID:-manual}
+mkdir -p "$RAY_TMPDIR"
+if ! pgrep -u "$(id -u)" -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then
+  find "$RAY_TMPDIR" -mindepth 1 -maxdepth 1 -type d -name 'session_*' -exec rm -rf {} + 2>/dev/null || true
+fi
+bash scripts/run_sdpo.sh trainer.total_training_steps=2
+```
+`run_sdpo.sh` defaults `TOKENIZERS_PARALLELISM=false` for Ray SDPO workers.
+`run_sdpo.sh` also prints a launch summary and watchdog heartbeats to stdout, and warns if trainer logs stay unchanged for too long.
+Useful knobs when checking for stalls:
+- `SDPO_MONITOR_INTERVAL_SEC` (default `120`)
+- `SDPO_STALL_WARN_SEC` (default `900`)
+- `SDPO_MONITOR_ENABLE=0` to disable the watchdog
+- `SDPO_TRAINER_LOG_PATH=/path/to/trainer.log` to control the mirrored trainer log path
+See `scripts/SLURM_GPU_LAUNCH.md` for full 8-GPU submit examples and SDPO-specific launcher defaults.
+
 Rebuild flash-attn through Slurm:
 ```bash
 bash scripts/run_flash_attn_rebuild.sh
@@ -126,6 +150,7 @@ bash scripts/run_flash_attn_rebuild.sh
 ## Runtime defaults
 
 Centralized defaults are sourced from `configs/runtime/training_policy_defaults.v1.json`.
+Config layout and field semantics are documented in `configs/README.md`.
 For 8-GPU runs (`NPROC_PER_NODE=8`), the locked rollout defaults are:
 - `rft_runtime.loop.collector_max_in_flight_tasks=32`
 - `rft_runtime.vllm_parallelism.by_nproc_per_node.8.tensor_parallel_size=2`
@@ -140,4 +165,4 @@ python scripts/run_step_sdpo_scaffold.py \
 
 ## Notes
 - End-to-end RFT runtime orchestration lives in `src/trainer/rft_runtime_loop.py`.
-- Design artifacts remain under `outputs/1771579678.414229/` as frozen planning context.
+- Design and implementation history remains in `design.md` and `IMPLEMENTATION_BLUEPRINT.md`.

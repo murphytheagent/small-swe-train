@@ -60,6 +60,7 @@ src/verl_integration/ppo_runtime_patch.py
 src/verl_integration/reprompt_adapter.py
 src/verl_integration/reward_adapter.py
 src/verl_integration/reward_function.py
+src/verl_integration/reward_loop_score.py
 src/verl_integration/rft_rejection.py
 src/verl_integration/rft_runtime.py
 src/verl_integration/submission_verifier.py
@@ -101,5 +102,6 @@ tests/test_verl_mask_injector.py
 tests/test_verl_reprompt_adapter.py
 tests/test_verl_reward_adapter.py
 tests/test_verl_reward_function.py
+tests/test_verl_reward_loop_score.py
 tests/test_vllm_api_server_entry.py
 tests/test_vllm_turn_generator.py
