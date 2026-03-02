@@ -419,6 +419,7 @@ def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     result = _run_script("run_sdpo.sh", "data.train_batch_size=4")
     assert "-m verl_integration.main_ppo_entry" in result.stdout
     assert "--config-name sdpo_swe" in result.stdout
+    assert "trainer.logger=\\[console\\,wandb\\,file\\]" in result.stdout
     assert "actor_rollout_ref.model.path=/tmp/rft-checkpoint" in result.stdout
     assert "data.filter_overlong_prompts=false" in result.stdout
     assert "data.train_files=" in result.stdout
@@ -744,6 +745,15 @@ def test_run_sdpo_script_dry_run_respects_explicit_prompt_filter_override() -> N
     )
     assert "data.filter_overlong_prompts=true" in result.stdout
     assert "data.filter_overlong_prompts=false" not in result.stdout
+
+
+def test_run_sdpo_script_dry_run_respects_explicit_logger_override() -> None:
+    result = _run_script(
+        "run_sdpo.sh",
+        "trainer.logger=[console,wandb]",
+    )
+    assert "trainer.logger=\\[console\\,wandb\\]" in result.stdout
+    assert "trainer.logger=\\[console\\,wandb\\,file\\]" not in result.stdout
 
 
 def test_run_sdpo_script_dry_run_uses_task_sdpo_cache_defaults() -> None:

@@ -53,6 +53,9 @@ PY
 )"
 SDPO_TRAINER_MODULE="${SDPO_TRAINER_MODULE:-verl_integration.main_ppo_entry}"
 export SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH="${SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH:-1}"
+export SMALL_SWE_WANDB_FILTER_ESSENTIALS="${SMALL_SWE_WANDB_FILTER_ESSENTIALS:-1}"
+# Keep full-fidelity metrics in local JSONL while W&B receives curated essentials.
+export VERL_FILE_LOGGER_ROOT="${VERL_FILE_LOGGER_ROOT:-${PROJECT_ROOT}/outputs/metrics}"
 # Prevent tokenizer-thread deadlocks in forked Ray worker processes.
 # verl's PPO runtime sets TOKENIZERS_PARALLELISM=true by default unless this is preset.
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
@@ -735,6 +738,10 @@ PY
 }
 
 AUTO_OVERRIDES=()
+
+if ! _has_override_with_prefix "trainer.logger" "$@"; then
+  AUTO_OVERRIDES+=("trainer.logger=[console,wandb,file]")
+fi
 
 if ! _has_override_with_prefix "ray_kwargs.ray_init.num_cpus" "$@"; then
   SDPO_RAY_NUM_CPUS_VALUE="$(_resolve_sdpo_ray_num_cpus)"

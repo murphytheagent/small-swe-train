@@ -385,6 +385,138 @@ def test_sitecustomize_tokenizer_patch_falls_back_when_fix_flag_is_unsupported(m
     assert "fix_mistral_regex" not in calls[1]
 
 
+def test_sitecustomize_patches_tracking_log_to_filter_wandb_metrics(monkeypatch) -> None:
+    class _FakeBackend:
+        def __init__(self) -> None:
+            self.logs: list[tuple[dict[str, object], int]] = []
+
+        def log(self, data, step):
+            self.logs.append((dict(data), int(step)))
+
+        def finish(self) -> None:
+            return None
+
+    class _FakeTracking:
+        def __init__(self) -> None:
+            self.logger: dict[str, object] = {}
+
+        def log(self, data, step, backend=None):
+            _ = data, step, backend
+
+        def __del__(self):
+            return None
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_utils_pkg = types.ModuleType("verl.utils")
+    fake_utils_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_tracking_module = types.ModuleType("verl.utils.tracking")
+    fake_tracking_module.Tracking = _FakeTracking
+    fake_utils_pkg.tracking = fake_tracking_module
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.tracking", fake_tracking_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+
+    wandb_backend = _FakeBackend()
+    file_backend = _FakeBackend()
+    tracker = _FakeTracking()
+    tracker.logger = {"wandb": wandb_backend, "file": file_backend}
+
+    tracker.log(
+        {
+            "training/global_step": 2,
+            "actor/pg_loss": 0.25,
+            "response_length/mean": 3000.0,
+            "val-core/SWE-bench/SWE-smith-py/reward/mean@1": -0.33,
+            "val-aux/SWE-bench/SWE-smith-py/score/mean@1": -0.33,
+            "unneeded/internal_debug_metric": 123.0,
+            "val-aux/SWE-bench/SWE-smith-py/pass_to_pass_verified/mean@1": float("nan"),
+        },
+        step=2,
+    )
+
+    assert len(file_backend.logs) == 1
+    full_payload, full_step = file_backend.logs[0]
+    assert full_step == 2
+    assert "unneeded/internal_debug_metric" in full_payload
+
+    assert len(wandb_backend.logs) == 1
+    wandb_payload, wandb_step = wandb_backend.logs[0]
+    assert wandb_step == 2
+    assert "training/global_step" in wandb_payload
+    assert "actor/pg_loss" in wandb_payload
+    assert "response_length/mean" in wandb_payload
+    assert "val-core/SWE-bench/SWE-smith-py/reward/mean@1" in wandb_payload
+    assert "val-aux/SWE-bench/SWE-smith-py/score/mean@1" in wandb_payload
+    assert "unneeded/internal_debug_metric" not in wandb_payload
+    assert "val-aux/SWE-bench/SWE-smith-py/pass_to_pass_verified/mean@1" not in wandb_payload
+
+
+def test_sitecustomize_patches_tracking_close_to_ignore_wandb_finish_errors(monkeypatch) -> None:
+    class _FailingWandbBackend:
+        def __init__(self) -> None:
+            self.finish_calls = 0
+
+        def log(self, data, step):
+            _ = data, step
+
+        def finish(self, exit_code=0, quiet=False):
+            _ = exit_code, quiet
+            self.finish_calls += 1
+            raise ValueError("Cannot use run() inside async loop.")
+
+    class _FileBackend:
+        def __init__(self) -> None:
+            self.finish_calls = 0
+
+        def log(self, data, step):
+            _ = data, step
+
+        def finish(self) -> None:
+            self.finish_calls += 1
+
+    class _FakeTracking:
+        def __init__(self) -> None:
+            self.logger: dict[str, object] = {}
+
+        def log(self, data, step, backend=None):
+            _ = data, step, backend
+
+        def __del__(self):
+            return None
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_utils_pkg = types.ModuleType("verl.utils")
+    fake_utils_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_tracking_module = types.ModuleType("verl.utils.tracking")
+    fake_tracking_module.Tracking = _FakeTracking
+    fake_utils_pkg.tracking = fake_tracking_module
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.tracking", fake_tracking_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+
+    wandb_backend = _FailingWandbBackend()
+    file_backend = _FileBackend()
+    tracker = _FakeTracking()
+    tracker.logger = {"wandb": wandb_backend, "file": file_backend}
+
+    tracker.close()
+    tracker.close()  # idempotent
+    tracker.__del__()  # should be safe after close
+
+    assert wandb_backend.finish_calls == 1
+    assert file_backend.finish_calls == 1
+
+
 def test_sitecustomize_patches_transformers_torch_dtype_property(monkeypatch) -> None:
     transformers = pytest.importorskip("transformers")
     _ = transformers
