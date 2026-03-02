@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Mapping
 
 import config
+import pytest
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -26,6 +29,55 @@ def _run_script(
         ["bash", str(script_path), "--dry-run", *args],
         cwd=_repo_root(),
         check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+
+def _convert_torchrun_command_to_hydra_preflight(command_line: str) -> list[str]:
+    tokens = shlex.split(command_line)
+    if len(tokens) < 3:
+        raise ValueError(f"Unexpected command line: {command_line!r}")
+    try:
+        config_name_idx = tokens.index("--config-name")
+        config_dir_idx = tokens.index("--config-dir")
+    except ValueError as exc:
+        raise ValueError(f"Missing Hydra config flags in command: {command_line!r}") from exc
+
+    module_flag_idx = None
+    for idx, token in enumerate(tokens[: config_name_idx + 1]):
+        if token == "-m":
+            module_flag_idx = idx
+    if module_flag_idx is None or module_flag_idx + 1 >= len(tokens):
+        raise ValueError(f"Unable to resolve trainer module from command: {command_line!r}")
+
+    overrides_start_idx = max(config_name_idx + 2, config_dir_idx + 2)
+    trainer_module = tokens[module_flag_idx + 1]
+    return [
+        tokens[0],
+        "-m",
+        trainer_module,
+        "--config-name",
+        tokens[config_name_idx + 1],
+        "--config-dir",
+        tokens[config_dir_idx + 1],
+        *tokens[overrides_start_idx:],
+        "--cfg",
+        "job",
+    ]
+
+
+def _run_hydra_preflight_for_torchrun_command(command_line: str) -> subprocess.CompletedProcess[str]:
+    preflight_cmd = _convert_torchrun_command_to_hydra_preflight(command_line)
+    env = os.environ.copy()
+    repo_root = _repo_root()
+    existing_pythonpath = env.get("PYTHONPATH")
+    src_path = str(repo_root / "src")
+    env["PYTHONPATH"] = f"{src_path}:{existing_pythonpath}" if existing_pythonpath else src_path
+    return subprocess.run(
+        preflight_cmd,
+        cwd=repo_root,
         text=True,
         capture_output=True,
         env=env,
@@ -125,6 +177,74 @@ def test_run_rft_script_dry_run_prints_verl_command() -> None:
     assert "-m verl_integration.fsdp_sft_trainer_entry" in result.stdout
     assert "--config-name rft_swe" in result.stdout
     assert "trainer.total_training_steps=1" in result.stdout
+    assert "actor_rollout_ref.model.path=" not in result.stdout
+    assert "++data.apply_chat_template_kwargs.enable_thinking=false" in result.stdout
+    assert "~data.apply_chat_template_kwargs.enable_thinking" not in result.stdout
+
+
+def test_run_rft_script_direct_mode_default_overrides_hydra_resolve() -> None:
+    if subprocess.run(
+        [sys.executable, "-c", "import verl"],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).returncode != 0:
+        pytest.skip("verl is not installed in the active test environment")
+
+    result = _run_script(
+        "run_rft.sh",
+        env_overrides={
+            "RFT_RUNTIME_MODE": "direct",
+            "NPROC_PER_NODE": "1",
+        },
+    )
+    command_line = next(
+        (line.strip() for line in result.stdout.splitlines() if "-m torch.distributed.run" in line),
+        "",
+    )
+    assert command_line, f"unable to find direct-mode trainer command in output:\n{result.stdout}"
+
+    preflight_result = _run_hydra_preflight_for_torchrun_command(command_line)
+    assert preflight_result.returncode == 0, (
+        "Hydra preflight failed for direct-mode RFT command.\n"
+        f"Command: {command_line}\n"
+        f"Stdout:\n{preflight_result.stdout}\n"
+        f"Stderr:\n{preflight_result.stderr}"
+    )
+
+
+def test_run_rft_script_runtime_loop_trainer_overrides_hydra_resolve() -> None:
+    if subprocess.run(
+        [sys.executable, "-c", "import verl"],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).returncode != 0:
+        pytest.skip("verl is not installed in the active test environment")
+
+    result = _run_script(
+        "run_rft.sh",
+        env_overrides={
+            "NPROC_PER_NODE": "1",
+        },
+    )
+    command_line = next(
+        (
+            line.strip()
+            for line in result.stdout.splitlines()
+            if "-m torch.distributed.run" in line and "--config-name rft_swe" in line
+        ),
+        "",
+    )
+    assert command_line, f"unable to find loop-mode trainer command in output:\n{result.stdout}"
+
+    preflight_result = _run_hydra_preflight_for_torchrun_command(command_line)
+    assert preflight_result.returncode == 0, (
+        "Hydra preflight failed for runtime-loop RFT trainer command.\n"
+        f"Command: {command_line}\n"
+        f"Stdout:\n{preflight_result.stdout}\n"
+        f"Stderr:\n{preflight_result.stderr}"
+    )
 
 
 def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:

@@ -411,6 +411,7 @@ export SMALL_SWE_VLLM_TEMPERATURE="${SMALL_SWE_VLLM_TEMPERATURE:-${DEFAULT_VLLM_
 export SMALL_SWE_VLLM_TOP_P="${SMALL_SWE_VLLM_TOP_P:-${DEFAULT_VLLM_TOP_P}}"
 export SMALL_SWE_RFT_MODEL_DTYPE="${SMALL_SWE_RFT_MODEL_DTYPE:-${RFT_MODEL_DTYPE}}"
 export EXPERIMENT="${EXPERIMENT:-${RFT_TASK_NAME}}"
+export SMALL_SWE_RFT_LOOP_WANDB_ENABLE="${SMALL_SWE_RFT_LOOP_WANDB_ENABLE:-1}"
 
 if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
   CMD=(
@@ -423,12 +424,11 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
     -m "${RFT_TRAINER_MODULE}"
     --config-name rft_swe
     --config-dir "${CONFIG_DIR}"
-    "~data.apply_chat_template_kwargs.enable_thinking"
+    "++data.apply_chat_template_kwargs.enable_thinking=false"
     max_model_len="${RFT_MAX_SEQUENCE_LENGTH}"
     trainer.total_epochs="${RFT_SFT_NUM_EPOCH_PER_BATCH}"
     trainer.total_training_steps="${RFT_STEPS}"
     data.train_batch_size="${RFT_TRAIN_BATCH_SIZE}"
-    actor_rollout_ref.model.path="${RFT_INITIAL_MODEL}"
     model.partial_pretrain="${RFT_INITIAL_MODEL}"
     model.fsdp_config.model_dtype="${RFT_MODEL_DTYPE}"
     model.lora_rank="${RFT_LORA_RANK}"
@@ -492,7 +492,6 @@ LOOP_CMD=(
   --vllm-stop-timeout-sec "${RFT_VLLM_STOP_TIMEOUT_SEC}"
   --vllm-extra-args "${RFT_VLLM_EXTRA_ARGS}"
   --trainer-override "max_model_len=${RFT_MAX_SEQUENCE_LENGTH}"
-  --trainer-override "actor_rollout_ref.model.path=${RFT_INITIAL_MODEL}"
   --trainer-override "model.fsdp_config.model_dtype=${RFT_MODEL_DTYPE}"
   --trainer-override "model.lora_rank=${RFT_LORA_RANK}"
   --trainer-override "model.lora_alpha=${RFT_LORA_ALPHA}"
@@ -501,7 +500,7 @@ LOOP_CMD=(
   --trainer-override "actor_rollout_ref.model.lora.rank=${RFT_LORA_RANK}"
   --trainer-override "actor_rollout_ref.model.lora.alpha=${RFT_LORA_ALPHA}"
   --trainer-override "actor_rollout_ref.model.lora.target_modules=${RFT_LORA_TARGET_MODULES_HYDRA}"
-  --trainer-override "~data.apply_chat_template_kwargs.enable_thinking"
+  --trainer-override "++data.apply_chat_template_kwargs.enable_thinking=false"
 )
 
 if [[ -n "${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}" ]]; then

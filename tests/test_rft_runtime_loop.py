@@ -125,6 +125,7 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
     assert "-m verl.trainer.fsdp_sft_trainer" in command_text
     assert "trainer.total_training_steps=1" in command_text
     assert "trainer.save_freq=2147483647" in command_text
+    assert "trainer.logger=[console]" in command_text
     assert "trainer.checkpoint.save_contents=[hf_model]" in command_text
     assert "trainer.checkpoint.load_contents=[hf_model]" in command_text
     assert "data.multiturn.enable=true" in command_text
@@ -132,6 +133,32 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
     assert f"data.train_files={tmp_path / 'accepted.parquet'}" in command_text
     assert f"data.val_files={tmp_path / 'accepted_eval.parquet'}" in command_text
     assert f"model.partial_pretrain={config.DEFAULT_TRAINING_MODEL_NAME}" in command_text
+
+
+def test_build_trainer_step_command_allows_inner_wandb_when_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SMALL_SWE_RFT_INNER_TRAINER_WANDB_ENABLE", "1")
+
+    command = build_trainer_step_command(
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=8,
+        trainer_module="verl.trainer.fsdp_sft_trainer",
+        config_name="rft_swe",
+        config_dir=tmp_path / "configs",
+        model_path=config.DEFAULT_TRAINING_MODEL_NAME,
+        train_parquet_path=tmp_path / "accepted.parquet",
+        val_parquet_path=tmp_path / "accepted_eval.parquet",
+        trainer_output_dir=tmp_path / "checkpoints",
+        train_batch_size=32,
+        sft_num_epoch_per_batch=1,
+        trainer_overrides=(),
+    )
+
+    command_text = " ".join(command)
+    assert "trainer.logger=[console,wandb]" in command_text
 
 
 def test_build_vllm_server_command_uses_host_and_port_from_base_url() -> None:
@@ -1031,6 +1058,8 @@ def test_run_loop_upsamples_selected_rows_to_effective_batch_multiple(
     assert summary["selected_count_for_train"] == 4
     assert summary["selected_rows_upsampled"] == 1
     assert summary["effective_train_batch_size"] == 2
+    assert summary["avg_generation_length_raw"] > 0.0
+    assert summary["avg_generation_length"] > 0.0
 
 
 def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
@@ -1620,6 +1649,83 @@ def test_filter_selected_rows_by_token_length_requires_chat_template_tokenizer()
             tokenizer=object(),
             max_sequence_length=128,
         )
+
+
+def test_compute_average_generation_length_prefers_action_mask() -> None:
+    selected_rows = [
+        {"action_mask_rft": [0, 1, 1, 0]},
+        {"action_mask_rft": [1, 0]},
+    ]
+
+    value = rft_runtime_loop.compute_average_generation_length(
+        selected_rows=selected_rows,
+        tokenizer=_StubTokenizer(),
+    )
+
+    assert value == pytest.approx(1.5)
+
+
+def test_compute_average_generation_length_falls_back_to_token_labels() -> None:
+    selected_rows = [
+        {"token_labels": [-100, -100, 7, 9]},
+        {"token_labels": [-100, 1]},
+    ]
+
+    value = rft_runtime_loop.compute_average_generation_length(
+        selected_rows=selected_rows,
+        tokenizer=_StubTokenizer(),
+    )
+
+    assert value == pytest.approx(1.5)
+
+
+def test_compute_average_generation_length_falls_back_to_assistant_text() -> None:
+    selected_rows = [
+        {"assistant_response": "abc"},
+        {
+            "trajectory_history": [
+                "<tool_response>stderr: warning",
+                "abcd",
+            ]
+        },
+    ]
+
+    value = rft_runtime_loop.compute_average_generation_length(
+        selected_rows=selected_rows,
+        tokenizer=_StubTokenizer(),
+    )
+
+    assert value == pytest.approx(3.5)
+
+
+def test_compute_average_generation_length_returns_none_without_signal() -> None:
+    selected_rows = [{"task_id": "task-1"}]
+
+    value = rft_runtime_loop.compute_average_generation_length(
+        selected_rows=selected_rows,
+        tokenizer=_StubTokenizer(),
+    )
+
+    assert value is None
+
+
+def test_run_command_extracts_inner_loss_metrics(tmp_path: Path) -> None:
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "print('step:1 - train/loss:0.45 - train/lr(1e-3):0.1')\n"
+            "print('step:2 - train/loss:0.40 - train/lr(1e-3):0.0')\n"
+            "print('step:2 - val/loss:0.48')\n"
+        ),
+    ]
+
+    metrics = rft_runtime_loop._run_command(command, cwd=tmp_path)
+
+    assert metrics["train_step_last"] == 2
+    assert metrics["train_loss_last"] == pytest.approx(0.40)
+    assert metrics["val_step_last"] == 2
+    assert metrics["val_loss_last"] == pytest.approx(0.48)
 
 
 def test_reset_step_artifacts_removes_mutable_outputs(tmp_path: Path) -> None:

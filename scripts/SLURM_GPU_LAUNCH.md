@@ -29,6 +29,13 @@ PYTHON_BIN=$PWD/.venv/bin/python
 
 so Slurm runs use the project virtualenv interpreter.
 
+W&B run naming:
+- `run_rft.sh`, `run_sdpo.sh`, and `run_sdft.sh` use `EXPERIMENT` as the W&B run name.
+- `run_rft_onpolicy_rollout_proof.sh` uses `WANDB_RUN_NAME`.
+- To map runs back to Slurm jobs, set names with `\$SLURM_JOB_ID` in every `--wrap`.
+- `run_rft.sh` loop mode now defaults to one outer RFT W&B run (`SMALL_SWE_RFT_LOOP_WANDB_ENABLE=1`) and keeps inner SFT W&B disabled (`SMALL_SWE_RFT_INNER_TRAINER_WANDB_ENABLE=0`), while still surfacing inner `train/loss` and `val/loss` as `rft/inner_*` metrics.
+- To restore old behavior (a separate inner SFT W&B run per RFT step), set `SMALL_SWE_RFT_INNER_TRAINER_WANDB_ENABLE=1`.
+
 ## 1) `scripts/run_rft.sh` (variable GPU count)
 
 Choose requested GPU count first, and pass the same count to `NPROC_PER_NODE`.
@@ -50,7 +57,7 @@ sbatch \
   --job-name=small-swe-rft \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
-  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && export WANDB_MODE=offline && export NPROC_PER_NODE=${GPUS} && bash scripts/run_rft.sh"
+  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && export WANDB_MODE=offline && export NPROC_PER_NODE=${GPUS} && export EXPERIMENT=small-swe-rft_job\$SLURM_JOB_ID_\$(date -u +%Y%m%dT%H%M%SZ) && bash scripts/run_rft.sh"
 ```
 
 To keep runtime artifacts under the Slurm tree, add:
@@ -61,6 +68,12 @@ Dry-run:
 ```bash
 NPROC_PER_NODE=8 bash scripts/run_rft.sh --dry-run trainer.total_training_steps=1
 ```
+
+Config note:
+- `run_rft.sh` sets the training model via `model.partial_pretrain` (`--initial-model`).
+- Do not pass `actor_rollout_ref.model.path=...` with `rft_swe`; that key is not defined in the RFT config schema.
+- Thinking mode is disabled via `++data.apply_chat_template_kwargs.enable_thinking=false` (safe whether the key exists or not).
+- No launch-command change is required for single-run RFT W&B logging; it is the default.
 
 ## 2) `scripts/run_rft_onpolicy_rollout_proof.sh` (variable GPU count)
 
@@ -81,7 +94,7 @@ sbatch \
   --job-name=small-swe-rft-proof \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
-  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && export WANDB_MODE=offline && export ON_POLICY_PROOF_NPROC_PER_NODE=${GPUS} && bash scripts/run_rft_onpolicy_rollout_proof.sh"
+  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && export WANDB_MODE=offline && export ON_POLICY_PROOF_NPROC_PER_NODE=${GPUS} && export WANDB_RUN_NAME=rft-proof_job\$SLURM_JOB_ID_\$(date -u +%Y%m%dT%H%M%SZ) && bash scripts/run_rft_onpolicy_rollout_proof.sh"
 ```
 
 Dry-run:
@@ -126,7 +139,7 @@ Length knobs in `configs/verl/sdpo_swe.yaml`:
 
 
 `run_sdpo.sh` now auto-resolves two inputs before launching trainer:
-- RFT checkpoint path (`actor_rollout_ref.model.path`) from:
+- RFT checkpoint path (wired into `actor_rollout_ref.model.path` in `sdpo_swe`) from:
   - `SDPO_RFT_CHECKPOINT` (highest priority), or
   - `SDPO_RFT_MANIFEST`, or
   - latest `outputs/rft_runtime/*/rft_runtime_loop_manifest.json` (`final_model_path` fallback keys).
@@ -210,6 +223,7 @@ sbatch \
   --wrap "cd $PWD \
     && export PYTHON_BIN=$PWD/.venv/bin/python \
     && export WANDB_MODE=offline \
+    && export EXPERIMENT=small-swe-sdpo_job\$SLURM_JOB_ID_\$(date -u +%Y%m%dT%H%M%SZ) \
     && export RAY_TMPDIR=/data/scratch/\$USER/ray_tmp/\$SLURM_JOB_ID \
     && mkdir -p \$RAY_TMPDIR \
     && bash scripts/run_sdpo.sh trainer.total_training_steps=5"
@@ -232,6 +246,8 @@ sbatch \
   --error="$PWD/outputs/slurm/%x-%j.err" \
   --wrap "cd $PWD \
     && export PYTHON_BIN=$PWD/.venv/bin/python \
+    && export WANDB_MODE=offline \
+    && export EXPERIMENT=small-swe-sdpo_job\$SLURM_JOB_ID_\$(date -u +%Y%m%dT%H%M%SZ) \
     && export RAY_TMPDIR=/data/scratch/\$USER/ray_tmp/\$SLURM_JOB_ID \
     && mkdir -p \$RAY_TMPDIR \
     && export SDPO_RFT_MANIFEST=${RFT_MANIFEST} \
@@ -257,7 +273,7 @@ sbatch \
   --job-name=small-swe-sdft \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
-  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && bash scripts/run_sdft.sh <hydra-overrides>"
+  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && export WANDB_MODE=offline && export EXPERIMENT=small-swe-sdft_job\$SLURM_JOB_ID_\$(date -u +%Y%m%dT%H%M%SZ) && bash scripts/run_sdft.sh <hydra-overrides>"
 ```
 
 Dry-run:
