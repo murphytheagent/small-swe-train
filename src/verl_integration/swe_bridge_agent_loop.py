@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import hashlib
 import logging
 import numbers
 import os
@@ -10,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping, Sequence, TypeVar
+from typing import IO, Any, Awaitable, Callable, Mapping, Protocol, Sequence, TypeVar
 from uuid import uuid4
 
 from env.container_pool import BatchContainerPool, ContainerHandle
@@ -29,6 +31,11 @@ try:
     import yaml
 except ModuleNotFoundError:  # pragma: no cover - runtime env should include train deps
     yaml = None  # type: ignore[assignment]
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - exercised in train runtime
     from verl.experimental.agent_loop.agent_loop import (
@@ -113,22 +120,196 @@ class BridgeLoopRuntimeSettings:
     container_start_timeout_sec: int
     cleanup_timeout_sec: int
     attempt_timeout_sec: int
+    container_slot_wait_timeout_sec: int
     max_tool_calls_per_turn: int
     verifier_timeout_sec: int
 
 
 _FALLBACK_RUNTIME_DEFAULTS: dict[str, int] = {
+    # Global concurrent container budget across all agent workers.
     "env_pool_size": 8,
     "tool_timeout_sec": 60,
     "container_start_timeout_sec": 120,
     "cleanup_timeout_sec": 30,
     "attempt_timeout_sec": 300,
+    # 0 disables queue wait timeout so slot contention does not consume
+    # per-attempt execution budget.
+    "container_slot_wait_timeout_sec": 0,
     "max_tool_calls_per_turn": 3,
     "verifier_timeout_sec": 600,
 }
 _DEFAULT_LOOP_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs/verl/agent_loops/swe_bridge_agent.yaml"
 _CONTAINER_SLOT_LOCK = threading.Lock()
-_CONTAINER_SLOT_GATES: dict[int, threading.BoundedSemaphore] = {}
+_CONTAINER_SLOT_GATES: dict[tuple[str, int], "_ContainerSlotGate"] = {}
+_CONTAINER_SLOT_NAMESPACE_ENV = "SMALL_SWE_GLOBAL_ENV_POOL_NAMESPACE"
+_CONTAINER_SLOT_DIR_ENV = "SMALL_SWE_GLOBAL_ENV_POOL_DIR"
+_DEFAULT_CONTAINER_SLOT_DIR = "/tmp/small-swe-env-pool"
+
+
+class _ContainerSlotLease(Protocol):
+    def release(self) -> None: ...
+
+
+class _ContainerSlotGate(Protocol):
+    def try_acquire(self) -> _ContainerSlotLease | None: ...
+
+    def acquire(self, *, wait_timeout_sec: float | None) -> _ContainerSlotLease | None: ...
+
+
+@dataclass
+class _SemaphoreContainerSlotLease:
+    gate: threading.BoundedSemaphore
+    released: bool = False
+
+    def release(self) -> None:
+        if self.released:
+            return
+        self.gate.release()
+        self.released = True
+
+
+class _ThreadContainerSlotGate:
+    def __init__(self, *, env_pool_size: int) -> None:
+        self._gate = threading.BoundedSemaphore(value=env_pool_size)
+
+    def try_acquire(self) -> _ContainerSlotLease | None:
+        if self._gate.acquire(blocking=False):
+            return _SemaphoreContainerSlotLease(gate=self._gate)
+        return None
+
+    def acquire(self, *, wait_timeout_sec: float | None) -> _ContainerSlotLease | None:
+        if wait_timeout_sec is None or wait_timeout_sec <= 0:
+            acquired = self._gate.acquire(blocking=True)
+        else:
+            acquired = self._gate.acquire(timeout=max(0.0, wait_timeout_sec))
+        if acquired:
+            return _SemaphoreContainerSlotLease(gate=self._gate)
+        return None
+
+
+@dataclass
+class _FileContainerSlotLease:
+    lock_handle: IO[bytes]
+    released: bool = False
+
+    def release(self) -> None:
+        if self.released:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(self.lock_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.lock_handle.close()
+            self.released = True
+
+
+class _FileContainerSlotGate:
+    def __init__(self, *, env_pool_size: int, namespace: str, root_dir: Path) -> None:
+        if env_pool_size < 1:
+            raise ValueError("env_pool_size must be >= 1.")
+        self._slot_paths = self._build_slot_paths(
+            env_pool_size=env_pool_size,
+            namespace=namespace,
+            root_dir=root_dir,
+        )
+        self._blocking_slot_cursor = 0
+        self._blocking_slot_lock = threading.Lock()
+
+    @staticmethod
+    def _build_slot_paths(*, env_pool_size: int, namespace: str, root_dir: Path) -> tuple[Path, ...]:
+        slot_root = root_dir / namespace / f"pool-{env_pool_size}"
+        slot_root.mkdir(parents=True, exist_ok=True)
+        slot_paths: list[Path] = []
+        for slot_index in range(env_pool_size):
+            slot_path = slot_root / f"slot-{slot_index:04d}.lock"
+            slot_path.touch(exist_ok=True)
+            slot_paths.append(slot_path)
+        return tuple(slot_paths)
+
+    def try_acquire(self) -> _ContainerSlotLease | None:
+        if fcntl is None:
+            return None
+        for slot_path in self._slot_paths:
+            lock_handle = slot_path.open("a+b")
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_handle.close()
+                continue
+            except OSError as exc:
+                lock_handle.close()
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    continue
+                raise
+            return _FileContainerSlotLease(lock_handle=lock_handle)
+        return None
+
+    def _next_blocking_slot_path(self) -> Path:
+        with self._blocking_slot_lock:
+            slot_path = self._slot_paths[self._blocking_slot_cursor % len(self._slot_paths)]
+            self._blocking_slot_cursor += 1
+            return slot_path
+
+    def acquire(self, *, wait_timeout_sec: float | None) -> _ContainerSlotLease | None:
+        lease = self.try_acquire()
+        if lease is not None:
+            return lease
+
+        if wait_timeout_sec is not None and wait_timeout_sec > 0:
+            deadline = time.monotonic() + wait_timeout_sec
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                time.sleep(min(0.05, remaining))
+                lease = self.try_acquire()
+                if lease is not None:
+                    return lease
+            return None
+
+        if fcntl is None:
+            return None
+        blocking_slot_path = self._next_blocking_slot_path()
+        lock_handle = blocking_slot_path.open("a+b")
+        try:
+            # Block in-kernel until a slot is released instead of spinning in
+            # user-space polling loops.
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            lock_handle.close()
+            raise
+        return _FileContainerSlotLease(lock_handle=lock_handle)
+
+
+def _resolve_container_slot_state_root() -> Path:
+    configured_root = str(os.getenv(_CONTAINER_SLOT_DIR_ENV, _DEFAULT_CONTAINER_SLOT_DIR)).strip()
+    if not configured_root:
+        configured_root = _DEFAULT_CONTAINER_SLOT_DIR
+    return Path(configured_root).expanduser().resolve()
+
+
+def _stable_namespace_fragment(value: str) -> str:
+    return hashlib.sha1(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _resolve_container_slot_namespace() -> str:
+    explicit = str(os.getenv(_CONTAINER_SLOT_NAMESPACE_ENV, "")).strip()
+    if explicit:
+        return explicit
+
+    slurm_job_id = str(os.getenv("SLURM_JOB_ID", "")).strip()
+    if slurm_job_id:
+        return f"slurm-{slurm_job_id}"
+
+    torchelastic_run_id = str(os.getenv("TORCHELASTIC_RUN_ID", "")).strip()
+    if torchelastic_run_id:
+        return f"torchelastic-{_stable_namespace_fragment(torchelastic_run_id)}"
+
+    cwd_fragment = _stable_namespace_fragment(str(Path.cwd().resolve()))
+    master_port = str(os.getenv("MASTER_PORT", "")).strip()
+    if master_port:
+        return f"cwd-{cwd_fragment}-port-{master_port}"
+    return f"cwd-{cwd_fragment}"
 
 
 def _load_runtime_defaults_from_yaml() -> dict[str, int]:
@@ -191,6 +372,7 @@ _DEFAULT_TOOL_TIMEOUT_SEC = _RUNTIME_DEFAULTS["tool_timeout_sec"]
 _DEFAULT_CONTAINER_START_TIMEOUT_SEC = _RUNTIME_DEFAULTS["container_start_timeout_sec"]
 _DEFAULT_CLEANUP_TIMEOUT_SEC = _RUNTIME_DEFAULTS["cleanup_timeout_sec"]
 _DEFAULT_ATTEMPT_TIMEOUT_SEC = _RUNTIME_DEFAULTS["attempt_timeout_sec"]
+_DEFAULT_CONTAINER_SLOT_WAIT_TIMEOUT_SEC = _RUNTIME_DEFAULTS["container_slot_wait_timeout_sec"]
 _DEFAULT_MAX_TOOL_CALLS_PER_TURN = _RUNTIME_DEFAULTS["max_tool_calls_per_turn"]
 _DEFAULT_VERIFIER_TIMEOUT_SEC = _RUNTIME_DEFAULTS["verifier_timeout_sec"]
 _DEFAULT_STAGE_HEARTBEAT_SEC = 60
@@ -218,6 +400,7 @@ def resolve_bridge_loop_runtime_config(
     container_start_timeout_sec: int | None = None,
     cleanup_timeout_sec: int | None = None,
     attempt_timeout_sec: int | None = None,
+    container_slot_wait_timeout_sec: int | None = None,
     max_tool_calls_per_turn: int | None = None,
     verifier_timeout_sec: int | None = None,
 ) -> BridgeLoopRuntimeSettings:
@@ -238,6 +421,10 @@ def resolve_bridge_loop_runtime_config(
         attempt_timeout_sec=_coerce_positive_int(
             attempt_timeout_sec,
             fallback=_DEFAULT_ATTEMPT_TIMEOUT_SEC,
+        ),
+        container_slot_wait_timeout_sec=_coerce_positive_int(
+            container_slot_wait_timeout_sec,
+            fallback=_DEFAULT_CONTAINER_SLOT_WAIT_TIMEOUT_SEC,
         ),
         max_tool_calls_per_turn=_coerce_positive_int(
             max_tool_calls_per_turn,
@@ -303,23 +490,36 @@ async def _emit_stage_heartbeats(
 
 
 async def _acquire_container_slot(
-    gate: threading.BoundedSemaphore,
+    gate: _ContainerSlotGate,
     *,
     task_id: str,
     stage: str,
     started_at: float,
-    attempt_timeout_sec: int,
-    poll_interval_sec: float = 0.05,
-) -> None:
-    while True:
-        if gate.acquire(blocking=False):
-            return
-        remaining_sec = _remaining_attempt_timeout_sec(started_at=started_at, attempt_timeout_sec=attempt_timeout_sec)
+    wait_timeout_sec: int,
+) -> _ContainerSlotLease:
+    # `wait_timeout_sec <= 0` disables queue timeout; callers can wait
+    # indefinitely for a slot while keeping execution timeout for active work.
+    if wait_timeout_sec > 0:
+        remaining_sec = _remaining_attempt_timeout_sec(
+            started_at=started_at,
+            attempt_timeout_sec=wait_timeout_sec,
+        )
         if remaining_sec <= 0:
             raise TimeoutError(
-                f"swe_bridge_agent attempt timed out after {attempt_timeout_sec}s for task {task_id!r} in stage {stage!r}."
+                "swe_bridge_agent container slot wait timed out after "
+                f"{wait_timeout_sec}s for task {task_id!r} in stage {stage!r}."
             )
-        await asyncio.sleep(min(poll_interval_sec, max(0.01, remaining_sec)))
+        lease = await asyncio.to_thread(gate.acquire, wait_timeout_sec=remaining_sec)
+    else:
+        lease = await asyncio.to_thread(gate.acquire, wait_timeout_sec=None)
+
+    if lease is not None:
+        return lease
+
+    raise TimeoutError(
+        "swe_bridge_agent container slot wait timed out after "
+        f"{wait_timeout_sec}s for task {task_id!r} in stage {stage!r}."
+    )
 
 
 async def _cleanup_container_pool_after_acquire(
@@ -423,15 +623,11 @@ def append_response_tokens(
 
     full_token_ids.extend(clipped_token_ids)
     response_mask.extend([1 if generated else 0] * len(clipped_token_ids))
-    if response_logprobs:
-        if token_logprobs is None:
-            response_logprobs.extend([0.0] * len(clipped_token_ids))
-        else:
-            clipped_logprobs = [float(value) for value in token_logprobs[: len(clipped_token_ids)]]
-            if len(clipped_logprobs) < len(clipped_token_ids):
-                clipped_logprobs.extend([0.0] * (len(clipped_token_ids) - len(clipped_logprobs)))
-            response_logprobs.extend(clipped_logprobs)
-    elif token_logprobs:
+    # Keep response_logprobs length aligned with response_mask for every token.
+    # Some model backends omit logprobs; in that case we emit zeros.
+    if token_logprobs is None:
+        response_logprobs.extend([0.0] * len(clipped_token_ids))
+    else:
         clipped_logprobs = [float(value) for value in token_logprobs[: len(clipped_token_ids)]]
         if len(clipped_logprobs) < len(clipped_token_ids):
             clipped_logprobs.extend([0.0] * (len(clipped_token_ids) - len(clipped_logprobs)))
@@ -455,6 +651,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         container_start_timeout_sec: int | None = None,
         cleanup_timeout_sec: int | None = None,
         attempt_timeout_sec: int | None = None,
+        container_slot_wait_timeout_sec: int | None = None,
         max_tool_calls_per_turn: int | None = None,
         env_pool_size: int | None = None,
         verifier_timeout_sec: int | None = None,
@@ -468,6 +665,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             container_start_timeout_sec=container_start_timeout_sec,
             cleanup_timeout_sec=cleanup_timeout_sec,
             attempt_timeout_sec=attempt_timeout_sec,
+            container_slot_wait_timeout_sec=container_slot_wait_timeout_sec,
             max_tool_calls_per_turn=max_tool_calls_per_turn,
             verifier_timeout_sec=verifier_timeout_sec,
         )
@@ -481,12 +679,29 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         self.container_start_timeout_sec = runtime_config.container_start_timeout_sec
         self.cleanup_timeout_sec = runtime_config.cleanup_timeout_sec
         self.attempt_timeout_sec = runtime_config.attempt_timeout_sec
+        self.container_slot_wait_timeout_sec = runtime_config.container_slot_wait_timeout_sec
         self.max_tool_calls_per_turn = runtime_config.max_tool_calls_per_turn
         self.verifier_timeout_sec = runtime_config.verifier_timeout_sec
+        logger.info(
+            "swe_bridge_agent runtime config: env_pool_size=%d tool_timeout_sec=%d "
+            "container_start_timeout_sec=%d cleanup_timeout_sec=%d attempt_timeout_sec=%d "
+            "container_slot_wait_timeout_sec=%d max_tool_calls_per_turn=%d verifier_timeout_sec=%d "
+            "slot_namespace=%s",
+            self.env_pool_size,
+            self.tool_timeout_sec,
+            self.container_start_timeout_sec,
+            self.cleanup_timeout_sec,
+            self.attempt_timeout_sec,
+            self.container_slot_wait_timeout_sec,
+            self.max_tool_calls_per_turn,
+            self.verifier_timeout_sec,
+            _resolve_container_slot_namespace(),
+        )
 
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
         task_context = build_bridge_task_context(kwargs)
         started_at = time.monotonic()
+        attempt_budget_started_at = started_at
         current_stage = "init"
         stage_stop_event = asyncio.Event()
         heartbeat_task: asyncio.Task[None] | None = None
@@ -517,7 +732,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             self.process_vision_info(messages),
             task_id=task_context.task_id,
             stage=current_stage,
-            started_at=started_at,
+            started_at=attempt_budget_started_at,
             attempt_timeout_sec=self.attempt_timeout_sec,
         )
         images = multi_modal_data.get("images")
@@ -532,7 +747,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             ),
             task_id=task_context.task_id,
             stage=current_stage,
-            started_at=started_at,
+            started_at=attempt_budget_started_at,
             attempt_timeout_sec=self.attempt_timeout_sec,
         )
         raw_prompt_token_ids = _coerce_token_ids(raw_prompt_ids)
@@ -574,8 +789,8 @@ class SWEBridgeAgentLoop(AgentLoopBase):
 
         container_slot_gate = _get_container_slot_gate(self.env_pool_size)
         pool = BatchContainerPool(
-            # One loop invocation operates on one task sample; shared slot gating
-            # enforces global env_pool_size concurrency across concurrent loop runs.
+            # One loop invocation operates on one task sample. The shared slot gate
+            # enforces global env_pool_size concurrency across all agent workers.
             env_pool_size=1,
             container_start_timeout_sec=self.container_start_timeout_sec,
             cleanup_timeout_sec=self.cleanup_timeout_sec,
@@ -583,7 +798,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         )
         handle: ContainerHandle | None = None
         acquire_handles_task: asyncio.Task[tuple[ContainerHandle, ...]] | None = None
-        container_slot_acquired = False
+        container_slot_lease: _ContainerSlotLease | None = None
         heartbeat_task = asyncio.create_task(
             _emit_stage_heartbeats(
                 task_id=task_context.task_id,
@@ -595,14 +810,23 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         )
         try:
             _set_stage("wait_container_slot")
-            await _acquire_container_slot(
+            slot_wait_started_at = time.monotonic()
+            container_slot_lease = await _acquire_container_slot(
                 container_slot_gate,
                 task_id=task_context.task_id,
                 stage=current_stage,
-                started_at=started_at,
-                attempt_timeout_sec=self.attempt_timeout_sec,
+                started_at=slot_wait_started_at,
+                wait_timeout_sec=self.container_slot_wait_timeout_sec,
             )
-            container_slot_acquired = True
+            attempt_budget_started_at = time.monotonic()
+            slot_wait_elapsed_sec = attempt_budget_started_at - slot_wait_started_at
+            if slot_wait_elapsed_sec >= 1.0:
+                logger.info(
+                    "swe_bridge_agent slot_wait task_id=%s waited=%.1fs timeout=%s",
+                    task_context.task_id,
+                    slot_wait_elapsed_sec,
+                    self.container_slot_wait_timeout_sec if self.container_slot_wait_timeout_sec > 0 else "disabled",
+                )
 
             _set_stage("acquire_container")
             acquire_handles_task = asyncio.create_task(asyncio.to_thread(pool.acquire, [task_sample]))
@@ -610,7 +834,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 asyncio.shield(acquire_handles_task),
                 task_id=task_context.task_id,
                 stage=current_stage,
-                started_at=started_at,
+                started_at=attempt_budget_started_at,
                 attempt_timeout_sec=self.attempt_timeout_sec,
             )
             if len(handles) != 1:
@@ -631,7 +855,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 asyncio.to_thread(_maybe_apply_patch, executor, task_context.patch, self.tool_timeout_sec),
                 task_id=task_context.task_id,
                 stage=current_stage,
-                started_at=started_at,
+                started_at=attempt_budget_started_at,
                 attempt_timeout_sec=self.attempt_timeout_sec,
             )
 
@@ -643,7 +867,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     loop_exit_reason = "max_user_turns_reached"
                     break
                 if _remaining_attempt_timeout_sec(
-                    started_at=started_at,
+                    started_at=attempt_budget_started_at,
                     attempt_timeout_sec=self.attempt_timeout_sec,
                 ) <= 0:
                     timeout_error = (
@@ -691,7 +915,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     ),
                     task_id=task_context.task_id,
                     stage=current_stage,
-                    started_at=started_at,
+                    started_at=attempt_budget_started_at,
                     attempt_timeout_sec=self.attempt_timeout_sec,
                 )
                 metrics["generate_sequences"] += time.monotonic() - generate_started
@@ -725,7 +949,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     ),
                     task_id=task_context.task_id,
                     stage=current_stage,
-                    started_at=started_at,
+                    started_at=attempt_budget_started_at,
                     attempt_timeout_sec=self.attempt_timeout_sec,
                 )
                 assistant_turns += 1
@@ -746,7 +970,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                         ),
                         task_id=task_context.task_id,
                         stage=current_stage,
-                        started_at=started_at,
+                        started_at=attempt_budget_started_at,
                         attempt_timeout_sec=self.attempt_timeout_sec,
                     )
                 except TimeoutError as exc:
@@ -798,7 +1022,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                         ),
                         task_id=task_context.task_id,
                         stage=current_stage,
-                        started_at=started_at,
+                        started_at=attempt_budget_started_at,
                         attempt_timeout_sec=self.attempt_timeout_sec,
                     )
                     if serialized_steps:
@@ -820,7 +1044,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                             ),
                             task_id=task_context.task_id,
                             stage=current_stage,
-                            started_at=started_at,
+                            started_at=attempt_budget_started_at,
                             attempt_timeout_sec=self.attempt_timeout_sec,
                         )
                         append_response_tokens(
@@ -875,13 +1099,14 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                     current_stage,
                     exc,
                 )
-            if container_slot_acquired:
+            if container_slot_lease is not None:
                 try:
-                    container_slot_gate.release()
-                except ValueError:
+                    container_slot_lease.release()
+                except Exception as exc:
                     logger.warning(
-                        "swe_bridge_agent container slot release mismatch task_id=%s",
+                        "swe_bridge_agent container slot release issue task_id=%s error=%s",
                         task_context.task_id,
+                        exc,
                     )
             stage_stop_event.set()
             if heartbeat_task is not None:
@@ -903,11 +1128,19 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             full_token_ids.append(_fallback_response_token_id(self.tokenizer))
             response_mask.append(0)
 
+        # AgentLoopWorker._postprocess assumes batch-consistent response_logprobs
+        # tensor presence. Preserve shape consistency by backfilling zeros when a
+        # backend omitted per-token logprobs for part or all of a trajectory.
+        if len(response_logprobs) < len(response_mask):
+            response_logprobs.extend([0.0] * (len(response_mask) - len(response_logprobs)))
+        elif len(response_logprobs) > len(response_mask):
+            response_logprobs[:] = response_logprobs[: len(response_mask)]
+
         _validate_rollout_context_alignment(
             canonical_prompt_ids=canonical_prompt_ids,
             full_token_ids=full_token_ids,
             response_mask=response_mask,
-            response_logprobs=response_logprobs if response_logprobs else None,
+            response_logprobs=response_logprobs,
         )
         prompt_ids = list(canonical_prompt_ids)
         response_ids = full_token_ids[len(canonical_prompt_ids) :]
@@ -950,7 +1183,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             prompt_ids=prompt_ids,
             response_ids=response_ids,
             response_mask=response_mask,
-            response_logprobs=response_logprobs if response_logprobs else None,
+            response_logprobs=response_logprobs,
             multi_modal_data=output_multi_modal_data,
             num_turns=assistant_turns + user_turns + 1,
             metrics=metrics,
@@ -1171,12 +1404,42 @@ def _resolve_task_sample_test_targets(
     return []
 
 
-def _get_container_slot_gate(env_pool_size: int) -> threading.BoundedSemaphore:
+def _get_container_slot_gate(env_pool_size: int) -> _ContainerSlotGate:
+    namespace = _resolve_container_slot_namespace()
+    gate_key = (namespace, env_pool_size)
     with _CONTAINER_SLOT_LOCK:
-        gate = _CONTAINER_SLOT_GATES.get(env_pool_size)
-        if gate is None:
-            gate = threading.BoundedSemaphore(value=env_pool_size)
-            _CONTAINER_SLOT_GATES[env_pool_size] = gate
+        gate = _CONTAINER_SLOT_GATES.get(gate_key)
+        if gate is not None:
+            return gate
+
+        if fcntl is None:
+            gate = _ThreadContainerSlotGate(env_pool_size=env_pool_size)
+            logger.warning(
+                "swe_bridge_agent fcntl unavailable; container slot gating is process-local "
+                "(namespace=%s env_pool_size=%d).",
+                namespace,
+                env_pool_size,
+            )
+            _CONTAINER_SLOT_GATES[gate_key] = gate
+            return gate
+
+        try:
+            gate = _FileContainerSlotGate(
+                env_pool_size=env_pool_size,
+                namespace=namespace,
+                root_dir=_resolve_container_slot_state_root(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "swe_bridge_agent file-backed container slot gate init failed; "
+                "falling back to process-local gating (namespace=%s env_pool_size=%d error=%s).",
+                namespace,
+                env_pool_size,
+                exc,
+            )
+            gate = _ThreadContainerSlotGate(env_pool_size=env_pool_size)
+
+        _CONTAINER_SLOT_GATES[gate_key] = gate
         return gate
 
 

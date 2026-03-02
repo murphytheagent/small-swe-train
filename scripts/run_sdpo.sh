@@ -538,7 +538,11 @@ _discover_latest_rft_manifest() {
   local latest_manifest=""
   local candidate
   shopt -s nullglob
-  for candidate in "${PROJECT_ROOT}"/outputs/rft_runtime/*/rft_runtime_loop_manifest.json; do
+  local -a manifest_candidates=(
+    "${PROJECT_ROOT}"/outputs/rft_runtime/*/rft_runtime_loop_manifest.json
+    "${PROJECT_ROOT}"/outputs/slurm/rft_runtime/*/rft_runtime_loop_manifest.json
+  )
+  for candidate in "${manifest_candidates[@]}"; do
     if [[ -z "${latest_manifest}" || "${candidate}" -nt "${latest_manifest}" ]]; then
       latest_manifest="${candidate}"
     fi
@@ -556,11 +560,52 @@ from pathlib import Path
 
 manifest_path = Path(sys.argv[1])
 payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+seen: set[str] = set()
+candidates: list[str] = []
+
+
+def _add_candidate(value: object) -> None:
+    if not isinstance(value, str):
+        return
+    normalized = value.strip()
+    if not normalized or normalized in seen:
+        return
+    seen.add(normalized)
+    candidates.append(normalized)
+
+    path = Path(normalized)
+    sibling_name: str | None = None
+    if path.name == "huggingface_vllm_merged":
+        sibling_name = "huggingface"
+    elif path.name == "huggingface":
+        sibling_name = "huggingface_vllm_merged"
+    if sibling_name is None:
+        return
+    sibling = str(path.with_name(sibling_name))
+    if sibling not in seen:
+        seen.add(sibling)
+        candidates.append(sibling)
+
+
 for key in ("final_model_path", "latest_vllm_checkpoint", "latest_hf_checkpoint"):
-    value = payload.get(key)
-    if isinstance(value, str) and value.strip():
-        print(value.strip())
+    _add_candidate(payload.get(key))
+
+steps = payload.get("steps")
+if isinstance(steps, list):
+    for raw_step in reversed(steps):
+        if not isinstance(raw_step, dict):
+            continue
+        for key in ("latest_vllm_checkpoint", "latest_hf_checkpoint"):
+            _add_candidate(raw_step.get(key))
+
+for candidate in candidates:
+    if Path(candidate).exists():
+        print(candidate)
         raise SystemExit(0)
+
+if candidates:
+    print(candidates[0])
+    raise SystemExit(0)
 raise SystemExit(1)
 PY
 }

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Mapping
 
@@ -421,6 +424,73 @@ def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     assert "data.train_files=" in result.stdout
     assert "data.val_files=" in result.stdout
     assert "data.train_batch_size=4" in result.stdout
+
+
+def test_run_sdpo_script_dry_run_manifest_resolution_prefers_existing_candidate(
+    tmp_path: Path,
+) -> None:
+    checkpoint_root = tmp_path / "trainer_checkpoints" / "global_step_42"
+    existing_hf = checkpoint_root / "huggingface"
+    existing_hf.mkdir(parents=True)
+    missing_merged = checkpoint_root / "huggingface_vllm_merged"
+    manifest_path = tmp_path / "rft_runtime_loop_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "final_model_path": str(missing_merged),
+                "latest_vllm_checkpoint": str(missing_merged),
+                "latest_hf_checkpoint": str(existing_hf),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_script(
+        "run_sdpo.sh",
+        env_overrides={
+            "SDPO_RFT_CHECKPOINT": "",
+            "SDPO_RFT_MANIFEST": str(manifest_path),
+        },
+    )
+    assert f"actor_rollout_ref.model.path={existing_hf}" in result.stdout
+
+
+def test_run_sdpo_script_dry_run_discovers_manifest_from_slurm_rft_runtime(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    checkpoint_path = tmp_path / "resolved-rft-checkpoint"
+    checkpoint_path.mkdir(parents=True)
+
+    run_dir = (
+        repo_root
+        / "outputs"
+        / "slurm"
+        / "rft_runtime"
+        / f"pytest-run-script-manifest-{os.getpid()}-{time.time_ns()}"
+    )
+    manifest_path = run_dir / "rft_runtime_loop_manifest.json"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps({"final_model_path": str(checkpoint_path)}),
+        encoding="utf-8",
+    )
+
+    future_epoch = 4_102_444_800  # 2100-01-01T00:00:00Z
+    os.utime(manifest_path, (future_epoch, future_epoch))
+
+    try:
+        result = _run_script(
+            "run_sdpo.sh",
+            env_overrides={
+                "SDPO_RFT_CHECKPOINT": "",
+                "SDPO_RFT_MANIFEST": "",
+            },
+        )
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    assert f"actor_rollout_ref.model.path={checkpoint_path}" in result.stdout
 
 
 def test_run_sdpo_script_dry_run_allows_entrypoint_override() -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import importlib
 import logging
 import numbers
@@ -16,9 +18,16 @@ LOGGER = logging.getLogger(__name__)
 _PATCH_MARKER_ATTR = "_small_swe_sdpo_runtime_patch_applied"
 _ORIGINAL_REWARD_ATTR = "_small_swe_original_compute_or_extract_reward"
 _ORIGINAL_DISTILL_ATTR = "_small_swe_original_maybe_build_self_distillation_batch"
+_ORIGINAL_VAL_METRICS_UPDATE_ATTR = "_small_swe_original_val_metrics_update"
+_VAL_METRICS_PATCH_MARKER_ATTR = "_small_swe_val_metrics_patch_applied"
 _ACTOR_PATCH_MARKER_ATTR = "_small_swe_turn_level_actor_patch_applied"
 _ORIGINAL_ACTOR_UPDATE_ATTR = "_small_swe_original_update_policy"
+_AGENT_LOOP_PATCH_MARKER_ATTR = "_small_swe_agent_loop_queue_patch_applied"
+_ORIGINAL_AGENT_LOOP_GENERATE_ATTR = "_small_swe_original_agent_loop_generate_sequences"
+_AGENT_LOOP_SERVER_PATCH_MARKER_ATTR = "_small_swe_agent_loop_server_patch_applied"
+_ORIGINAL_AGENT_LOOP_CHOOSE_SERVER_ATTR = "_small_swe_original_agent_loop_choose_server"
 _DISTRIBUTED_TURN_LEVEL_EXPANSION_ENV = "SMALL_SWE_ENABLE_DISTRIBUTED_TURN_LEVEL_EXPANSION"
+_AGENT_LOOP_MAX_IN_FLIGHT_ENV = "SMALL_SWE_SDPO_AGENT_LOOP_MAX_IN_FLIGHT"
 _TURN_LEVEL_REQUIRED_KEYS = {
     "turn_teacher_input_ids",
     "turn_teacher_attention_mask",
@@ -71,7 +80,10 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
         return False
 
     if getattr(trainer_cls, _PATCH_MARKER_ATTR, False):
+        _apply_validation_metrics_update_patch(trainer_cls)
         _apply_turn_level_actor_update_patch()
+        _apply_agent_loop_server_routing_patch()
+        _apply_agent_loop_queue_patch()
         return True
 
     original_reward = getattr(trainer_cls, "_compute_or_extract_reward", None)
@@ -99,12 +111,19 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
 
         batch_tensors = getattr(batch, "batch", {})
         batch_keys = set(batch_tensors.keys()) if hasattr(batch_tensors, "keys") else set()
+        responses = batch_tensors.get("responses")
+        expected_len = _resolve_response_batch_size(responses)
         if "rm_scores" in batch_keys:
-            return original(self, batch, reward_fn=reward_fn, return_dict=return_dict, sum_reward=sum_reward)
+            reward_output = original(self, batch, reward_fn=reward_fn, return_dict=return_dict, sum_reward=sum_reward)
+            return _sanitize_reward_result_payload(
+                reward_output,
+                return_dict=return_dict,
+                sum_reward=sum_reward,
+                expected_len=expected_len,
+            )
 
         try:
             rows = dataproto_to_rows(batch=batch, tokenizer=getattr(self, "tokenizer", None))
-            responses = batch_tensors.get("responses")
             response_width = _resolve_response_width(responses)
             device = getattr(responses, "device", None)
             reward_tensor, reward_extra_infos_dict = rows_to_reward_tensor(
@@ -115,20 +134,36 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
 
             reward_output = reward_tensor.sum(dim=-1) if sum_reward else reward_tensor
             if return_dict:
-                return {
-                    "reward_tensor": reward_output,
-                    "reward_extra_info": reward_extra_infos_dict,
-                }
+                return _sanitize_reward_result_payload(
+                    {
+                        "reward_tensor": reward_output,
+                        "reward_extra_info": reward_extra_infos_dict,
+                    },
+                    return_dict=return_dict,
+                    sum_reward=sum_reward,
+                    expected_len=expected_len,
+                )
             if sum_reward:
                 return reward_output
-            return reward_output, reward_extra_infos_dict
+            return _sanitize_reward_result_payload(
+                (reward_output, reward_extra_infos_dict),
+                return_dict=return_dict,
+                sum_reward=sum_reward,
+                expected_len=expected_len,
+            )
         except Exception as exc:  # pragma: no cover - fallback path
             LOGGER.warning(
                 "SWE reward-adapter path failed; falling back to upstream reward computation: %s",
                 exc,
                 exc_info=True,
             )
-            return original(self, batch, reward_fn=reward_fn, return_dict=return_dict, sum_reward=sum_reward)
+            reward_output = original(self, batch, reward_fn=reward_fn, return_dict=return_dict, sum_reward=sum_reward)
+            return _sanitize_reward_result_payload(
+                reward_output,
+                return_dict=return_dict,
+                sum_reward=sum_reward,
+                expected_len=expected_len,
+            )
 
     def _patched_maybe_build_self_distillation_batch(
         self: Any,
@@ -269,8 +304,439 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
     setattr(trainer_cls, "_compute_or_extract_reward", _patched_compute_or_extract_reward)
     setattr(trainer_cls, "_maybe_build_self_distillation_batch", _patched_maybe_build_self_distillation_batch)
     setattr(trainer_cls, _PATCH_MARKER_ATTR, True)
+    _apply_validation_metrics_update_patch(trainer_cls)
     _apply_turn_level_actor_update_patch()
+    _apply_agent_loop_server_routing_patch()
+    _apply_agent_loop_queue_patch()
     return True
+
+
+def _apply_agent_loop_server_routing_patch(agent_loop_module: Any | None = None) -> bool:
+    if agent_loop_module is None:
+        try:
+            agent_loop_module = importlib.import_module("verl.experimental.agent_loop.agent_loop")
+        except ModuleNotFoundError:
+            return False
+
+    manager_cls = getattr(agent_loop_module, "AsyncLLMServerManager", None)
+    if manager_cls is None:
+        return False
+    if getattr(manager_cls, _AGENT_LOOP_SERVER_PATCH_MARKER_ATTR, False):
+        return True
+
+    original_choose_server = getattr(manager_cls, "_choose_server", None)
+    if not callable(original_choose_server):
+        return False
+
+    setattr(manager_cls, _ORIGINAL_AGENT_LOOP_CHOOSE_SERVER_ATTR, original_choose_server)
+
+    def _patched_choose_server(self: Any, request_id: str) -> Any:
+        if request_id in self.request_id_to_server:
+            return self.request_id_to_server[request_id]
+
+        handles = getattr(self, "server_handles", None)
+        if not isinstance(handles, Sequence) or len(handles) == 0:
+            original_impl = getattr(type(self), _ORIGINAL_AGENT_LOOP_CHOOSE_SERVER_ATTR)
+            return original_impl(self, request_id)
+
+        # Spread requests uniformly across all rollout replicas while preserving
+        # sticky routing for multi-turn conversations on the same request_id.
+        request_digest = hashlib.sha1(str(request_id).encode("utf-8")).digest()
+        server_index = int.from_bytes(request_digest[:8], byteorder="big", signed=False) % len(handles)
+        server = handles[server_index]
+        self.request_id_to_server[request_id] = server
+        return server
+
+    setattr(manager_cls, "_choose_server", _patched_choose_server)
+    setattr(manager_cls, _AGENT_LOOP_SERVER_PATCH_MARKER_ATTR, True)
+    return True
+
+
+def _apply_agent_loop_queue_patch(agent_loop_module: Any | None = None) -> bool:
+    if agent_loop_module is None:
+        try:
+            agent_loop_module = importlib.import_module("verl.experimental.agent_loop.agent_loop")
+        except ModuleNotFoundError:
+            return False
+
+    worker_cls = getattr(agent_loop_module, "AgentLoopWorker", None)
+    if worker_cls is None:
+        return False
+    if getattr(worker_cls, _AGENT_LOOP_PATCH_MARKER_ATTR, False):
+        return True
+
+    original_generate = getattr(worker_cls, "generate_sequences", None)
+    np_module = getattr(agent_loop_module, "np", None)
+    rollout_trace_config_cls = getattr(agent_loop_module, "RolloutTraceConfig", None)
+    get_trajectory_info = getattr(agent_loop_module, "get_trajectory_info", None)
+    if (
+        not callable(original_generate)
+        or np_module is None
+        or rollout_trace_config_cls is None
+        or not callable(get_trajectory_info)
+    ):
+        return False
+
+    setattr(worker_cls, _ORIGINAL_AGENT_LOOP_GENERATE_ATTR, original_generate)
+    agent_loop_registry = getattr(agent_loop_module, "_agent_loop_registry", {})
+
+    async def _patched_generate_sequences(self: Any, batch: Any) -> Any:
+        config = self.config.actor_rollout_ref.rollout
+        sampling_params = dict(
+            temperature=config.temperature,
+            top_p=config.top_p,
+            repetition_penalty=1.0,
+            logprobs=config.calculate_log_probs,
+        )
+
+        if batch.meta_info.get("validate", False):
+            sampling_params["top_p"] = config.val_kwargs.top_p
+            sampling_params["temperature"] = config.val_kwargs.temperature
+
+        if "agent_name" not in batch.non_tensor_batch:
+            default_agent_loop = config.agent.default_agent_loop
+            batch.non_tensor_batch["agent_name"] = np_module.array([default_agent_loop] * len(batch), dtype=object)
+
+        if not _batch_uses_swe_bridge_agent(batch.non_tensor_batch.get("agent_name")):
+            original_impl = getattr(type(self), _ORIGINAL_AGENT_LOOP_GENERATE_ATTR)
+            return await original_impl(self, batch)
+
+        if "index" in batch.non_tensor_batch:
+            index = batch.non_tensor_batch["index"]
+        else:
+            index = np_module.arange(len(batch))
+
+        max_samples_per_worker = rollout_trace_config_cls.get_instance().max_samples_per_step_per_worker
+        if max_samples_per_worker is not None:
+            unique_sample_indices = np_module.unique(index)
+            if max_samples_per_worker < len(unique_sample_indices):
+                selected_samples = set(
+                    np_module.random.choice(unique_sample_indices, max_samples_per_worker, replace=False).tolist()
+                )
+                traced_indices = set(i for i in range(len(batch)) if index[i] in selected_samples)
+            else:
+                traced_indices = set(range(len(batch)))
+        else:
+            traced_indices = set(range(len(batch)))
+
+        trajectory_info = await get_trajectory_info(
+            batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
+        )
+
+        batch_size = len(batch)
+        max_in_flight = _resolve_swe_agent_loop_max_in_flight(
+            worker=self,
+            batch_size=batch_size,
+            agent_loop_registry=agent_loop_registry,
+        )
+        max_in_flight = max(1, min(max_in_flight, batch_size))
+
+        if max_in_flight >= batch_size:
+            tasks = []
+            for sample_index in range(batch_size):
+                trace_this_sample = sample_index in traced_indices
+                kwargs = {k: v[sample_index] for k, v in batch.non_tensor_batch.items()}
+                tasks.append(
+                    asyncio.create_task(
+                        self._run_agent_loop(
+                            sampling_params,
+                            trajectory_info[sample_index],
+                            trace=trace_this_sample,
+                            **kwargs,
+                        )
+                    )
+                )
+            outputs = await asyncio.gather(*tasks)
+            return self._postprocess(outputs)
+
+        outputs: list[Any | None] = [None] * batch_size
+        in_flight: set[asyncio.Task[tuple[int, Any]]] = set()
+        next_sample_index = 0
+
+        def _launch(sample_index: int) -> asyncio.Task[tuple[int, Any]]:
+            trace_this_sample = sample_index in traced_indices
+            kwargs = {k: v[sample_index] for k, v in batch.non_tensor_batch.items()}
+
+            async def _run_one() -> tuple[int, Any]:
+                result = await self._run_agent_loop(
+                    sampling_params,
+                    trajectory_info[sample_index],
+                    trace=trace_this_sample,
+                    **kwargs,
+                )
+                return sample_index, result
+
+            return asyncio.create_task(_run_one())
+
+        try:
+            while next_sample_index < batch_size and len(in_flight) < max_in_flight:
+                in_flight.add(_launch(next_sample_index))
+                next_sample_index += 1
+
+            while in_flight:
+                done, pending = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+                in_flight = set(pending)
+                for finished in done:
+                    sample_index, sample_output = finished.result()
+                    outputs[sample_index] = sample_output
+                    if next_sample_index < batch_size:
+                        in_flight.add(_launch(next_sample_index))
+                        next_sample_index += 1
+        except Exception:
+            for task in in_flight:
+                task.cancel()
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)
+            raise
+
+        if any(sample_output is None for sample_output in outputs):
+            raise RuntimeError("Bounded swe_bridge agent loop scheduler produced incomplete outputs.")
+        return self._postprocess(outputs)
+
+    tqbridge = getattr(agent_loop_module, "tqbridge", None)
+    patched_generate: Any = _patched_generate_sequences
+    if callable(tqbridge):
+        try:
+            patched_generate = tqbridge()(_patched_generate_sequences)
+        except Exception:
+            patched_generate = _patched_generate_sequences
+
+    setattr(worker_cls, "generate_sequences", patched_generate)
+    setattr(worker_cls, _AGENT_LOOP_PATCH_MARKER_ATTR, True)
+    return True
+
+
+def _apply_validation_metrics_update_patch(trainer_cls: Any) -> bool:
+    if getattr(trainer_cls, _VAL_METRICS_PATCH_MARKER_ATTR, False):
+        return True
+
+    original = getattr(trainer_cls, "_val_metrics_update", None)
+    if not callable(original):
+        return False
+
+    setattr(trainer_cls, _ORIGINAL_VAL_METRICS_UPDATE_ATTR, original)
+
+    def _patched_val_metrics_update(
+        self: Any,
+        data_sources: Any,
+        sample_uids: Any,
+        reward_extra_infos_dict: Any,
+        sample_turns: Any,
+    ) -> Any:
+        original_impl = getattr(type(self), _ORIGINAL_VAL_METRICS_UPDATE_ATTR)
+        sanitized_reward_infos = _sanitize_validation_reward_extra_infos(
+            reward_extra_infos_dict,
+            expected_len=_safe_len(sample_uids),
+        )
+        return original_impl(self, data_sources, sample_uids, sanitized_reward_infos, sample_turns)
+
+    setattr(trainer_cls, "_val_metrics_update", _patched_val_metrics_update)
+    setattr(trainer_cls, _VAL_METRICS_PATCH_MARKER_ATTR, True)
+    return True
+
+
+def _safe_len(value: Any) -> int | None:
+    try:
+        return int(len(value))
+    except Exception:
+        return None
+
+
+def _coerce_optional_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, numbers.Integral):
+        candidate = int(value)
+        return candidate if candidate > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            candidate = int(stripped)
+        except ValueError:
+            return None
+        return candidate if candidate > 0 else None
+    return None
+
+
+def _batch_uses_swe_bridge_agent(agent_names: Any) -> bool:
+    if agent_names is None:
+        return False
+    if isinstance(agent_names, (str, bytes)):
+        return str(agent_names).strip() == "swe_bridge_agent"
+    if hasattr(agent_names, "tolist"):
+        try:
+            return _batch_uses_swe_bridge_agent(agent_names.tolist())
+        except Exception:
+            pass
+    if isinstance(agent_names, Sequence):
+        for name in agent_names:
+            if _batch_uses_swe_bridge_agent(name):
+                return True
+        return False
+    iterator = getattr(agent_names, "__iter__", None)
+    if callable(iterator):
+        try:
+            for name in iterator():
+                if _batch_uses_swe_bridge_agent(name):
+                    return True
+            return False
+        except Exception:
+            return False
+    return str(agent_names).strip() == "swe_bridge_agent"
+
+
+def _resolve_swe_agent_loop_max_in_flight(
+    *,
+    worker: Any,
+    batch_size: int,
+    agent_loop_registry: Mapping[str, Any] | None,
+) -> int:
+    env_override = _coerce_optional_positive_int(os.environ.get(_AGENT_LOOP_MAX_IN_FLIGHT_ENV))
+    if env_override is not None:
+        return env_override
+
+    rollout_cfg = _cfg_get(_cfg_get(_cfg_get(worker, "config"), "actor_rollout_ref"), "rollout")
+    agent_cfg = _cfg_get(rollout_cfg, "agent")
+
+    configured = _coerce_optional_positive_int(_cfg_get(agent_cfg, "max_in_flight_tasks"))
+    if configured is not None:
+        return configured
+
+    default_agent_loop = str(_cfg_get(agent_cfg, "default_agent_loop", "")).strip()
+    agent_loop_config = None
+    if default_agent_loop and isinstance(agent_loop_registry, Mapping):
+        agent_loop_config = agent_loop_registry.get(default_agent_loop)
+    env_pool_size = _coerce_optional_positive_int(_cfg_get(agent_loop_config, "env_pool_size"))
+    if env_pool_size is None:
+        return max(1, batch_size)
+
+    num_workers = _coerce_optional_positive_int(_cfg_get(agent_cfg, "num_workers")) or 1
+    return max(1, (env_pool_size + num_workers - 1) // num_workers)
+
+
+def _resolve_response_batch_size(responses: Any) -> int | None:
+    shape = getattr(responses, "shape", None)
+    if isinstance(shape, Sequence) and len(shape) >= 1:
+        try:
+            return int(shape[0])
+        except (TypeError, ValueError):
+            return None
+    try:
+        return int(len(responses))
+    except Exception:
+        return None
+
+
+def _sanitize_reward_result_payload(
+    payload: Any,
+    *,
+    return_dict: bool,
+    sum_reward: bool,
+    expected_len: int | None,
+) -> Any:
+    if return_dict:
+        if isinstance(payload, Mapping):
+            output = dict(payload)
+            output["reward_extra_info"] = _sanitize_validation_reward_extra_infos(
+                output.get("reward_extra_info"),
+                expected_len=expected_len,
+            )
+            return output
+        return payload
+    if sum_reward:
+        return payload
+    if isinstance(payload, tuple) and len(payload) == 2:
+        reward_tensor, reward_extra_infos = payload
+        sanitized_extra_infos = _sanitize_validation_reward_extra_infos(
+            reward_extra_infos,
+            expected_len=expected_len,
+        )
+        return reward_tensor, sanitized_extra_infos
+    return payload
+
+
+def _sanitize_validation_reward_extra_infos(
+    reward_extra_infos_dict: Mapping[str, Any] | None,
+    *,
+    expected_len: int | None = None,
+) -> dict[str, list[Any]]:
+    if reward_extra_infos_dict is None or not hasattr(reward_extra_infos_dict, "items"):
+        return {}
+
+    sanitized: dict[str, list[Any]] = {}
+    for raw_key, raw_values in reward_extra_infos_dict.items():
+        key = str(raw_key)
+        values = _coerce_validation_values_list(raw_values)
+        if expected_len is not None and expected_len >= 0 and len(values) not in {0, expected_len}:
+            continue
+
+        if not values:
+            sanitized[key] = []
+            continue
+
+        if key == "pred":
+            sanitized[key] = [_to_validation_text(item) for item in values]
+            continue
+
+        non_none_values = [item for item in values if item is not None]
+        should_treat_as_numeric = bool(non_none_values) and all(
+            _is_numeric_validation_value(item) for item in non_none_values
+        )
+        if should_treat_as_numeric:
+            sanitized[key] = [_to_validation_numeric_or_nan(item) for item in values]
+        else:
+            sanitized[key] = [_to_validation_text(item) for item in values]
+
+    return sanitized
+
+
+def _coerce_validation_values_list(value: Any) -> list[Any]:
+    current = value
+    if hasattr(current, "tolist"):
+        try:
+            current = current.tolist()
+        except Exception:
+            pass
+    if isinstance(current, Sequence) and not isinstance(current, (str, bytes)):
+        return list(current)
+    return [current]
+
+
+def _unwrap_validation_scalar(value: Any) -> Any:
+    item_fn = getattr(value, "item", None)
+    if callable(item_fn):
+        try:
+            return item_fn()
+        except Exception:
+            return value
+    return value
+
+
+def _is_numeric_validation_value(value: Any) -> bool:
+    scalar = _unwrap_validation_scalar(value)
+    return isinstance(scalar, numbers.Real)
+
+
+def _to_validation_numeric_or_nan(value: Any) -> float:
+    if value is None:
+        return float("nan")
+    scalar = _unwrap_validation_scalar(value)
+    if isinstance(scalar, numbers.Real):
+        return float(scalar)
+    return float("nan")
+
+
+def _to_validation_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="replace")
+        except Exception:
+            return str(value)
+    return str(value)
 
 
 def _resolve_self_distillation_cfg(trainer: Any) -> Any | None:

@@ -226,7 +226,7 @@ sbatch \
     && export EXPERIMENT=small-swe-sdpo_job\$SLURM_JOB_ID_\$(date -u +%Y%m%dT%H%M%SZ) \
     && export RAY_TMPDIR=/data/scratch/\$USER/ray_tmp/\$SLURM_JOB_ID \
     && mkdir -p \$RAY_TMPDIR \
-    && bash scripts/run_sdpo.sh trainer.total_training_steps=5"
+    && bash scripts/run_sdpo.sh trainer.total_training_steps=2"
 ```
 
 Example submit (pin explicit RFT manifest + keep cached parquet):

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
+import subprocess
+import sys
 import time
+from uuid import uuid4
 
 import pytest
 
@@ -31,6 +35,12 @@ from verl_integration.swe_bridge_agent_loop import (
 yaml = pytest.importorskip("yaml")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_container_slot_namespace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SMALL_SWE_GLOBAL_ENV_POOL_NAMESPACE", f"pytest-{uuid4().hex}")
+    monkeypatch.setenv("SMALL_SWE_GLOBAL_ENV_POOL_DIR", str(tmp_path))
+
+
 def _load_yaml_runtime_defaults() -> dict[str, int]:
     config_path = Path(__file__).resolve().parents[1] / "configs/verl/agent_loops/swe_bridge_agent.yaml"
     parsed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -42,6 +52,7 @@ def _load_yaml_runtime_defaults() -> dict[str, int]:
         "container_start_timeout_sec": int(config["container_start_timeout_sec"]),
         "cleanup_timeout_sec": int(config["cleanup_timeout_sec"]),
         "attempt_timeout_sec": int(config["attempt_timeout_sec"]),
+        "container_slot_wait_timeout_sec": int(config.get("container_slot_wait_timeout_sec", 0)),
         "max_tool_calls_per_turn": int(config["max_tool_calls_per_turn"]),
         "verifier_timeout_sec": int(config["verifier_timeout_sec"]),
     }
@@ -276,6 +287,27 @@ def test_append_response_tokens_clips_to_available_budget() -> None:
     assert response_logprobs == [-1.0, -2.0]
 
 
+def test_append_response_tokens_backfills_missing_logprobs_with_zeros() -> None:
+    full_token_ids: list[int] = [100]
+    response_mask: list[int] = []
+    response_logprobs: list[float] = []
+
+    reached_limit = append_response_tokens(
+        full_token_ids=full_token_ids,
+        response_mask=response_mask,
+        response_logprobs=response_logprobs,
+        token_ids=[7, 8, 9],
+        generated=True,
+        max_response_length=4,
+        token_logprobs=None,
+    )
+
+    assert not reached_limit
+    assert full_token_ids == [100, 7, 8, 9]
+    assert response_mask == [1, 1, 1]
+    assert response_logprobs == [0.0, 0.0, 0.0]
+
+
 def test_clip_prompt_for_rollout_context_applies_left_truncation() -> None:
     clipped = _clip_prompt_for_rollout_context([10, 11, 12, 13], prompt_length=2)
     assert clipped == [12, 13]
@@ -337,6 +369,7 @@ def test_resolve_bridge_loop_runtime_config_uses_yaml_aligned_defaults() -> None
     assert resolved.container_start_timeout_sec == yaml_defaults["container_start_timeout_sec"]
     assert resolved.cleanup_timeout_sec == yaml_defaults["cleanup_timeout_sec"]
     assert resolved.attempt_timeout_sec == yaml_defaults["attempt_timeout_sec"]
+    assert resolved.container_slot_wait_timeout_sec == yaml_defaults["container_slot_wait_timeout_sec"]
     assert resolved.max_tool_calls_per_turn == yaml_defaults["max_tool_calls_per_turn"]
     assert resolved.verifier_timeout_sec == yaml_defaults["verifier_timeout_sec"]
 
@@ -348,6 +381,7 @@ def test_resolve_bridge_loop_runtime_config_honors_explicit_overrides() -> None:
         container_start_timeout_sec=44,
         cleanup_timeout_sec=13,
         attempt_timeout_sec=91,
+        container_slot_wait_timeout_sec=37,
         max_tool_calls_per_turn=2,
         verifier_timeout_sec=444,
     )
@@ -357,6 +391,7 @@ def test_resolve_bridge_loop_runtime_config_honors_explicit_overrides() -> None:
     assert resolved.container_start_timeout_sec == 44
     assert resolved.cleanup_timeout_sec == 13
     assert resolved.attempt_timeout_sec == 91
+    assert resolved.container_slot_wait_timeout_sec == 37
     assert resolved.max_tool_calls_per_turn == 2
     assert resolved.verifier_timeout_sec == 444
 
@@ -372,12 +407,12 @@ def test_container_slot_gate_reuses_instances_per_pool_size() -> None:
 
 def test_container_slot_gate_enforces_capacity() -> None:
     gate = _get_container_slot_gate(1)
-    acquired = gate.acquire(blocking=False)
-    assert acquired is True
+    first_lease = gate.try_acquire()
+    assert first_lease is not None
     try:
-        assert gate.acquire(blocking=False) is False
+        assert gate.try_acquire() is None
     finally:
-        gate.release()
+        first_lease.release()
 
 
 def test_remaining_attempt_timeout_sec_accounts_for_elapsed_time() -> None:
@@ -402,7 +437,8 @@ def test_await_with_attempt_timeout_includes_stage_in_error_message() -> None:
 
 def test_acquire_container_slot_times_out_with_stage_context() -> None:
     gate = _get_container_slot_gate(1)
-    assert gate.acquire(blocking=False) is True
+    first_lease = gate.try_acquire()
+    assert first_lease is not None
 
     async def _exercise() -> None:
         with pytest.raises(TimeoutError, match="stage 'wait_container_slot'"):
@@ -411,13 +447,90 @@ def test_acquire_container_slot_times_out_with_stage_context() -> None:
                 task_id="task-17",
                 stage="wait_container_slot",
                 started_at=time.monotonic() - 2.0,
-                attempt_timeout_sec=1,
+                wait_timeout_sec=1,
             )
 
     try:
         asyncio.run(_exercise())
     finally:
-        gate.release()
+        first_lease.release()
+
+
+def test_acquire_container_slot_waits_without_timeout_when_disabled() -> None:
+    gate = _get_container_slot_gate(1)
+    first_lease = gate.try_acquire()
+    assert first_lease is not None
+
+    async def _exercise() -> None:
+        async def _delayed_release() -> None:
+            await asyncio.sleep(0.05)
+            first_lease.release()
+
+        release_task = asyncio.create_task(_delayed_release())
+        try:
+            acquired_lease = None
+            acquired_lease = await asyncio.wait_for(
+                _acquire_container_slot(
+                    gate,
+                    task_id="task-17",
+                    stage="wait_container_slot",
+                    started_at=time.monotonic(),
+                    wait_timeout_sec=0,
+                ),
+                timeout=1.0,
+            )
+        finally:
+            if acquired_lease is not None:
+                acquired_lease.release()
+            await release_task
+
+    asyncio.run(_exercise())
+
+
+def test_container_slot_gate_enforces_capacity_across_processes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = f"pytest-crossproc-{uuid4().hex}"
+    ready_flag = tmp_path / "ready.flag"
+    child_env = dict(os.environ)
+    child_env["SMALL_SWE_GLOBAL_ENV_POOL_NAMESPACE"] = namespace
+    child_env["SMALL_SWE_GLOBAL_ENV_POOL_DIR"] = str(tmp_path)
+    child_code = """
+import time
+from pathlib import Path
+from verl_integration.swe_bridge_agent_loop import _get_container_slot_gate
+
+gate = _get_container_slot_gate(1)
+lease = gate.try_acquire()
+if lease is None:
+    raise SystemExit(2)
+Path(__import__("os").environ["READY_FLAG"]).write_text("ready", encoding="utf-8")
+time.sleep(0.4)
+lease.release()
+"""
+    child_env["READY_FLAG"] = str(ready_flag)
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_code],
+        env=child_env,
+    )
+    try:
+        deadline = time.monotonic() + 5.0
+        while not ready_flag.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready_flag.exists(), "child process failed to acquire slot in time"
+
+        monkeypatch.setenv("SMALL_SWE_GLOBAL_ENV_POOL_NAMESPACE", namespace)
+        monkeypatch.setenv("SMALL_SWE_GLOBAL_ENV_POOL_DIR", str(tmp_path))
+        gate = _get_container_slot_gate(1)
+        assert gate.try_acquire() is None
+    finally:
+        child.wait(timeout=10)
+    assert child.returncode == 0
+
+    final_lease = _get_container_slot_gate(1).try_acquire()
+    assert final_lease is not None
+    final_lease.release()
 
 
 def test_cleanup_container_pool_waits_for_timed_out_acquire_task() -> None:
