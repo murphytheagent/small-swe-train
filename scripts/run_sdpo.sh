@@ -80,6 +80,7 @@ export TASK="${TASK:-${SDPO_TASK_NAME}}"
 SDPO_CLEANUP_ON_EXIT="${SDPO_CLEANUP_ON_EXIT:-1}"
 SDPO_CLEANUP_DRAIN_SEC="${SDPO_CLEANUP_DRAIN_SEC:-30}"
 SDPO_CLEANUP_GRACE_SEC="${SDPO_CLEANUP_GRACE_SEC:-5}"
+SDPO_WANDB_REPAIR_ON_EXIT="${SDPO_WANDB_REPAIR_ON_EXIT:-1}"
 SDPO_CONTAINER_CLEANUP_ENABLE="${SDPO_CONTAINER_CLEANUP_ENABLE:-1}"
 SDPO_CONTAINER_NAME_PREFIX="${SDPO_CONTAINER_NAME_PREFIX:-sdpo-swe-bridge}"
 SDPO_MONITOR_ENABLE="${SDPO_MONITOR_ENABLE:-1}"
@@ -415,9 +416,221 @@ _terminate_sdpo_trainer_if_running() {
   fi
 }
 
+_resolve_sdpo_metrics_jsonl_path() {
+  if [[ -n "${VERL_FILE_LOGGER_PATH:-}" ]]; then
+    printf '%s' "${VERL_FILE_LOGGER_PATH}"
+    return 0
+  fi
+  local file_logger_root="${VERL_FILE_LOGGER_ROOT:-${PROJECT_ROOT}/outputs/metrics}"
+  printf '%s/%s/%s.jsonl' "${file_logger_root}" "${TASK}" "${EXPERIMENT}"
+}
+
+_resolve_sdpo_wandb_run_id() {
+  local trainer_log_path="${SDPO_TRAINER_LOG_PATH:-}"
+  local run_id=""
+
+  if [[ -n "${trainer_log_path}" && -f "${trainer_log_path}" ]]; then
+    run_id="$(
+      grep -Eo 'wandb: setting up run [A-Za-z0-9]+' "${trainer_log_path}" 2>/dev/null \
+        | awk '{print $NF}' \
+        | tail -n 1
+    )"
+  fi
+
+  if [[ -z "${run_id}" ]]; then
+    local latest_run_dir=""
+    latest_run_dir="$(
+      ls -dt "${PROJECT_ROOT}/wandb"/run-* 2>/dev/null | head -n 1 || true
+    )"
+    if [[ -n "${latest_run_dir}" ]]; then
+      run_id="${latest_run_dir##*-}"
+    fi
+  fi
+
+  printf '%s' "${run_id}"
+}
+
+_repair_sdpo_wandb_from_metrics() {
+  if [[ "${SDPO_WANDB_REPAIR_ON_EXIT}" != "1" ]]; then
+    return 0
+  fi
+
+  local wandb_mode_normalized="${WANDB_MODE:-online}"
+  wandb_mode_normalized="$(printf '%s' "${wandb_mode_normalized}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${wandb_mode_normalized}" == "offline" || "${wandb_mode_normalized}" == "disabled" ]]; then
+    return 0
+  fi
+
+  local metrics_jsonl_path
+  metrics_jsonl_path="$(_resolve_sdpo_metrics_jsonl_path)"
+  if [[ ! -s "${metrics_jsonl_path}" ]]; then
+    return 0
+  fi
+
+  local wandb_run_id
+  wandb_run_id="$(_resolve_sdpo_wandb_run_id)"
+  if [[ -z "${wandb_run_id}" ]]; then
+    echo "run_sdpo.sh wandb-repair: unable to resolve run id; skipping."
+    return 0
+  fi
+
+  set +e
+  "${PYTHON_BIN}" - "${wandb_run_id}" "${metrics_jsonl_path}" "${TASK}" "${EXPERIMENT}" <<'PY'
+import json
+import math
+import os
+import sys
+from typing import Any
+
+
+def _normalize_scalar(value: Any) -> Any | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        return None
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _normalize_scalar(item())
+        except Exception:
+            return None
+    return None
+
+
+def _sanitize_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for raw_key, raw_value in payload.items():
+        if not isinstance(raw_key, str):
+            continue
+        normalized = _normalize_scalar(raw_value)
+        if normalized is None:
+            continue
+        sanitized[raw_key] = normalized
+    return sanitized
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _load_rows(path: str) -> list[tuple[int, dict[str, Any]]]:
+    rows: list[tuple[int, dict[str, Any]]] = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            step = _coerce_int(payload.get("step"))
+            if step is None:
+                continue
+            data = _sanitize_payload(payload.get("data"))
+            if not data:
+                continue
+            rows.append((step, data))
+    rows.sort(key=lambda item: item[0])
+    return rows
+
+
+def main() -> int:
+    if len(sys.argv) != 5:
+        print("run_sdpo.sh wandb-repair: invalid args; skipping.")
+        return 0
+
+    run_id = sys.argv[1]
+    metrics_path = sys.argv[2]
+    project_name = sys.argv[3]
+    experiment_name = sys.argv[4]
+    entity = os.environ.get("WANDB_ENTITY") or None
+
+    rows = _load_rows(metrics_path)
+    if not rows:
+        print("run_sdpo.sh wandb-repair: no scalar metric rows to replay.")
+        return 0
+
+    try:
+        import wandb
+    except Exception as exc:
+        print(f"run_sdpo.sh wandb-repair: wandb import failed ({exc}); skipping.")
+        return 0
+
+    run_path = f"{entity}/{project_name}/{run_id}" if entity else f"{project_name}/{run_id}"
+    expected_global_step = rows[-1][0]
+    current_global_step = None
+
+    try:
+        api_run = wandb.Api().run(run_path)
+        current_global_step = _coerce_int(dict(api_run.summary).get("training/global_step"))
+        current_state = str(getattr(api_run, "state", "unknown"))
+        if current_global_step is not None and current_global_step >= expected_global_step and current_state == "finished":
+            print(
+                "run_sdpo.sh wandb-repair: run already finalized at "
+                f"global_step={current_global_step}; skipping replay."
+            )
+            return 0
+    except Exception:
+        pass
+
+    try:
+        init_kwargs = {
+            "project": project_name,
+            "name": experiment_name,
+            "id": run_id,
+            "resume": "allow",
+        }
+        if entity:
+            init_kwargs["entity"] = entity
+        run = wandb.init(**init_kwargs)
+        for step, data in rows:
+            run.log(data, step=step)
+        run.finish(exit_code=0, quiet=True)
+    except Exception as exc:
+        print(f"run_sdpo.sh wandb-repair: replay failed ({exc}).")
+        return 0
+
+    try:
+        api_run = wandb.Api().run(run_path)
+        repaired_global_step = _coerce_int(dict(api_run.summary).get("training/global_step"))
+        repaired_state = str(getattr(api_run, "state", "unknown"))
+        print(
+            "run_sdpo.sh wandb-repair: post-replay state="
+            f"{repaired_state} training/global_step={repaired_global_step}"
+        )
+    except Exception:
+        print("run_sdpo.sh wandb-repair: replay submitted; post-check unavailable.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+  local repair_exit_code=$?
+  set -e
+  if [[ "${repair_exit_code}" -ne 0 ]]; then
+    echo "run_sdpo.sh wandb-repair: helper exited with code ${repair_exit_code}."
+  fi
+  return 0
+}
+
 _on_sdpo_exit() {
   local exit_code=$?
   _stop_sdpo_watchdog
+  _repair_sdpo_wandb_from_metrics
   _cleanup_sdpo_runtime_once
   return "${exit_code}"
 }
