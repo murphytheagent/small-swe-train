@@ -13,6 +13,9 @@ _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 DEFAULT_NUM_RECENT_RAW_BLOCKS = 3
 _DEFAULT_OUTPUT_CONTRACT_BLOCK = build_teacher_output_contract_block()
+_TURN_SUPERVISION_NEXT = "next_turn"
+_TURN_SUPERVISION_CURRENT = "current_turn"
+_TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
 
 
 def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str, bool]:
@@ -128,6 +131,18 @@ def _coerce_int_list(value: Any) -> list[int]:
 def _coerce_binary_mask(value: Any) -> list[int]:
     rows = _coerce_int_list(value)
     return [1 if item else 0 for item in rows]
+
+
+def _normalize_turn_supervision_mode(value: Any) -> str:
+    if value is None:
+        return _TURN_SUPERVISION_NEXT
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _TURN_SUPERVISION_NEXT
+    if normalized not in _TURN_SUPERVISION_MODES:
+        supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
+        raise ValueError(f"turn_supervision_mode must be one of: {supported}")
+    return normalized
 
 
 def _resolve_output_contract_block(sample: Mapping[str, Any]) -> str:
@@ -401,8 +416,11 @@ def build_self_distillation_batch(
     include_student_attempt_for_teacher: bool = True,
     max_reprompt_len: int = 10240,
     num_recent_raw_blocks: int = DEFAULT_NUM_RECENT_RAW_BLOCKS,
+    turn_supervision_mode: str = _TURN_SUPERVISION_NEXT,
 ) -> dict[str, Any]:
     """Build deterministic teacher prompts and mask fields for verl hooks."""
+    normalized_turn_supervision_mode = _normalize_turn_supervision_mode(turn_supervision_mode)
+
     teacher_prompts: list[str] = []
     self_distillation_mask: list[bool] = []
     feedback_packets: list[dict[str, Any]] = []
@@ -438,7 +456,9 @@ def build_self_distillation_batch(
         sample_turn_feedback_packets: list[dict[str, Any]] = []
         sample_turn_prompt_truncated: list[bool] = []
 
-        if len(assistant_turns) >= 2:
+        if assistant_turns and (
+            normalized_turn_supervision_mode == _TURN_SUPERVISION_CURRENT or len(assistant_turns) >= 2
+        ):
             turn_blocks = [
                 _format_turn_block(
                     turn_index=turn_index,
@@ -452,7 +472,12 @@ def build_self_distillation_batch(
                 turn_count=len(assistant_turns),
                 turn_token_lengths=turn_token_lengths,
             )
-            for current_turn_index in range(len(assistant_turns) - 1):
+            if normalized_turn_supervision_mode == _TURN_SUPERVISION_CURRENT:
+                turn_indices = range(len(assistant_turns))
+            else:
+                turn_indices = range(len(assistant_turns) - 1)
+
+            for current_turn_index in turn_indices:
                 prompt, _has_teacher_signal, metadata = _build_turn_prompt(
                     sample,
                     current_turn_index=current_turn_index,
@@ -462,7 +487,10 @@ def build_self_distillation_batch(
                     max_reprompt_len=max_reprompt_len,
                     num_recent_raw_blocks=num_recent_raw_blocks,
                 )
-                target_span = spans[current_turn_index + 1] if current_turn_index + 1 < len(spans) else None
+                if normalized_turn_supervision_mode == _TURN_SUPERVISION_CURRENT:
+                    target_span = spans[current_turn_index] if current_turn_index < len(spans) else None
+                else:
+                    target_span = spans[current_turn_index + 1] if current_turn_index + 1 < len(spans) else None
                 target_mask = _build_mask_from_span(width=len(response_mask), span=target_span)
                 is_active = any(target_mask)
 

@@ -223,8 +223,14 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
         include_student_attempt_for_teacher,
         max_reprompt_len,
         num_recent_raw_blocks,
+        turn_supervision_mode,
     ):
-        _ = include_student_attempt_for_teacher, max_reprompt_len, num_recent_raw_blocks
+        _ = (
+            include_student_attempt_for_teacher,
+            max_reprompt_len,
+            num_recent_raw_blocks,
+            turn_supervision_mode,
+        )
         captured["resolved"] = [bool(row.get("resolved")) for row in rows]
         return {
             "teacher_prompts": ["fix one", "fix two"],
@@ -300,6 +306,8 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     assert metrics["self_distillation/reprompt_sample_fraction"] == pytest.approx(0.5)
     assert metrics["self_distillation/prompt_truncated_fraction"] == pytest.approx(0.5)
     assert metrics["self_distillation/empty_target_batch"] == pytest.approx(0.0)
+    assert metrics["self_distillation/turn_supervision_mode_next_turn"] == pytest.approx(1.0)
+    assert metrics["self_distillation/turn_supervision_mode_current_turn"] == pytest.approx(0.0)
 
 
 def test_turn_level_actor_expansion_builds_per_turn_rows() -> None:
@@ -554,8 +562,15 @@ def test_patched_distillation_hook_emits_turn_level_tensors(
         include_student_attempt_for_teacher,
         max_reprompt_len,
         num_recent_raw_blocks,
+        turn_supervision_mode,
     ):
-        _ = rows, include_student_attempt_for_teacher, max_reprompt_len, num_recent_raw_blocks
+        _ = (
+            rows,
+            include_student_attempt_for_teacher,
+            max_reprompt_len,
+            num_recent_raw_blocks,
+            turn_supervision_mode,
+        )
         return {
             "teacher_prompts": ["row-level"],
             "self_distillation_mask": [True],

@@ -19,6 +19,9 @@ _ORIGINAL_DISTILL_ATTR = "_small_swe_original_maybe_build_self_distillation_batc
 _ACTOR_PATCH_MARKER_ATTR = "_small_swe_turn_level_actor_patch_applied"
 _ORIGINAL_ACTOR_UPDATE_ATTR = "_small_swe_original_update_policy"
 _DISTRIBUTED_TURN_LEVEL_EXPANSION_ENV = "SMALL_SWE_ENABLE_DISTRIBUTED_TURN_LEVEL_EXPANSION"
+_TURN_SUPERVISION_NEXT = "next_turn"
+_TURN_SUPERVISION_CURRENT = "current_turn"
+_TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
 _TURN_LEVEL_REQUIRED_KEYS = {
     "turn_teacher_input_ids",
     "turn_teacher_attention_mask",
@@ -54,6 +57,18 @@ def _should_skip_turn_level_expansion_for_distributed() -> bool:
         return distributed.get_world_size() > 1
     except Exception:
         return True
+
+
+def _normalize_turn_supervision_mode(value: Any) -> str:
+    if value is None:
+        return _TURN_SUPERVISION_NEXT
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _TURN_SUPERVISION_NEXT
+    if normalized not in _TURN_SUPERVISION_MODES:
+        supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
+        raise ValueError(f"turn_supervision_mode must be one of: {supported}")
+    return normalized
 
 
 def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) -> bool:
@@ -163,11 +178,15 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             )
             max_reprompt_len = int(_cfg_get(self_distillation_cfg, "max_reprompt_len", 10240))
             num_recent_raw_blocks = int(_cfg_get(self_distillation_cfg, "num_recent_raw_blocks", 3))
+            turn_supervision_mode = _normalize_turn_supervision_mode(
+                _cfg_get(self_distillation_cfg, "turn_supervision_mode", _TURN_SUPERVISION_NEXT)
+            )
             reprompt_batch = build_self_distillation_batch(
                 rows,
                 include_student_attempt_for_teacher=include_student_attempt,
                 max_reprompt_len=max_reprompt_len,
                 num_recent_raw_blocks=num_recent_raw_blocks,
+                turn_supervision_mode=turn_supervision_mode,
             )
             teacher_prompts = [str(item) for item in reprompt_batch.get("teacher_prompts", [])]
             if not teacher_prompts:
@@ -240,7 +259,20 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
                 "self_distillation/prompt_truncated_fraction": sum(prompt_truncated) / batch_size,
                 "self_distillation/empty_target_batch": 1.0 if active_count == 0 else 0.0,
                 "self_distillation/turn_pair_count_per_sample": turn_pair_count / batch_size,
+                "self_distillation/turn_supervision_mode_next_turn": (
+                    1.0 if turn_supervision_mode == _TURN_SUPERVISION_NEXT else 0.0
+                ),
+                "self_distillation/turn_supervision_mode_current_turn": (
+                    1.0 if turn_supervision_mode == _TURN_SUPERVISION_CURRENT else 0.0
+                ),
             }
+            LOGGER.debug(
+                "Built self-distillation batch with turn_supervision_mode=%s (active=%s/%s, turn_pairs=%s).",
+                turn_supervision_mode,
+                active_count,
+                len(rows),
+                turn_pair_count,
+            )
             tensors = {
                 "teacher_input_ids": teacher_input_ids,
                 "teacher_attention_mask": teacher_attention_mask,

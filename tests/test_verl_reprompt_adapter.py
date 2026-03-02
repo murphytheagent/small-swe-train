@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from verl_integration.reprompt_adapter import build_self_distillation_batch
 
 
@@ -199,3 +201,96 @@ def test_build_self_distillation_batch_recent_raw_window_handles_short_histories
     assert "[TURN_0]" in prompt_current_turn_2
     assert "[TURN_1]" in prompt_current_turn_2
     assert "[TURN_2]" in prompt_current_turn_2
+
+
+def test_turn_supervision_next_turn_compatibility() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 0, 1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1", "turn-2"],
+            "trajectory_assistant_turn_token_lengths": [2, 2, 2],
+            "trajectory_turn_tool_response_blocks": [
+                ["<tool_response>a</tool_response>"],
+                ["<tool_response>b</tool_response>"],
+                ["<tool_response>c</tool_response>"],
+            ],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, turn_supervision_mode="next_turn")
+
+    assert len(batch["turn_teacher_prompts"][0]) == 2
+    assert batch["turn_distillation_mask"][0] == [True, True]
+    assert batch["turn_response_masks"][0][0] == [0, 0, 0, 0, 1, 1, 0, 0, 0]
+    assert batch["turn_response_masks"][0][1] == [0, 0, 0, 0, 0, 0, 0, 1, 1]
+
+
+def test_turn_supervision_current_turn_exact_masks() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 0, 1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1", "turn-2"],
+            "trajectory_assistant_turn_token_lengths": [2, 2, 2],
+            "trajectory_turn_tool_response_blocks": [
+                ["<tool_response>a</tool_response>"],
+                ["<tool_response>b</tool_response>"],
+                ["<tool_response>c</tool_response>"],
+            ],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, turn_supervision_mode="current_turn")
+
+    assert len(batch["turn_teacher_prompts"][0]) == 3
+    assert batch["turn_distillation_mask"][0] == [True, True, True]
+    assert batch["turn_response_masks"][0] == [
+        [1, 1, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 1, 1],
+    ]
+
+
+def test_current_turn_includes_first_and_last_turn_when_spans_exist() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 0, 0, 1],
+            "trajectory_assistant_turns": ["first", "middle", "last"],
+            "trajectory_assistant_turn_token_lengths": [1, 0, 1],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"], ["r2"]],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, turn_supervision_mode="current_turn")
+
+    assert len(batch["turn_teacher_prompts"][0]) == 3
+    assert batch["turn_distillation_mask"][0] == [True, False, True]
+    assert batch["turn_response_masks"][0][0] == [1, 0, 0, 0]
+    assert batch["turn_response_masks"][0][2] == [0, 0, 0, 1]
+
+
+def test_current_turn_handles_zero_length_and_span_mismatch() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 0, 1, 0],
+            "trajectory_assistant_turns": ["t0", "t1", "t2", "t3"],
+            "trajectory_assistant_turn_token_lengths": [1, 0, 1, 2],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"], ["r2"], ["r3"]],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, turn_supervision_mode="current_turn")
+
+    assert len(batch["turn_teacher_prompts"][0]) == 4
+    assert batch["turn_distillation_mask"][0] == [True, False, True, False]
+    assert all(len(mask) == 4 for mask in batch["turn_response_masks"][0])
+    assert batch["turn_response_masks"][0][1] == [0, 0, 0, 0]
+    assert batch["turn_response_masks"][0][3] == [0, 0, 0, 0]
+
+
+def test_invalid_turn_supervision_mode_raises() -> None:
+    with pytest.raises(ValueError, match="turn_supervision_mode"):
+        build_self_distillation_batch([], turn_supervision_mode="bad_mode")

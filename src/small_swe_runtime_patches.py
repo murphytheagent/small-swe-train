@@ -22,6 +22,9 @@ _MISTRAL_MODEL_TYPES = {
     "pixtral",
 }
 _TORCH_DTYPE_DEPRECATION_MESSAGE = "`torch_dtype` is deprecated! Use `dtype` instead!"
+_TURN_SUPERVISION_NEXT = "next_turn"
+_TURN_SUPERVISION_CURRENT = "current_turn"
+_TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
 
 
 class _TorchDtypeDeprecationFilter(logging.Filter):
@@ -39,6 +42,18 @@ def _coerce_bool_env(name: str, *, default: bool) -> bool:
         return default
     normalized = value.strip().lower()
     return normalized in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _normalize_turn_supervision_mode(value: Any) -> str:
+    if value is None:
+        return _TURN_SUPERVISION_NEXT
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _TURN_SUPERVISION_NEXT
+    if normalized not in _TURN_SUPERVISION_MODES:
+        supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
+        raise ValueError(f"turn_supervision_mode must be one of: {supported}")
+    return normalized
 
 
 def _install_flash_attn_find_spec_guard() -> None:
@@ -110,31 +125,50 @@ def _install_self_distillation_config_compat_patch() -> None:
     except Exception:
         return
 
-    # Newer verl versions may already expose this field natively.
+    # Newer verl versions may already expose small-swe SDPO fields natively.
     dataclass_fields = getattr(SelfDistillationConfig, "__dataclass_fields__", {})
-    if isinstance(dataclass_fields, dict) and "num_recent_raw_blocks" in dataclass_fields:
+    has_native_num_recent = isinstance(dataclass_fields, dict) and "num_recent_raw_blocks" in dataclass_fields
+    has_native_turn_supervision_mode = (
+        isinstance(dataclass_fields, dict) and "turn_supervision_mode" in dataclass_fields
+    )
+    if has_native_num_recent and has_native_turn_supervision_mode:
         return
 
-    if getattr(SelfDistillationConfig, "_small_swe_num_recent_raw_blocks_compat", False):
+    if getattr(SelfDistillationConfig, "_small_swe_self_distillation_compat", False):
         return
 
     original_init = SelfDistillationConfig.__init__
+    missing = object()
 
     def _small_swe_self_distillation_init(self, *args, **kwargs):
-        raw_num_recent_raw_blocks = kwargs.pop("num_recent_raw_blocks", None)
+        raw_num_recent_raw_blocks: Any = missing
+        if not has_native_num_recent:
+            raw_num_recent_raw_blocks = kwargs.pop("num_recent_raw_blocks", missing)
+
+        raw_turn_supervision_mode: Any = missing
+        if not has_native_turn_supervision_mode:
+            raw_turn_supervision_mode = kwargs.pop("turn_supervision_mode", missing)
+
         original_init(self, *args, **kwargs)
-        value = 3 if raw_num_recent_raw_blocks is None else raw_num_recent_raw_blocks
-        try:
-            normalized = int(value)
-        except (TypeError, ValueError):
-            normalized = 3
-        normalized = max(normalized, 0)
-        # BaseConfig allows setting new fields once on frozen configs.
-        setattr(self, "num_recent_raw_blocks", normalized)
+
+        if not has_native_num_recent:
+            value = 3 if raw_num_recent_raw_blocks is missing else raw_num_recent_raw_blocks
+            try:
+                normalized = int(value)
+            except (TypeError, ValueError):
+                normalized = 3
+            normalized = max(normalized, 0)
+            # BaseConfig allows setting new fields once on frozen configs.
+            setattr(self, "num_recent_raw_blocks", normalized)
+
+        if not has_native_turn_supervision_mode:
+            mode_value = _TURN_SUPERVISION_NEXT if raw_turn_supervision_mode is missing else raw_turn_supervision_mode
+            normalized_mode = _normalize_turn_supervision_mode(mode_value)
+            setattr(self, "turn_supervision_mode", normalized_mode)
 
     _small_swe_self_distillation_init.__name__ = "_small_swe_self_distillation_init"
     SelfDistillationConfig.__init__ = _small_swe_self_distillation_init
-    setattr(SelfDistillationConfig, "_small_swe_num_recent_raw_blocks_compat", True)
+    setattr(SelfDistillationConfig, "_small_swe_self_distillation_compat", True)
 
 
 def _install_sdpo_runtime_patch_import_guard() -> None:

@@ -142,7 +142,7 @@ def test_sitecustomize_skips_sdpo_patch_until_ray_trainer_class_ready(monkeypatc
     assert calls["count"] == 0
 
 
-def test_sitecustomize_accepts_num_recent_raw_blocks_on_older_verl_config(monkeypatch) -> None:
+def test_sitecustomize_accepts_self_distillation_compat_fields_on_older_verl_config(monkeypatch) -> None:
     class _FakeSelfDistillationConfig:
         def __init__(self, alpha: float = 0.0) -> None:
             self.alpha = alpha
@@ -162,12 +162,43 @@ def test_sitecustomize_accepts_num_recent_raw_blocks_on_older_verl_config(monkey
     original_import = builtins.__import__
     try:
         sitecustomize.apply_small_swe_runtime_patches()
-        cfg = _FakeSelfDistillationConfig(alpha=0.25, num_recent_raw_blocks=7)
+        cfg = _FakeSelfDistillationConfig(
+            alpha=0.25,
+            num_recent_raw_blocks=7,
+            turn_supervision_mode="current_turn",
+        )
     finally:
         builtins.__import__ = original_import
 
     assert cfg.alpha == 0.25
     assert getattr(cfg, "num_recent_raw_blocks") == 7
+    assert getattr(cfg, "turn_supervision_mode") == "current_turn"
+
+
+def test_sitecustomize_rejects_invalid_turn_supervision_mode_on_older_verl_config(monkeypatch) -> None:
+    class _FakeSelfDistillationConfig:
+        def __init__(self, alpha: float = 0.0) -> None:
+            self.alpha = alpha
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_workers_pkg = types.ModuleType("verl.workers")
+    fake_config_pkg = types.ModuleType("verl.workers.config")
+    fake_actor_module = types.ModuleType("verl.workers.config.actor")
+    fake_actor_module.SelfDistillationConfig = _FakeSelfDistillationConfig
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers", fake_workers_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config", fake_config_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config.actor", fake_actor_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    original_import = builtins.__import__
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+        with pytest.raises(ValueError, match="turn_supervision_mode"):
+            _FakeSelfDistillationConfig(alpha=0.25, turn_supervision_mode="bad_mode")
+    finally:
+        builtins.__import__ = original_import
 
 
 def test_sitecustomize_sets_local_rank_from_rank_in_ray_noset_mode(monkeypatch) -> None:
