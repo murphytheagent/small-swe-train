@@ -78,6 +78,7 @@ export SDPO_RUN_LABEL
 export EXPERIMENT="${EXPERIMENT:-${SDPO_TASK_NAME}_${SDPO_RUN_LABEL}}"
 export TASK="${TASK:-${SDPO_TASK_NAME}}"
 SDPO_CLEANUP_ON_EXIT="${SDPO_CLEANUP_ON_EXIT:-1}"
+SDPO_CLEANUP_DRAIN_SEC="${SDPO_CLEANUP_DRAIN_SEC:-30}"
 SDPO_CLEANUP_GRACE_SEC="${SDPO_CLEANUP_GRACE_SEC:-5}"
 SDPO_CONTAINER_CLEANUP_ENABLE="${SDPO_CONTAINER_CLEANUP_ENABLE:-1}"
 SDPO_CONTAINER_NAME_PREFIX="${SDPO_CONTAINER_NAME_PREFIX:-sdpo-swe-bridge}"
@@ -129,6 +130,7 @@ _cleanup_slurm_job_ray_processes() {
   [[ -n "${job_id}" ]] || return 0
 
   local -a pids=()
+  local -a pids_after_drain=()
   local -a still_running=()
   local pid
   while IFS= read -r pid; do
@@ -137,6 +139,35 @@ _cleanup_slurm_job_ray_processes() {
   done < <(_collect_slurm_job_ray_pids "${job_id}")
   if [[ "${#pids[@]}" -eq 0 ]]; then
     return 0
+  fi
+
+  if [[ "${SDPO_CLEANUP_DRAIN_SEC}" =~ ^[0-9]+$ ]] && [[ "${SDPO_CLEANUP_DRAIN_SEC}" -gt 0 ]]; then
+    local drain_deadline_epoch
+    local now_epoch
+    drain_deadline_epoch=$(( $(date +%s) + SDPO_CLEANUP_DRAIN_SEC ))
+    pids_after_drain=("${pids[@]}")
+    while [[ "${#pids_after_drain[@]}" -gt 0 ]]; do
+      now_epoch="$(date +%s)"
+      if [[ "${now_epoch}" -ge "${drain_deadline_epoch}" ]]; then
+        break
+      fi
+      local -a next_still_running=()
+      for pid in "${pids_after_drain[@]}"; do
+        if kill -0 "${pid}" 2>/dev/null; then
+          next_still_running+=("${pid}")
+        fi
+      done
+      pids_after_drain=("${next_still_running[@]}")
+      if [[ "${#pids_after_drain[@]}" -eq 0 ]]; then
+        break
+      fi
+      sleep 1
+    done
+    if [[ "${#pids_after_drain[@]}" -eq 0 ]]; then
+      echo "run_sdpo.sh cleanup: all runtime processes exited during ${SDPO_CLEANUP_DRAIN_SEC}s drain window for SLURM job ${job_id}."
+      return 0
+    fi
+    pids=("${pids_after_drain[@]}")
   fi
 
   echo "run_sdpo.sh cleanup: sending SIGTERM to ${#pids[@]} runtime process(es) for SLURM job ${job_id}."
