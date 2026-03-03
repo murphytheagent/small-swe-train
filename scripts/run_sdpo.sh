@@ -93,6 +93,7 @@ SDPO_PROC_ROOT="${SDPO_PROC_ROOT:-/proc}"
 _SDPO_CLEANUP_COMPLETED=0
 _SDPO_MONITOR_PID=""
 _SDPO_TRAINER_PID=""
+_SDPO_TRAINER_LAUNCHED=0
 SDPO_WANDB_PROJECT_NAME="${SDPO_WANDB_PROJECT_NAME:-${SDPO_WANDB_PROJECT:-${WANDB_PROJECT:-}}}"
 
 _resolve_slurm_job_id() {
@@ -501,6 +502,11 @@ _repair_sdpo_wandb_from_metrics() {
     return 0
   fi
 
+  if [[ "${_SDPO_TRAINER_LAUNCHED}" != "1" ]]; then
+    echo "run_sdpo.sh wandb-repair: trainer launch never started; skipping."
+    return 0
+  fi
+
   local metrics_jsonl_path
   metrics_jsonl_path="$(_resolve_sdpo_metrics_jsonl_path)"
   if [[ ! -s "${metrics_jsonl_path}" ]]; then
@@ -765,6 +771,50 @@ _extract_override_value() {
   return 1
 }
 
+_resolve_sdpo_wandb_project_token() {
+  local project_token="${1:-}"
+  [[ -n "${project_token}" ]] || return 1
+
+  local resolved=""
+  resolved="$("${PYTHON_BIN}" - "${project_token}" <<'PY' 2>/dev/null || true
+import os
+import re
+import sys
+
+
+def _strip_quotes(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+value = _strip_quotes(sys.argv[1])
+env_match = re.fullmatch(r"\$\{oc\.env:([A-Za-z_][A-Za-z0-9_]*)(?:,(.*))?\}", value)
+if env_match:
+    env_key = env_match.group(1)
+    default_value = env_match.group(2)
+    env_value = os.environ.get(env_key)
+    if env_value not in (None, ""):
+        value = env_value
+    elif default_value is not None:
+        value = _strip_quotes(default_value)
+    else:
+        raise SystemExit(1)
+
+if '${' in value:
+    raise SystemExit(1)
+
+print(value)
+PY
+)"
+
+  if [[ -z "${resolved}" ]]; then
+    return 1
+  fi
+  printf '%s' "${resolved}"
+}
+
 _resolve_sdpo_wandb_project_name() {
   local config_dir_override="${CONFIG_DIR}"
   local config_name_override="sdpo_swe"
@@ -806,8 +856,12 @@ _resolve_sdpo_wandb_project_name() {
   local arg_project_name=""
   arg_project_name="$(_extract_override_value "trainer.project_name" "$@" || true)"
   if [[ -n "${arg_project_name}" ]]; then
-    printf '%s' "${arg_project_name}"
-    return 0
+    local resolved_arg_project_name=""
+    resolved_arg_project_name="$(_resolve_sdpo_wandb_project_token "${arg_project_name}" || true)"
+    if [[ -n "${resolved_arg_project_name}" ]]; then
+      printf '%s' "${resolved_arg_project_name}"
+      return 0
+    fi
   fi
   local default_project_name=""
   default_project_name="$("${PYTHON_BIN}" - "${config_path}" <<'PY' 2>/dev/null || true
@@ -853,12 +907,20 @@ raise SystemExit(1)
 PY
 )"
   if [[ -n "${default_project_name}" ]]; then
-    printf '%s' "${default_project_name}"
-    return 0
+    local resolved_default_project_name=""
+    resolved_default_project_name="$(_resolve_sdpo_wandb_project_token "${default_project_name}" || true)"
+    if [[ -n "${resolved_default_project_name}" ]]; then
+      printf '%s' "${resolved_default_project_name}"
+      return 0
+    fi
   fi
   if [[ -n "${SDPO_WANDB_PROJECT_NAME:-}" ]]; then
-    printf '%s' "${SDPO_WANDB_PROJECT_NAME}"
-    return 0
+    local resolved_env_project_name=""
+    resolved_env_project_name="$(_resolve_sdpo_wandb_project_token "${SDPO_WANDB_PROJECT_NAME}" || true)"
+    if [[ -n "${resolved_env_project_name}" ]]; then
+      printf '%s' "${resolved_env_project_name}"
+      return 0
+    fi
   fi
   printf '%s' "${TASK}"
 }
@@ -1291,6 +1353,7 @@ if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
   mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"
   : > "${SDPO_TRAINER_LOG_PATH}"
   echo "run_sdpo.sh watchdog: enabled interval=${SDPO_MONITOR_INTERVAL_SEC}s stall_warn=${SDPO_STALL_WARN_SEC}s trainer_log=${SDPO_TRAINER_LOG_PATH}"
+  _SDPO_TRAINER_LAUNCHED=1
   set +e
   "${CMD[@]}" > >(tee -a "${SDPO_TRAINER_LOG_PATH}") 2>&1 &
   _SDPO_TRAINER_PID="$!"
@@ -1302,6 +1365,7 @@ if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
   _stop_sdpo_watchdog
 else
   echo "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)"
+  _SDPO_TRAINER_LAUNCHED=1
   set +e
   "${CMD[@]}"
   TRAINER_EXIT_CODE=$?
