@@ -78,7 +78,9 @@ export SDPO_RUN_LABEL
 export EXPERIMENT="${EXPERIMENT:-${SDPO_TASK_NAME}_${SDPO_RUN_LABEL}}"
 export TASK="${TASK:-${SDPO_TASK_NAME}}"
 SDPO_CLEANUP_ON_EXIT="${SDPO_CLEANUP_ON_EXIT:-1}"
+SDPO_CLEANUP_DRAIN_SEC="${SDPO_CLEANUP_DRAIN_SEC:-30}"
 SDPO_CLEANUP_GRACE_SEC="${SDPO_CLEANUP_GRACE_SEC:-5}"
+SDPO_WANDB_REPAIR_ON_EXIT="${SDPO_WANDB_REPAIR_ON_EXIT:-1}"
 SDPO_CONTAINER_CLEANUP_ENABLE="${SDPO_CONTAINER_CLEANUP_ENABLE:-1}"
 SDPO_CONTAINER_NAME_PREFIX="${SDPO_CONTAINER_NAME_PREFIX:-sdpo-swe-bridge}"
 SDPO_MONITOR_ENABLE="${SDPO_MONITOR_ENABLE:-1}"
@@ -87,9 +89,18 @@ SDPO_STALL_WARN_SEC="${SDPO_STALL_WARN_SEC:-900}"
 SDPO_MONITOR_GPU_SNAPSHOT="${SDPO_MONITOR_GPU_SNAPSHOT:-1}"
 SDPO_MONITOR_LOG_DIR="${SDPO_MONITOR_LOG_DIR:-${PROJECT_ROOT}/outputs/slurm/sdpo_monitor}"
 SDPO_TRAINER_LOG_PATH="${SDPO_TRAINER_LOG_PATH:-}"
+SDPO_PROC_ROOT="${SDPO_PROC_ROOT:-/proc}"
 _SDPO_CLEANUP_COMPLETED=0
 _SDPO_MONITOR_PID=""
 _SDPO_TRAINER_PID=""
+_SDPO_TRAINER_LAUNCHED=0
+_SDPO_TRAINER_EXIT_CODE=0
+_SDPO_TRAINER_LOG_MTIME_BEFORE=0
+_SDPO_TRAINER_LOG_SIZE_BEFORE=0
+_SDPO_METRICS_MTIME_BEFORE=0
+_SDPO_METRICS_SIZE_BEFORE=0
+_SDPO_REPAIR_BASELINE_CAPTURED=0
+SDPO_WANDB_PROJECT_NAME="${SDPO_WANDB_PROJECT_NAME:-${SDPO_WANDB_PROJECT:-${WANDB_PROJECT:-}}}"
 
 _resolve_slurm_job_id() {
   local job_id="${SLURM_JOB_ID:-${SLURM_JOBID:-}}"
@@ -116,12 +127,32 @@ _collect_slurm_job_ray_pids() {
     [[ -n "${pid}" ]] || continue
     [[ "${pid}" =~ ^[0-9]+$ ]] || continue
     [[ "${pid}" != "$$" ]] || continue
-    [[ -r "/proc/${pid}/environ" ]] || continue
-    if tr '\0' '\n' <"/proc/${pid}/environ" \
-      | grep -Eq "^SLURM_JOB_ID=${job_id}$|^SLURM_JOBID=${job_id}$"; then
+    if _pid_matches_slurm_job "${pid}" "${job_id}"; then
       printf '%s\n' "${pid}"
     fi
   done < <(pgrep -u "$(id -u)" -f "${process_pattern}" || true)
+}
+
+_pid_matches_slurm_job() {
+  local pid="$1"
+  local job_id="$2"
+  [[ -n "${job_id}" ]] || return 1
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  local environ_path="${SDPO_PROC_ROOT}/${pid}/environ"
+  [[ -r "${environ_path}" ]] || return 1
+  tr '\0' '\n' <"${environ_path}" | grep -Eq "^SLURM_JOB_ID=${job_id}$|^SLURM_JOBID=${job_id}$"
+}
+
+_collect_live_slurm_job_pids() {
+  local job_id="$1"
+  shift || true
+  local pid
+  for pid in "$@"; do
+    [[ -n "${pid}" ]] || continue
+    if kill -0 "${pid}" 2>/dev/null && _pid_matches_slurm_job "${pid}" "${job_id}"; then
+      printf '%s\n' "${pid}"
+    fi
+  done
 }
 
 _cleanup_slurm_job_ray_processes() {
@@ -129,6 +160,7 @@ _cleanup_slurm_job_ray_processes() {
   [[ -n "${job_id}" ]] || return 0
 
   local -a pids=()
+  local -a pids_after_drain=()
   local -a still_running=()
   local pid
   while IFS= read -r pid; do
@@ -139,15 +171,58 @@ _cleanup_slurm_job_ray_processes() {
     return 0
   fi
 
+  local drain_sec=0
+  if [[ "${SDPO_CLEANUP_DRAIN_SEC}" =~ ^[0-9]+$ ]]; then
+    drain_sec=$((10#${SDPO_CLEANUP_DRAIN_SEC}))
+  fi
+  if (( drain_sec > 0 )); then
+    local drain_deadline_epoch
+    local now_epoch
+    drain_deadline_epoch=$(( $(date +%s) + drain_sec ))
+    pids_after_drain=("${pids[@]}")
+    while [[ "${#pids_after_drain[@]}" -gt 0 ]]; do
+      now_epoch="$(date +%s)"
+      if [[ "${now_epoch}" -ge "${drain_deadline_epoch}" ]]; then
+        break
+      fi
+      local -a next_still_running=()
+      for pid in "${pids_after_drain[@]}"; do
+        if kill -0 "${pid}" 2>/dev/null; then
+          next_still_running+=("${pid}")
+        fi
+      done
+      pids_after_drain=("${next_still_running[@]}")
+      if [[ "${#pids_after_drain[@]}" -eq 0 ]]; then
+        break
+      fi
+      sleep 1
+    done
+    if [[ "${#pids_after_drain[@]}" -eq 0 ]]; then
+      echo "run_sdpo.sh cleanup: all runtime processes exited during ${drain_sec}s drain window for SLURM job ${job_id}."
+      return 0
+    fi
+    pids=("${pids_after_drain[@]}")
+  fi
+
+  local -a verified_pids=()
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    verified_pids+=("${pid}")
+  done < <(_collect_live_slurm_job_pids "${job_id}" "${pids[@]}")
+  if [[ "${#verified_pids[@]}" -eq 0 ]]; then
+    echo "run_sdpo.sh cleanup: no matching runtime processes remained after drain for SLURM job ${job_id}."
+    return 0
+  fi
+  pids=("${verified_pids[@]}")
+
   echo "run_sdpo.sh cleanup: sending SIGTERM to ${#pids[@]} runtime process(es) for SLURM job ${job_id}."
   kill "${pids[@]}" 2>/dev/null || true
   sleep "${SDPO_CLEANUP_GRACE_SEC}"
 
-  for pid in "${pids[@]}"; do
-    if kill -0 "${pid}" 2>/dev/null; then
-      still_running+=("${pid}")
-    fi
-  done
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    still_running+=("${pid}")
+  done < <(_collect_live_slurm_job_pids "${job_id}" "${pids[@]}")
 
   if [[ "${#still_running[@]}" -gt 0 ]]; then
     echo "run_sdpo.sh cleanup: force-killing ${#still_running[@]} lingering process(es)."
@@ -262,6 +337,26 @@ _resolve_file_mtime_epoch() {
   fi
   if mtime="$(stat -f %m "${path}" 2>/dev/null)"; then
     printf '%s' "${mtime}"
+    return 0
+  fi
+
+  printf '0'
+}
+
+_resolve_file_size_bytes() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    printf '0'
+    return 0
+  fi
+
+  local size
+  if size="$(stat -c %s "${path}" 2>/dev/null)"; then
+    printf '%s' "${size}"
+    return 0
+  fi
+  if size="$(stat -f %z "${path}" 2>/dev/null)"; then
+    printf '%s' "${size}"
     return 0
   fi
 
@@ -384,10 +479,297 @@ _terminate_sdpo_trainer_if_running() {
   fi
 }
 
+_resolve_sdpo_metrics_jsonl_path() {
+  if [[ -n "${VERL_FILE_LOGGER_PATH:-}" ]]; then
+    printf '%s' "${VERL_FILE_LOGGER_PATH}"
+    return 0
+  fi
+  local file_logger_root="${VERL_FILE_LOGGER_ROOT:-${PROJECT_ROOT}/outputs/metrics}"
+  printf '%s/%s/%s.jsonl' "${file_logger_root}" "${TASK}" "${EXPERIMENT}"
+}
+
+_resolve_sdpo_wandb_run_id() {
+  local run_id="${SDPO_WANDB_RUN_ID:-${WANDB_RUN_ID:-}}"
+  if [[ -n "${run_id}" ]]; then
+    printf '%s' "${run_id}"
+    return 0
+  fi
+
+  local trainer_log_path="${SDPO_TRAINER_LOG_PATH:-}"
+
+  if [[ -n "${trainer_log_path}" && -f "${trainer_log_path}" ]]; then
+    run_id="$(
+      grep -E 'wandb: setting up run ' "${trainer_log_path}" 2>/dev/null \
+        | sed -E 's/.*wandb: setting up run[[:space:]]+//' \
+        | awk '{print $1}' \
+        | tail -n 1
+    )"
+  fi
+
+  printf '%s' "${run_id}"
+}
+
+_repair_sdpo_wandb_from_metrics() {
+  local trainer_exit_code="${1:-0}"
+  if ! [[ "${trainer_exit_code}" =~ ^-?[0-9]+$ ]]; then
+    trainer_exit_code=0
+  fi
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    return 0
+  fi
+
+  if [[ "${SDPO_WANDB_REPAIR_ON_EXIT}" != "1" ]]; then
+    return 0
+  fi
+
+  local wandb_mode_normalized="${WANDB_MODE:-online}"
+  wandb_mode_normalized="$(printf '%s' "${wandb_mode_normalized}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${wandb_mode_normalized}" == "offline" || "${wandb_mode_normalized}" == "disabled" ]]; then
+    return 0
+  fi
+
+  if [[ "${_SDPO_TRAINER_LAUNCHED}" != "1" ]]; then
+    echo "run_sdpo.sh wandb-repair: trainer launch never started; skipping."
+    return 0
+  fi
+
+  local metrics_jsonl_path
+  metrics_jsonl_path="$(_resolve_sdpo_metrics_jsonl_path)"
+  if [[ ! -s "${metrics_jsonl_path}" ]]; then
+    return 0
+  fi
+
+  local wandb_run_id
+  wandb_run_id="$(_resolve_sdpo_wandb_run_id)"
+  if [[ -z "${wandb_run_id}" ]]; then
+    echo "run_sdpo.sh wandb-repair: unable to resolve run id from trainer log/env; skipping."
+    return 0
+  fi
+
+  set +e
+  "${PYTHON_BIN}" - "${wandb_run_id}" "${metrics_jsonl_path}" "${SDPO_WANDB_PROJECT_NAME}" "${EXPERIMENT}" "${trainer_exit_code}" <<'PY'
+import json
+import math
+import os
+import sys
+from typing import Any
+
+
+def _normalize_scalar(value: Any) -> Any | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        return None
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _normalize_scalar(item())
+        except Exception:
+            return None
+    return None
+
+
+def _sanitize_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for raw_key, raw_value in payload.items():
+        if not isinstance(raw_key, str):
+            continue
+        normalized = _normalize_scalar(raw_value)
+        if normalized is None:
+            continue
+        sanitized[raw_key] = normalized
+    return sanitized
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _load_rows(path: str) -> list[tuple[int, dict[str, Any]]]:
+    rows: list[tuple[int, dict[str, Any]]] = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            step = _coerce_int(payload.get("step"))
+            if step is None:
+                continue
+            data = _sanitize_payload(payload.get("data"))
+            if not data:
+                continue
+            rows.append((step, data))
+    rows.sort(key=lambda item: item[0])
+    return rows
+
+
+def main() -> int:
+    if len(sys.argv) != 6:
+        print("run_sdpo.sh wandb-repair: invalid args; skipping.")
+        return 0
+
+    run_id = sys.argv[1]
+    metrics_path = sys.argv[2]
+    project_name = sys.argv[3]
+    experiment_name = sys.argv[4]
+    trainer_exit_code = _coerce_int(sys.argv[5])
+    if trainer_exit_code is None:
+        trainer_exit_code = 0
+    elif trainer_exit_code < 0:
+        trainer_exit_code = 1
+    entity = os.environ.get("WANDB_ENTITY") or None
+
+    rows = _load_rows(metrics_path)
+    if not rows:
+        print("run_sdpo.sh wandb-repair: no scalar metric rows to replay.")
+        return 0
+
+    try:
+        import wandb
+    except Exception as exc:
+        print(f"run_sdpo.sh wandb-repair: wandb import failed ({exc}); skipping.")
+        return 0
+
+    run_path = f"{entity}/{project_name}/{run_id}" if entity else f"{project_name}/{run_id}"
+    expected_global_step = rows[-1][0]
+    current_global_step = None
+
+    try:
+        api_run = wandb.Api().run(run_path)
+        current_global_step = _coerce_int(dict(api_run.summary).get("training/global_step"))
+        current_state = str(getattr(api_run, "state", "unknown"))
+        if current_global_step is not None and current_global_step >= expected_global_step and current_state == "finished":
+            print(
+                "run_sdpo.sh wandb-repair: run already finalized at "
+                f"global_step={current_global_step}; skipping replay."
+            )
+            return 0
+    except Exception:
+        pass
+
+    try:
+        init_kwargs = {
+            "project": project_name,
+            "name": experiment_name,
+            "id": run_id,
+            "resume": "allow",
+        }
+        if entity:
+            init_kwargs["entity"] = entity
+        run = wandb.init(**init_kwargs)
+        for step, data in rows:
+            run.log(data, step=step)
+        run.finish(exit_code=trainer_exit_code, quiet=True)
+    except Exception as exc:
+        print(f"run_sdpo.sh wandb-repair: replay failed ({exc}).")
+        return 0
+
+    try:
+        api_run = wandb.Api().run(run_path)
+        repaired_global_step = _coerce_int(dict(api_run.summary).get("training/global_step"))
+        repaired_state = str(getattr(api_run, "state", "unknown"))
+        print(
+            "run_sdpo.sh wandb-repair: post-replay state="
+            f"{repaired_state} training/global_step={repaired_global_step}"
+        )
+    except Exception:
+        print("run_sdpo.sh wandb-repair: replay submitted; post-check unavailable.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+  local repair_exit_code=$?
+  set -e
+  if [[ "${repair_exit_code}" -ne 0 ]]; then
+    echo "run_sdpo.sh wandb-repair: helper exited with code ${repair_exit_code}."
+  fi
+  return 0
+}
+
+_capture_sdpo_repair_baseline() {
+  local trainer_log_path="${SDPO_TRAINER_LOG_PATH:-}"
+  _SDPO_TRAINER_LOG_MTIME_BEFORE="$(_resolve_file_mtime_epoch "${trainer_log_path}")"
+  _SDPO_TRAINER_LOG_SIZE_BEFORE="$(_resolve_file_size_bytes "${trainer_log_path}")"
+
+  local metrics_jsonl_path
+  metrics_jsonl_path="$(_resolve_sdpo_metrics_jsonl_path)"
+  _SDPO_METRICS_MTIME_BEFORE="$(_resolve_file_mtime_epoch "${metrics_jsonl_path}")"
+  _SDPO_METRICS_SIZE_BEFORE="$(_resolve_file_size_bytes "${metrics_jsonl_path}")"
+  _SDPO_REPAIR_BASELINE_CAPTURED=1
+}
+
+_mark_sdpo_trainer_launch_observed() {
+  if [[ "${_SDPO_TRAINER_LAUNCHED}" == "1" ]]; then
+    return 0
+  fi
+  if [[ "${_SDPO_REPAIR_BASELINE_CAPTURED}" != "1" ]]; then
+    return 0
+  fi
+
+  local trainer_log_path="${SDPO_TRAINER_LOG_PATH:-}"
+  local trainer_log_mtime_now
+  trainer_log_mtime_now="$(_resolve_file_mtime_epoch "${trainer_log_path}")"
+  local trainer_log_size_now
+  trainer_log_size_now="$(_resolve_file_size_bytes "${trainer_log_path}")"
+  if [[ "${trainer_log_mtime_now}" =~ ^[0-9]+$ ]] \
+    && [[ "${_SDPO_TRAINER_LOG_MTIME_BEFORE}" =~ ^[0-9]+$ ]] \
+    && [[ "${trainer_log_size_now}" =~ ^[0-9]+$ ]] \
+    && [[ "${_SDPO_TRAINER_LOG_SIZE_BEFORE}" =~ ^[0-9]+$ ]]; then
+    if (( 10#${trainer_log_mtime_now} > 10#${_SDPO_TRAINER_LOG_MTIME_BEFORE} )) \
+      || (( 10#${trainer_log_size_now} > 10#${_SDPO_TRAINER_LOG_SIZE_BEFORE} )); then
+      _SDPO_TRAINER_LAUNCHED=1
+      return 0
+    fi
+  fi
+
+  local metrics_jsonl_path
+  metrics_jsonl_path="$(_resolve_sdpo_metrics_jsonl_path)"
+  local metrics_mtime_now
+  metrics_mtime_now="$(_resolve_file_mtime_epoch "${metrics_jsonl_path}")"
+  local metrics_size_now
+  metrics_size_now="$(_resolve_file_size_bytes "${metrics_jsonl_path}")"
+  if [[ "${metrics_mtime_now}" =~ ^[0-9]+$ ]] \
+    && [[ "${_SDPO_METRICS_MTIME_BEFORE}" =~ ^[0-9]+$ ]] \
+    && [[ "${metrics_size_now}" =~ ^[0-9]+$ ]] \
+    && [[ "${_SDPO_METRICS_SIZE_BEFORE}" =~ ^[0-9]+$ ]]; then
+    if (( 10#${metrics_mtime_now} > 10#${_SDPO_METRICS_MTIME_BEFORE} )) \
+      || (( 10#${metrics_size_now} > 10#${_SDPO_METRICS_SIZE_BEFORE} )); then
+      _SDPO_TRAINER_LAUNCHED=1
+      return 0
+    fi
+  fi
+
+  if [[ "${_SDPO_TRAINER_EXIT_CODE}" == "0" ]] && [[ -n "${SDPO_WANDB_RUN_ID:-${WANDB_RUN_ID:-}}" ]]; then
+    _SDPO_TRAINER_LAUNCHED=1
+    return 0
+  fi
+}
+
 _on_sdpo_exit() {
   local exit_code=$?
+  _SDPO_TRAINER_EXIT_CODE="${exit_code}"
   _stop_sdpo_watchdog
   _cleanup_sdpo_runtime_once
+  _mark_sdpo_trainer_launch_observed
+  _repair_sdpo_wandb_from_metrics "${exit_code}"
   return "${exit_code}"
 }
 
@@ -396,6 +778,9 @@ _on_sdpo_int() {
   _stop_sdpo_watchdog
   _terminate_sdpo_trainer_if_running
   _cleanup_sdpo_runtime_once
+  _SDPO_TRAINER_EXIT_CODE=130
+  _SDPO_TRAINER_LAUNCHED=1
+  _repair_sdpo_wandb_from_metrics 130
   exit 130
 }
 
@@ -404,6 +789,9 @@ _on_sdpo_term() {
   _stop_sdpo_watchdog
   _terminate_sdpo_trainer_if_running
   _cleanup_sdpo_runtime_once
+  _SDPO_TRAINER_EXIT_CODE=143
+  _SDPO_TRAINER_LAUNCHED=1
+  _repair_sdpo_wandb_from_metrics 143
   exit 143
 }
 
@@ -445,7 +833,7 @@ _has_override_for_key() {
   local arg
   for arg in "$@"; do
     case "${arg}" in
-      "${key}"=*|+"${key}"=*|~"${key}")
+      "${key}"=*|+"${key}"=*|++"${key}"=*|~"${key}")
         return 0
         ;;
     esac
@@ -456,16 +844,301 @@ _has_override_for_key() {
 _extract_override_value() {
   local prefix="$1"
   shift
+  local found=0
+  local resolved=""
   local arg
   for arg in "$@"; do
     case "${arg}" in
-      "${prefix}"=*|+"${prefix}"=*)
-        printf '%s' "${arg#*=}"
-        return 0
+      "${prefix}"=*|+"${prefix}"=*|++"${prefix}"=*)
+        resolved="${arg#*=}"
+        found=1
         ;;
     esac
   done
+  if [[ "${found}" == "1" ]]; then
+    printf '%s' "${resolved}"
+    return 0
+  fi
   return 1
+}
+
+_resolve_sdpo_wandb_project_token() {
+  local project_token="${1:-}"
+  local project_config_path="${2:-}"
+  [[ -n "${project_token}" ]] || return 1
+
+  local resolved=""
+  resolved="$("${PYTHON_BIN}" - "${project_token}" "${project_config_path}" <<'PY' 2>/dev/null || true
+import os
+import re
+import sys
+from pathlib import Path
+
+
+def _strip_quotes(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", chr(34)):
+        return value[1:-1]
+    return value
+
+
+def _lookup_dotted_path(payload, dotted_path: str):
+    current = payload
+    for part in dotted_path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+value = _strip_quotes(sys.argv[1])
+config_path = Path(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
+max_hops = 4
+for _ in range(max_hops):
+    env_match = re.fullmatch(r"\$\{oc\.env:([A-Za-z_][A-Za-z0-9_]*)(?:,(.*))?\}", value)
+    if env_match:
+        env_key = env_match.group(1)
+        default_value = env_match.group(2)
+        env_value = os.environ.get(env_key)
+        if env_value not in (None, ""):
+            value = env_value
+            continue
+        if default_value is not None:
+            value = _strip_quotes(default_value)
+            continue
+        raise SystemExit(1)
+
+    key_match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_.]*)\}", value)
+    if key_match and config_path is not None and config_path.is_file():
+        try:
+            import yaml
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            resolved = _lookup_dotted_path(payload, key_match.group(1))
+            if isinstance(resolved, (str, int, float, bool)):
+                value = str(resolved)
+                continue
+        except Exception:
+            pass
+    break
+
+if '${' in value:
+    raise SystemExit(1)
+
+print(value)
+PY
+)"
+
+  if [[ -z "${resolved}" ]]; then
+    return 1
+  fi
+  printf '%s' "${resolved}"
+}
+
+_resolve_sdpo_wandb_project_name() {
+  local config_dir_override="${CONFIG_DIR}"
+  local config_name_override="sdpo_swe"
+  local arg
+  local next_is_config_dir=0
+  local next_is_config_name=0
+  for arg in "$@"; do
+    if [[ "${next_is_config_dir}" == "1" ]]; then
+      config_dir_override="${arg}"
+      next_is_config_dir=0
+      continue
+    fi
+    if [[ "${next_is_config_name}" == "1" ]]; then
+      config_name_override="${arg}"
+      next_is_config_name=0
+      continue
+    fi
+    case "${arg}" in
+      --config-dir)
+        next_is_config_dir=1
+        ;;
+      --config-name)
+        next_is_config_name=1
+        ;;
+      --config-dir=*)
+        config_dir_override="${arg#*=}"
+        ;;
+      --config-name=*)
+        config_name_override="${arg#*=}"
+        ;;
+    esac
+  done
+  local config_file_name="${config_name_override}"
+  if [[ "${config_file_name}" != *.yaml ]]; then
+    config_file_name="${config_file_name}.yaml"
+  fi
+  local config_path="${config_dir_override%/}/${config_file_name}"
+
+  local arg_project_name=""
+  arg_project_name="$(_extract_override_value "trainer.project_name" "$@" || true)"
+  if [[ -n "${arg_project_name}" ]]; then
+    local resolved_arg_project_name=""
+    resolved_arg_project_name="$(_resolve_sdpo_wandb_project_token "${arg_project_name}" "${config_path}" || true)"
+    if [[ -n "${resolved_arg_project_name}" ]]; then
+      printf '%s' "${resolved_arg_project_name}"
+      return 0
+    fi
+  fi
+  local default_project_name=""
+  default_project_name="$("${PYTHON_BIN}" - "${config_path}" <<'PY' 2>/dev/null || true
+import re
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+if not config_path.is_file():
+    raise SystemExit(1)
+
+lines = config_path.read_text(encoding="utf-8").splitlines()
+trainer_indent = None
+trainer_child_indent = None
+for line in lines:
+    if trainer_indent is None:
+        if re.match(r"^\s*trainer:\s*(?:#.*)?$", line):
+            trainer_indent = len(line) - len(line.lstrip())
+        continue
+
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+
+    indent = len(line) - len(line.lstrip())
+    if indent <= trainer_indent:
+        break
+    if trainer_child_indent is None:
+        trainer_child_indent = indent
+    if indent != trainer_child_indent:
+        continue
+
+    match = re.match(r"^\s*project_name:\s*(.+?)\s*(?:#.*)?$", line)
+    if not match:
+        continue
+    value = match.group(1).strip()
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        value = value[1:-1]
+    print(value)
+    raise SystemExit(0)
+
+try:
+    import yaml
+except Exception:
+    raise SystemExit(1)
+
+
+def _extract_direct_project_name(payload):
+    if not isinstance(payload, dict):
+        return None
+    trainer = payload.get("trainer")
+    if not isinstance(trainer, dict):
+        trainer_project_name = None
+    else:
+        trainer_project_name = trainer.get("project_name")
+    if isinstance(trainer_project_name, str):
+        trainer_project_name = trainer_project_name.strip()
+        if trainer_project_name:
+            return trainer_project_name
+
+    project_name = payload.get("project_name")
+    if isinstance(project_name, str):
+        project_name = project_name.strip()
+        if project_name:
+            return project_name
+    return None
+
+
+def _iter_default_config_paths(payload, current_path, root_dir):
+    if not isinstance(payload, dict):
+        return
+    defaults = payload.get("defaults")
+    if not isinstance(defaults, list):
+        return
+
+    for entry in defaults:
+        if isinstance(entry, str):
+            token = entry.strip()
+            if not token or token == "_self_":
+                continue
+            token = token.split("@", 1)[0].lstrip("/")
+            if not token:
+                continue
+            rel = token if token.endswith(".yaml") else f"{token}.yaml"
+            yield root_dir / rel
+            yield current_path.parent / rel
+            continue
+
+        if not isinstance(entry, dict):
+            continue
+        for raw_group, raw_target in entry.items():
+            if raw_target in (None, ""):
+                continue
+            group = str(raw_group).split("@", 1)[0].lstrip("/")
+            if not group:
+                continue
+
+            targets = raw_target if isinstance(raw_target, list) else [raw_target]
+            for target in targets:
+                if not isinstance(target, str):
+                    continue
+                target = target.strip()
+                if not target:
+                    continue
+                rel = f"{group}/{target.lstrip('/')}"
+                if not rel.endswith(".yaml"):
+                    rel = f"{rel}.yaml"
+                yield root_dir / rel
+                yield current_path.parent / rel
+
+
+def _resolve_project_name_from_defaults(config_file, root_dir, visited):
+    resolved_path = str(config_file.resolve())
+    if resolved_path in visited or not config_file.is_file():
+        return None
+    visited.add(resolved_path)
+
+    try:
+        payload = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+
+    project_name = _extract_direct_project_name(payload)
+    if project_name:
+        return project_name
+
+    for candidate in _iter_default_config_paths(payload, config_file, root_dir):
+        resolved = _resolve_project_name_from_defaults(candidate, root_dir, visited)
+        if resolved:
+            return resolved
+    return None
+
+
+resolved_from_defaults = _resolve_project_name_from_defaults(config_path, config_path.parent, set())
+if resolved_from_defaults:
+    print(resolved_from_defaults)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+)"
+  if [[ -n "${default_project_name}" ]]; then
+    local resolved_default_project_name=""
+    resolved_default_project_name="$(_resolve_sdpo_wandb_project_token "${default_project_name}" "${config_path}" || true)"
+    if [[ -n "${resolved_default_project_name}" ]]; then
+      printf '%s' "${resolved_default_project_name}"
+      return 0
+    fi
+  fi
+  if [[ -n "${SDPO_WANDB_PROJECT_NAME:-}" ]]; then
+    local resolved_env_project_name=""
+    resolved_env_project_name="$(_resolve_sdpo_wandb_project_token "${SDPO_WANDB_PROJECT_NAME}" || true)"
+    if [[ -n "${resolved_env_project_name}" ]]; then
+      printf '%s' "${resolved_env_project_name}"
+      return 0
+    fi
+  fi
+  printf '%s' "${TASK}"
 }
 
 _count_visible_gpus() {
@@ -828,6 +1501,8 @@ if [[ "${SDPO_ROLLOUT_ONLY_E2E}" == "1" ]]; then
   fi
 fi
 
+SDPO_WANDB_PROJECT_NAME="$(_resolve_sdpo_wandb_project_name "$@")"
+
 CMD=(
   "${PYTHON_BIN}" -m "${SDPO_TRAINER_MODULE}"
   --config-name sdpo_swe
@@ -893,6 +1568,7 @@ echo "run_sdpo.sh launch: train_files=${RESOLVED_TRAIN_FILES:-<config-default>} 
 if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
   mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"
   : > "${SDPO_TRAINER_LOG_PATH}"
+  _capture_sdpo_repair_baseline
   echo "run_sdpo.sh watchdog: enabled interval=${SDPO_MONITOR_INTERVAL_SEC}s stall_warn=${SDPO_STALL_WARN_SEC}s trainer_log=${SDPO_TRAINER_LOG_PATH}"
   set +e
   "${CMD[@]}" > >(tee -a "${SDPO_TRAINER_LOG_PATH}") 2>&1 &
@@ -900,14 +1576,19 @@ if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
   _start_sdpo_watchdog "${_SDPO_TRAINER_PID}" "${SDPO_TRAINER_LOG_PATH}" "${SDPO_MONITOR_INTERVAL_SEC}" "${SDPO_STALL_WARN_SEC}" "${SDPO_MONITOR_GPU_SNAPSHOT}"
   wait "${_SDPO_TRAINER_PID}"
   TRAINER_EXIT_CODE=$?
+  _SDPO_TRAINER_EXIT_CODE="${TRAINER_EXIT_CODE}"
   set -e
   _SDPO_TRAINER_PID=""
   _stop_sdpo_watchdog
 else
   echo "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)"
+  mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"
+  : > "${SDPO_TRAINER_LOG_PATH}"
+  _capture_sdpo_repair_baseline
   set +e
-  "${CMD[@]}"
+  "${CMD[@]}" > >(tee -a "${SDPO_TRAINER_LOG_PATH}") 2>&1
   TRAINER_EXIT_CODE=$?
+  _SDPO_TRAINER_EXIT_CODE="${TRAINER_EXIT_CODE}"
   set -e
 fi
 

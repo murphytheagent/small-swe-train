@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Mapping
@@ -168,6 +170,70 @@ def _write_docker_cleanup_probe_stub(tmp_path: Path) -> Path:
         "  exit 0\n"
         "fi\n"
         "exit 0\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
+def _write_python_wandb_repair_probe_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "python-wandb-repair-probe.sh"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == \"-c\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-m\" ]]; then\n"
+        "  if [[ -n \"${STUB_TRAINER_STDOUT:-}\" ]]; then\n"
+        "    printf '%b\\n' \"${STUB_TRAINER_STDOUT}\"\n"
+        "  fi\n"
+        "  if [[ -n \"${STUB_TRAINER_SLEEP_SEC:-}\" ]]; then\n"
+        "    sleep \"${STUB_TRAINER_SLEEP_SEC}\"\n"
+        "  fi\n"
+        "  exit ${STUB_TRAINER_EXIT_CODE:-0}\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-\" ]]; then\n"
+        "  payload=\"$(cat)\"\n"
+        "  if [[ \"${payload}\" == *\"run_sdpo.sh wandb-repair\"* ]]; then\n"
+        "    if [[ -n \"${STUB_REPAIR_STDOUT_MARKER:-}\" ]]; then\n"
+        "      printf '%s\\n' \"${STUB_REPAIR_STDOUT_MARKER}\"\n"
+        "    fi\n"
+        "    if [[ -n \"${STUB_REPAIR_LOG_FILE:-}\" ]]; then\n"
+        "      printf '%s\\n' \"$*\" >>\"${STUB_REPAIR_LOG_FILE}\"\n"
+        "    fi\n"
+        "    exit 0\n"
+        "  fi\n"
+        f"  printf '%s' \"${{payload}}\" | {shlex.quote(sys.executable)} \"$@\"\n"
+        "  exit $?\n"
+        "fi\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
+def _write_python_cleanup_probe_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "python-cleanup-probe-stub.sh"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == \"-c\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-\" ]]; then\n"
+        "  payload=\"$(cat)\"\n"
+        "  if [[ \"${payload}\" == *\"resolve_sdpo_task_cache_dir\"* ]]; then\n"
+        "    printf '%s\\n' \"${STUB_SDPO_CACHE_DIR:-/tmp/sdpo_task_cache}\"\n"
+        "    exit 0\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-m\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "exec python3 \"$@\"\n",
         encoding="utf-8",
     )
     stub_path.chmod(0o755)
@@ -631,6 +697,1088 @@ def test_run_sdpo_script_allows_disabling_watchdog_monitor(tmp_path: Path) -> No
     assert "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)" in result.stdout
 
 
+def test_run_sdpo_script_skips_wandb_repair_when_run_id_unresolved(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 1, "data": {"training/global_step": 1}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("trainer started\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run ",
+            "WANDB_RUN_ID": "",
+            "SDPO_WANDB_RUN_ID": "",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert "unable to resolve run id from trainer log/env; skipping." in result.stdout
+    assert not repair_log_path.exists()
+
+
+def test_run_sdpo_script_wandb_repair_propagates_trainer_exit_code(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
+            "STUB_TRAINER_EXIT_CODE": "17",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert result.returncode == 17
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[0] == "-"
+    assert repair_argv[1] == "testRun123"
+    assert repair_argv[-1] == "17"
+
+
+def test_run_sdpo_script_wandb_repair_parses_non_alnum_run_id_from_trainer_log(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run run-with_dash_123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run run-with_dash_123",
+            "WANDB_RUN_ID": "",
+            "SDPO_WANDB_RUN_ID": "",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[1] == "run-with_dash_123"
+
+
+def test_run_sdpo_script_wandb_repair_captures_run_id_when_monitor_disabled(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run monitorOff123",
+            "WANDB_RUN_ID": "",
+            "SDPO_WANDB_RUN_ID": "",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[1] == "monitorOff123"
+    assert "wandb: setting up run monitorOff123" in trainer_log_path.read_text(encoding="utf-8")
+
+
+def test_run_sdpo_script_wandb_repair_uses_env_run_id_without_log_banner(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "WANDB_RUN_ID": "envRun123",
+            "SDPO_WANDB_RUN_ID": "",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[1] == "envRun123"
+
+
+def test_run_sdpo_script_wandb_repair_uses_trainer_project_override(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "trainer.project_name=custom-sdpo-project",
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "custom-sdpo-project"
+
+
+def test_run_sdpo_script_wandb_repair_uses_double_plus_trainer_project_override(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "++trainer.project_name=custom-plusplus-project",
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "custom-plusplus-project"
+
+
+def test_run_sdpo_script_wandb_repair_uses_last_trainer_project_override(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "trainer.project_name=first-project",
+            "trainer.project_name=second-project",
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "second-project"
+
+
+def test_run_sdpo_script_wandb_repair_defaults_to_config_project_name(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    broken_python3 = tmp_path / "python3"
+    broken_python3.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == \"-\" ]]; then\n"
+        "  payload=\"$(cat)\"\n"
+        "  if [[ \"${payload}\" == *\"trainer_indent = None\"* ]]; then\n"
+        "    exit 127\n"
+        "  fi\n"
+        f"  printf '%s' \"${{payload}}\" | {shlex.quote(sys.executable)} \"$@\"\n"
+        "  exit $?\n"
+        "fi\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    broken_python3.chmod(0o755)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
+            "SDPO_TASK_NAME": "custom-task-name",
+            "SDPO_WANDB_PROJECT_NAME": "",
+            "SDPO_WANDB_PROJECT": "",
+            "WANDB_PROJECT": "",
+            "PATH": f"{tmp_path}{os.pathsep}{env.get('PATH', '')}",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "small-swe-sdpo"
+
+
+def test_run_sdpo_script_wandb_repair_prefers_config_project_over_wandb_project_env(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
+            "WANDB_PROJECT": "global-wandb-project",
+            "SDPO_WANDB_PROJECT_NAME": "",
+            "SDPO_WANDB_PROJECT": "",
+            "SDPO_TASK_NAME": "custom-task-name",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "small-swe-sdpo"
+
+
+def test_run_sdpo_script_wandb_repair_uses_project_from_overridden_hydra_config(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    custom_config_dir = tmp_path / "custom-configs"
+    custom_config_dir.mkdir()
+    (custom_config_dir / "custom_sdpo.yaml").write_text(
+        "trainer:\n  project_name: custom-config-project\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
+            "WANDB_PROJECT": "global-wandb-project",
+            "SDPO_WANDB_PROJECT_NAME": "",
+            "SDPO_WANDB_PROJECT": "",
+            "SDPO_TASK_NAME": "custom-task-name",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "--config-name",
+            "custom_sdpo",
+            "--config-dir",
+            str(custom_config_dir),
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "custom-config-project"
+
+
+def test_run_sdpo_script_wandb_repair_config_parser_ignores_nested_project_name(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    custom_config_dir = tmp_path / "custom-configs-nested"
+    custom_config_dir.mkdir()
+    (custom_config_dir / "nested_project.yaml").write_text(
+        "trainer:\n"
+        "  nested_block:\n"
+        "    project_name: nested-project-name\n"
+        "  project_name: direct-project-name\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
+            "WANDB_PROJECT": "global-wandb-project",
+            "SDPO_WANDB_PROJECT_NAME": "",
+            "SDPO_WANDB_PROJECT": "",
+            "SDPO_TASK_NAME": "custom-task-name",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "--config-name",
+            "nested_project",
+            "--config-dir",
+            str(custom_config_dir),
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "direct-project-name"
+
+
+def test_run_sdpo_script_wandb_repair_config_parser_accepts_trainer_header_comment(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    custom_config_dir = tmp_path / "custom-configs-commented"
+    custom_config_dir.mkdir()
+    (custom_config_dir / "commented_header.yaml").write_text(
+        "trainer: # inline comment\n"
+        "  project_name: commented-header-project\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
+            "WANDB_PROJECT": "global-wandb-project",
+            "SDPO_WANDB_PROJECT_NAME": "",
+            "SDPO_WANDB_PROJECT": "",
+            "SDPO_TASK_NAME": "custom-task-name",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "--config-name",
+            "commented_header",
+            "--config-dir",
+            str(custom_config_dir),
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "commented-header-project"
+
+
+def test_run_sdpo_script_wandb_repair_resolves_project_from_defaults_tree(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run defaultsTree123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    custom_config_dir = tmp_path / "custom-configs-defaults"
+    (custom_config_dir / "trainer").mkdir(parents=True)
+    (custom_config_dir / "defaults_tree.yaml").write_text(
+        "defaults:\n  - trainer: replay_project\n",
+        encoding="utf-8",
+    )
+    (custom_config_dir / "trainer" / "replay_project.yaml").write_text(
+        "project_name: defaults-tree-project\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run defaultsTree123",
+            "WANDB_PROJECT": "global-wandb-project",
+            "SDPO_WANDB_PROJECT_NAME": "",
+            "SDPO_WANDB_PROJECT": "",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "--config-name",
+            "defaults_tree",
+            "--config-dir",
+            str(custom_config_dir),
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "defaults-tree-project"
+
+
+def test_run_sdpo_script_wandb_repair_skips_when_trainer_launch_never_starts(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "2",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "WANDB_RUN_ID": "staleRun123",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert not repair_log_path.exists()
+
+
+def test_run_sdpo_script_wandb_repair_skips_on_early_trainer_startup_failure(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run staleOldRun\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_EXIT_CODE": "17",
+            "WANDB_RUN_ID": "staleRun123",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert result.returncode == 17
+    assert "trainer launch never started; skipping." in result.stdout
+    assert not repair_log_path.exists()
+
+
+def test_run_sdpo_script_wandb_repair_resolves_oc_env_project_interpolation(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+    custom_config_dir = tmp_path / "custom-configs-oc-env"
+    custom_config_dir.mkdir()
+    (custom_config_dir / "oc_env_project.yaml").write_text(
+        "trainer:\n  project_name: ${oc.env:SDPO_TEST_WANDB_PROJECT,config-fallback-project}\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
+            "SDPO_TEST_WANDB_PROJECT": "resolved-oc-env-project",
+            "WANDB_PROJECT": "",
+            "SDPO_WANDB_PROJECT_NAME": "",
+            "SDPO_WANDB_PROJECT": "",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "--config-name",
+            "oc_env_project",
+            "--config-dir",
+            str(custom_config_dir),
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "resolved-oc-env-project"
+
+
+def test_run_sdpo_script_wandb_repair_resolves_simple_hydra_project_interpolation(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run interpRef123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+    custom_config_dir = tmp_path / "custom-configs-interp-ref"
+    custom_config_dir.mkdir()
+    (custom_config_dir / "interp_ref.yaml").write_text(
+        "project_name: interpolated-project\n"
+        "trainer:\n"
+        "  project_name: ${project_name}\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run interpRef123",
+            "WANDB_PROJECT": "global-wandb-project",
+            "SDPO_WANDB_PROJECT_NAME": "",
+            "SDPO_WANDB_PROJECT": "",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "--config-name",
+            "interp_ref",
+            "--config-dir",
+            str(custom_config_dir),
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "interpolated-project"
+
+
+def test_run_sdpo_script_dry_run_does_not_trigger_wandb_repair(tmp_path: Path) -> None:
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run dryRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    _run_script(
+        "run_sdpo.sh",
+        env_overrides={
+            "PYTHON_BIN": str(fake_python),
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "SDPO_WANDB_RUN_ID": "dryRun123",
+        },
+    )
+
+    assert not repair_log_path.exists()
+
+
 def test_run_sdpo_script_cleanup_falls_back_to_run_label_when_slurm_label_lookup_empty(
     tmp_path: Path,
 ) -> None:
@@ -672,6 +1820,320 @@ def test_run_sdpo_script_cleanup_falls_back_to_run_label_when_slurm_label_lookup
     assert any("label=small_swe.run_label=run-fallback-4242" in line for line in invocations)
     assert not any("name=sdpo-swe-bridge-" in line for line in invocations)
     assert any("rm -f container-from-run-label" in line for line in invocations)
+
+
+def test_run_sdpo_script_cleanup_revalidates_slurm_job_before_signaling(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_cleanup_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    fake_proc_root = tmp_path / "fake-proc"
+    fake_proc_root.mkdir()
+    cache_dir = tmp_path / "cache-dir"
+    cache_dir.mkdir()
+
+    ray_proc = subprocess.Popen(
+        ["bash", "-lc", "exec -a raylet sleep 120"],
+        env={
+            **os.environ,
+            "SLURM_JOB_ID": "4242",
+        },
+    )
+
+    pid_dir = fake_proc_root / str(ray_proc.pid)
+    pid_dir.mkdir(parents=True)
+    environ_path = pid_dir / "environ"
+    environ_path.write_bytes(b"SLURM_JOB_ID=4242\0")
+
+    try:
+        def _flip_job_id_after_drain_start() -> None:
+            time.sleep(0.5)
+            environ_path.write_bytes(b"SLURM_JOB_ID=9999\0")
+
+        mutator = threading.Thread(target=_flip_job_id_after_drain_start, daemon=True)
+        mutator.start()
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHON_BIN": str(fake_python),
+                "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+                "SDPO_TRAINER_MODULE": "dummy.module",
+                "SDPO_MONITOR_ENABLE": "0",
+                "SDPO_WANDB_REPAIR_ON_EXIT": "0",
+                "SLURM_JOB_ID": "4242",
+                "SLURM_JOBID": "4242",
+                "SDPO_PROC_ROOT": str(fake_proc_root),
+                "SDPO_CLEANUP_DRAIN_SEC": "2",
+                "SDPO_CLEANUP_GRACE_SEC": "0",
+                "STUB_SDPO_CACHE_DIR": str(cache_dir),
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                str(script_path),
+                f"data.train_files={fake_parquet}",
+                f"data.val_files={fake_parquet}",
+            ],
+            cwd=_repo_root(),
+            check=True,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+        assert ray_proc.poll() is None
+        assert "no matching runtime processes remained after drain" in result.stdout
+    finally:
+        if ray_proc.poll() is None:
+            ray_proc.terminate()
+        try:
+            ray_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            ray_proc.kill()
+            ray_proc.wait(timeout=5)
+
+
+def test_run_sdpo_script_cleanup_accepts_zero_padded_drain_seconds(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_cleanup_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    fake_proc_root = tmp_path / "fake-proc"
+    fake_proc_root.mkdir()
+    cache_dir = tmp_path / "cache-dir"
+    cache_dir.mkdir()
+
+    ray_proc = subprocess.Popen(
+        ["bash", "-lc", "exec -a raylet sleep 120"],
+        env={
+            **os.environ,
+            "SLURM_JOB_ID": "4242",
+        },
+    )
+
+    pid_dir = fake_proc_root / str(ray_proc.pid)
+    pid_dir.mkdir(parents=True)
+    environ_path = pid_dir / "environ"
+    environ_path.write_bytes(b"SLURM_JOB_ID=4242\0")
+
+    try:
+        def _flip_job_id_after_drain_start() -> None:
+            time.sleep(0.5)
+            environ_path.write_bytes(b"SLURM_JOB_ID=9999\0")
+
+        mutator = threading.Thread(target=_flip_job_id_after_drain_start, daemon=True)
+        mutator.start()
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHON_BIN": str(fake_python),
+                "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+                "SDPO_TRAINER_MODULE": "dummy.module",
+                "SDPO_MONITOR_ENABLE": "0",
+                "SDPO_WANDB_REPAIR_ON_EXIT": "0",
+                "SLURM_JOB_ID": "4242",
+                "SLURM_JOBID": "4242",
+                "SDPO_PROC_ROOT": str(fake_proc_root),
+                "SDPO_CLEANUP_DRAIN_SEC": "08",
+                "SDPO_CLEANUP_GRACE_SEC": "0",
+                "STUB_SDPO_CACHE_DIR": str(cache_dir),
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                str(script_path),
+                f"data.train_files={fake_parquet}",
+                f"data.val_files={fake_parquet}",
+            ],
+            cwd=_repo_root(),
+            check=True,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+        assert ray_proc.poll() is None
+        assert "no matching runtime processes remained after drain" in result.stdout
+    finally:
+        if ray_proc.poll() is None:
+            ray_proc.terminate()
+        try:
+            ray_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            ray_proc.kill()
+            ray_proc.wait(timeout=5)
+
+
+def test_run_sdpo_script_runs_cleanup_before_wandb_repair(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    fake_proc_root = tmp_path / "fake-proc"
+    fake_proc_root.mkdir()
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run cleanupOrder123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    ray_proc = subprocess.Popen(
+        ["bash", "-lc", "exec -a raylet sleep 120"],
+        env={
+            **os.environ,
+            "SLURM_JOB_ID": "4242",
+        },
+    )
+
+    pid_dir = fake_proc_root / str(ray_proc.pid)
+    pid_dir.mkdir(parents=True)
+    environ_path = pid_dir / "environ"
+    environ_path.write_bytes(b"SLURM_JOB_ID=4242\0")
+
+    try:
+        def _flip_job_id_after_drain_start() -> None:
+            time.sleep(0.5)
+            environ_path.write_bytes(b"SLURM_JOB_ID=9999\0")
+
+        mutator = threading.Thread(target=_flip_job_id_after_drain_start, daemon=True)
+        mutator.start()
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHON_BIN": str(fake_python),
+                "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+                "SDPO_TRAINER_MODULE": "dummy.module",
+                "SDPO_MONITOR_ENABLE": "0",
+                "SLURM_JOB_ID": "4242",
+                "SLURM_JOBID": "4242",
+                "SDPO_PROC_ROOT": str(fake_proc_root),
+                "SDPO_CLEANUP_DRAIN_SEC": "2",
+                "SDPO_CLEANUP_GRACE_SEC": "0",
+                "SDPO_CONTAINER_CLEANUP_ENABLE": "0",
+                "VERL_FILE_LOGGER_PATH": str(metrics_path),
+                "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+                "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+                "STUB_TRAINER_STDOUT": "wandb: setting up run cleanupOrder123",
+                "STUB_REPAIR_STDOUT_MARKER": "repair-called",
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                str(script_path),
+                f"data.train_files={fake_parquet}",
+                f"data.val_files={fake_parquet}",
+            ],
+            cwd=_repo_root(),
+            check=True,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+        assert ray_proc.poll() is None
+        cleanup_marker = "no matching runtime processes remained after drain"
+        assert cleanup_marker in result.stdout
+        assert "repair-called" in result.stdout
+        assert result.stdout.index(cleanup_marker) < result.stdout.index("repair-called")
+
+        logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+        assert len(logged_invocations) == 1
+    finally:
+        if ray_proc.poll() is None:
+            ray_proc.terminate()
+        try:
+            ray_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            ray_proc.kill()
+            ray_proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("shutdown_signal", "expected_exit_code"),
+    [
+        (signal.SIGINT, 130),
+        (signal.SIGTERM, 143),
+    ],
+)
+def test_run_sdpo_script_signal_shutdown_runs_wandb_repair(
+    tmp_path: Path,
+    shutdown_signal: signal.Signals,
+    expected_exit_code: int,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run signalRepair123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run signalRepair123",
+            "STUB_TRAINER_SLEEP_SEC": "30",
+        }
+    )
+    proc = subprocess.Popen(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+    )
+
+    try:
+        time.sleep(0.6)
+        os.killpg(proc.pid, shutdown_signal)
+        stdout, stderr = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=5)
+
+    assert proc.returncode == expected_exit_code, (stdout, stderr)
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[-1] == str(expected_exit_code)
 
 
 def test_run_sdpo_script_dry_run_sets_ray_num_cpus_from_slurm_cpus_per_task() -> None:
