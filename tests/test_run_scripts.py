@@ -174,6 +174,35 @@ def _write_docker_cleanup_probe_stub(tmp_path: Path) -> Path:
     return stub_path
 
 
+def _write_python_wandb_repair_probe_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "python-wandb-repair-probe.sh"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == \"-c\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-m\" ]]; then\n"
+        "  exit ${STUB_TRAINER_EXIT_CODE:-0}\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-\" ]]; then\n"
+        "  payload=\"$(cat)\"\n"
+        "  if [[ \"${payload}\" == *\"run_sdpo.sh wandb-repair\"* ]]; then\n"
+        "    if [[ -n \"${STUB_REPAIR_LOG_FILE:-}\" ]]; then\n"
+        "      printf '%s\\n' \"$*\" >>\"${STUB_REPAIR_LOG_FILE}\"\n"
+        "    fi\n"
+        "    exit 0\n"
+        "  fi\n"
+        "  printf '%s' \"${payload}\" | python3 \"$@\"\n"
+        "  exit $?\n"
+        "fi\n"
+        "exec python3 \"$@\"\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
 def test_run_rft_script_dry_run_prints_verl_command() -> None:
     result = _run_script("run_rft.sh", "trainer.total_training_steps=1")
     assert "-m torch.distributed.run" in result.stdout
@@ -629,6 +658,108 @@ def test_run_sdpo_script_allows_disabling_watchdog_monitor(tmp_path: Path) -> No
     )
 
     assert "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)" in result.stdout
+
+
+def test_run_sdpo_script_skips_wandb_repair_when_run_id_unresolved(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 1, "data": {"training/global_step": 1}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("trainer started\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "WANDB_RUN_ID": "",
+            "SDPO_WANDB_RUN_ID": "",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert "unable to resolve run id from trainer log/env; skipping." in result.stdout
+    assert not repair_log_path.exists()
+
+
+def test_run_sdpo_script_wandb_repair_propagates_trainer_exit_code(tmp_path: Path) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_EXIT_CODE": "17",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert result.returncode == 17
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[0] == "-"
+    assert repair_argv[1] == "testRun123"
+    assert repair_argv[-1] == "17"
 
 
 def test_run_sdpo_script_cleanup_falls_back_to_run_label_when_slurm_label_lookup_empty(

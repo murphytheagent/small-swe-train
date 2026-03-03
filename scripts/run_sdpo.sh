@@ -426,8 +426,13 @@ _resolve_sdpo_metrics_jsonl_path() {
 }
 
 _resolve_sdpo_wandb_run_id() {
+  local run_id="${SDPO_WANDB_RUN_ID:-${WANDB_RUN_ID:-}}"
+  if [[ -n "${run_id}" ]]; then
+    printf '%s' "${run_id}"
+    return 0
+  fi
+
   local trainer_log_path="${SDPO_TRAINER_LOG_PATH:-}"
-  local run_id=""
 
   if [[ -n "${trainer_log_path}" && -f "${trainer_log_path}" ]]; then
     run_id="$(
@@ -437,20 +442,15 @@ _resolve_sdpo_wandb_run_id() {
     )"
   fi
 
-  if [[ -z "${run_id}" ]]; then
-    local latest_run_dir=""
-    latest_run_dir="$(
-      ls -dt "${PROJECT_ROOT}/wandb"/run-* 2>/dev/null | head -n 1 || true
-    )"
-    if [[ -n "${latest_run_dir}" ]]; then
-      run_id="${latest_run_dir##*-}"
-    fi
-  fi
-
   printf '%s' "${run_id}"
 }
 
 _repair_sdpo_wandb_from_metrics() {
+  local trainer_exit_code="${1:-0}"
+  if ! [[ "${trainer_exit_code}" =~ ^-?[0-9]+$ ]]; then
+    trainer_exit_code=0
+  fi
+
   if [[ "${SDPO_WANDB_REPAIR_ON_EXIT}" != "1" ]]; then
     return 0
   fi
@@ -470,12 +470,12 @@ _repair_sdpo_wandb_from_metrics() {
   local wandb_run_id
   wandb_run_id="$(_resolve_sdpo_wandb_run_id)"
   if [[ -z "${wandb_run_id}" ]]; then
-    echo "run_sdpo.sh wandb-repair: unable to resolve run id; skipping."
+    echo "run_sdpo.sh wandb-repair: unable to resolve run id from trainer log/env; skipping."
     return 0
   fi
 
   set +e
-  "${PYTHON_BIN}" - "${wandb_run_id}" "${metrics_jsonl_path}" "${TASK}" "${EXPERIMENT}" <<'PY'
+  "${PYTHON_BIN}" - "${wandb_run_id}" "${metrics_jsonl_path}" "${TASK}" "${EXPERIMENT}" "${trainer_exit_code}" <<'PY'
 import json
 import math
 import os
@@ -547,7 +547,7 @@ def _load_rows(path: str) -> list[tuple[int, dict[str, Any]]]:
 
 
 def main() -> int:
-    if len(sys.argv) != 5:
+    if len(sys.argv) != 6:
         print("run_sdpo.sh wandb-repair: invalid args; skipping.")
         return 0
 
@@ -555,6 +555,11 @@ def main() -> int:
     metrics_path = sys.argv[2]
     project_name = sys.argv[3]
     experiment_name = sys.argv[4]
+    trainer_exit_code = _coerce_int(sys.argv[5])
+    if trainer_exit_code is None:
+        trainer_exit_code = 0
+    elif trainer_exit_code < 0:
+        trainer_exit_code = 1
     entity = os.environ.get("WANDB_ENTITY") or None
 
     rows = _load_rows(metrics_path)
@@ -597,7 +602,7 @@ def main() -> int:
         run = wandb.init(**init_kwargs)
         for step, data in rows:
             run.log(data, step=step)
-        run.finish(exit_code=0, quiet=True)
+        run.finish(exit_code=trainer_exit_code, quiet=True)
     except Exception as exc:
         print(f"run_sdpo.sh wandb-repair: replay failed ({exc}).")
         return 0
@@ -630,7 +635,7 @@ PY
 _on_sdpo_exit() {
   local exit_code=$?
   _stop_sdpo_watchdog
-  _repair_sdpo_wandb_from_metrics
+  _repair_sdpo_wandb_from_metrics "${exit_code}"
   _cleanup_sdpo_runtime_once
   return "${exit_code}"
 }
