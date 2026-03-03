@@ -903,6 +903,103 @@ for line in lines:
     print(value)
     raise SystemExit(0)
 
+try:
+    import yaml
+except Exception:
+    raise SystemExit(1)
+
+
+def _extract_direct_project_name(payload):
+    if not isinstance(payload, dict):
+        return None
+    trainer = payload.get("trainer")
+    if not isinstance(trainer, dict):
+        trainer_project_name = None
+    else:
+        trainer_project_name = trainer.get("project_name")
+    if isinstance(trainer_project_name, str):
+        trainer_project_name = trainer_project_name.strip()
+        if trainer_project_name:
+            return trainer_project_name
+
+    project_name = payload.get("project_name")
+    if isinstance(project_name, str):
+        project_name = project_name.strip()
+        if project_name:
+            return project_name
+    return None
+
+
+def _iter_default_config_paths(payload, current_path, root_dir):
+    if not isinstance(payload, dict):
+        return
+    defaults = payload.get("defaults")
+    if not isinstance(defaults, list):
+        return
+
+    for entry in defaults:
+        if isinstance(entry, str):
+            token = entry.strip()
+            if not token or token == "_self_":
+                continue
+            token = token.split("@", 1)[0].lstrip("/")
+            if not token:
+                continue
+            rel = token if token.endswith(".yaml") else f"{token}.yaml"
+            yield root_dir / rel
+            yield current_path.parent / rel
+            continue
+
+        if not isinstance(entry, dict):
+            continue
+        for raw_group, raw_target in entry.items():
+            if raw_target in (None, ""):
+                continue
+            group = str(raw_group).split("@", 1)[0].lstrip("/")
+            if not group:
+                continue
+
+            targets = raw_target if isinstance(raw_target, list) else [raw_target]
+            for target in targets:
+                if not isinstance(target, str):
+                    continue
+                target = target.strip()
+                if not target:
+                    continue
+                rel = f"{group}/{target.lstrip('/')}"
+                if not rel.endswith(".yaml"):
+                    rel = f"{rel}.yaml"
+                yield root_dir / rel
+                yield current_path.parent / rel
+
+
+def _resolve_project_name_from_defaults(config_file, root_dir, visited):
+    resolved_path = str(config_file.resolve())
+    if resolved_path in visited or not config_file.is_file():
+        return None
+    visited.add(resolved_path)
+
+    try:
+        payload = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+
+    project_name = _extract_direct_project_name(payload)
+    if project_name:
+        return project_name
+
+    for candidate in _iter_default_config_paths(payload, config_file, root_dir):
+        resolved = _resolve_project_name_from_defaults(candidate, root_dir, visited)
+        if resolved:
+            return resolved
+    return None
+
+
+resolved_from_defaults = _resolve_project_name_from_defaults(config_path, config_path.parent, set())
+if resolved_from_defaults:
+    print(resolved_from_defaults)
+    raise SystemExit(0)
+
 raise SystemExit(1)
 PY
 )"
@@ -1365,9 +1462,10 @@ if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
   _stop_sdpo_watchdog
 else
   echo "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)"
+  mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"
   _SDPO_TRAINER_LAUNCHED=1
   set +e
-  "${CMD[@]}"
+  "${CMD[@]}" > >(tee -a "${SDPO_TRAINER_LOG_PATH}") 2>&1
   TRAINER_EXIT_CODE=$?
   set -e
 fi
