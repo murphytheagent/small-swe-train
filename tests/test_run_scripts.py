@@ -1142,6 +1142,142 @@ def test_run_sdpo_script_wandb_repair_uses_project_from_overridden_hydra_config(
     assert repair_argv[3] == "custom-config-project"
 
 
+def test_run_sdpo_script_wandb_repair_config_parser_ignores_nested_project_name(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    custom_config_dir = tmp_path / "custom-configs-nested"
+    custom_config_dir.mkdir()
+    (custom_config_dir / "nested_project.yaml").write_text(
+        "trainer:\n"
+        "  nested_block:\n"
+        "    project_name: nested-project-name\n"
+        "  project_name: direct-project-name\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "WANDB_PROJECT": "global-wandb-project",
+            "SDPO_WANDB_PROJECT_NAME": "",
+            "SDPO_WANDB_PROJECT": "",
+            "SDPO_TASK_NAME": "custom-task-name",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "--config-name",
+            "nested_project",
+            "--config-dir",
+            str(custom_config_dir),
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "direct-project-name"
+
+
+def test_run_sdpo_script_wandb_repair_config_parser_accepts_trainer_header_comment(
+    tmp_path: Path,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run testRun123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    custom_config_dir = tmp_path / "custom-configs-commented"
+    custom_config_dir.mkdir()
+    (custom_config_dir / "commented_header.yaml").write_text(
+        "trainer: # inline comment\n"
+        "  project_name: commented-header-project\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "WANDB_PROJECT": "global-wandb-project",
+            "SDPO_WANDB_PROJECT_NAME": "",
+            "SDPO_WANDB_PROJECT": "",
+            "SDPO_TASK_NAME": "custom-task-name",
+        }
+    )
+    subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+            "--config-name",
+            "commented_header",
+            "--config-dir",
+            str(custom_config_dir),
+        ],
+        cwd=_repo_root(),
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[3] == "commented-header-project"
+
+
 def test_run_sdpo_script_dry_run_does_not_trigger_wandb_repair(tmp_path: Path) -> None:
     fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
     metrics_path = tmp_path / "metrics.jsonl"

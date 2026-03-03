@@ -811,9 +811,10 @@ if not config_path.is_file():
 
 lines = config_path.read_text(encoding="utf-8").splitlines()
 trainer_indent = None
+trainer_child_indent = None
 for line in lines:
     if trainer_indent is None:
-        if re.match(r"^\s*trainer:\s*$", line):
+        if re.match(r"^\s*trainer:\s*(?:#.*)?$", line):
             trainer_indent = len(line) - len(line.lstrip())
         continue
 
@@ -824,6 +825,10 @@ for line in lines:
     indent = len(line) - len(line.lstrip())
     if indent <= trainer_indent:
         break
+    if trainer_child_indent is None:
+        trainer_child_indent = indent
+    if indent != trainer_child_indent:
+        continue
 
     match = re.match(r"^\s*project_name:\s*(.+?)\s*(?:#.*)?$", line)
     if not match:
