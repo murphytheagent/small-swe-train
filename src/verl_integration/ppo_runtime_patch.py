@@ -31,6 +31,22 @@ _TURN_SUPERVISION_NEXT = "next_turn"
 _TURN_SUPERVISION_CURRENT = "current_turn"
 _TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
 _AGENT_LOOP_MAX_IN_FLIGHT_ENV = "SMALL_SWE_SDPO_AGENT_LOOP_MAX_IN_FLIGHT"
+_VERIFIER_FEEDBACK_NONE = "none"
+_VERIFIER_FEEDBACK_FINAL_TURN_ONLY = "final_turn_only"
+_VERIFIER_FEEDBACK_ALL_TURNS = "all_turns"
+_VERIFIER_FEEDBACK_MODES = {
+    _VERIFIER_FEEDBACK_NONE,
+    _VERIFIER_FEEDBACK_FINAL_TURN_ONLY,
+    _VERIFIER_FEEDBACK_ALL_TURNS,
+}
+_LEGACY_GATING_RESOLVED_ONLY = "resolved_only"
+_LEGACY_GATING_FEEDBACK_PRESENT = "feedback_present"
+_LEGACY_GATING_ALWAYS = "always"
+_LEGACY_GATING_POLICIES = {
+    _LEGACY_GATING_RESOLVED_ONLY,
+    _LEGACY_GATING_FEEDBACK_PRESENT,
+    _LEGACY_GATING_ALWAYS,
+}
 _TURN_LEVEL_REQUIRED_KEYS = {
     "turn_teacher_input_ids",
     "turn_teacher_attention_mask",
@@ -77,6 +93,30 @@ def _normalize_turn_supervision_mode(value: Any) -> str:
     if normalized not in _TURN_SUPERVISION_MODES:
         supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
         raise ValueError(f"turn_supervision_mode must be one of: {supported}")
+    return normalized
+
+
+def _normalize_verifier_feedback_mode(value: Any) -> str:
+    if value is None:
+        return _VERIFIER_FEEDBACK_NONE
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _VERIFIER_FEEDBACK_NONE
+    if normalized not in _VERIFIER_FEEDBACK_MODES:
+        supported = ", ".join(sorted(_VERIFIER_FEEDBACK_MODES))
+        raise ValueError(f"verifier_feedback_mode must be one of: {supported}")
+    return normalized
+
+
+def _normalize_legacy_gating_policy(value: Any) -> str:
+    if value is None:
+        return _LEGACY_GATING_RESOLVED_ONLY
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _LEGACY_GATING_RESOLVED_ONLY
+    if normalized not in _LEGACY_GATING_POLICIES:
+        supported = ", ".join(sorted(_LEGACY_GATING_POLICIES))
+        raise ValueError(f"legacy_distillation_gating_policy must be one of: {supported}")
     return normalized
 
 
@@ -197,6 +237,16 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
         turn_supervision_mode = _normalize_turn_supervision_mode(
             _cfg_get(self_distillation_cfg, "turn_supervision_mode", _TURN_SUPERVISION_NEXT)
         )
+        verifier_feedback_mode = _normalize_verifier_feedback_mode(
+            _cfg_get(self_distillation_cfg, "verifier_feedback_mode", _VERIFIER_FEEDBACK_NONE)
+        )
+        legacy_distillation_gating_policy = _normalize_legacy_gating_policy(
+            _cfg_get(
+                self_distillation_cfg,
+                "legacy_distillation_gating_policy",
+                _LEGACY_GATING_RESOLVED_ONLY,
+            )
+        )
 
         try:
             if torch is None:
@@ -223,6 +273,8 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
                 max_reprompt_len=max_reprompt_len,
                 num_recent_raw_blocks=num_recent_raw_blocks,
                 turn_supervision_mode=turn_supervision_mode,
+                verifier_feedback_mode=verifier_feedback_mode,
+                legacy_distillation_gating_policy=legacy_distillation_gating_policy,
             )
             teacher_prompts = [str(item) for item in reprompt_batch.get("teacher_prompts", [])]
             if not teacher_prompts:
@@ -301,10 +353,33 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
                 "self_distillation/turn_supervision_mode_current_turn": (
                     1.0 if turn_supervision_mode == _TURN_SUPERVISION_CURRENT else 0.0
                 ),
+                "self_distillation/verifier_feedback_mode_none": (
+                    1.0 if verifier_feedback_mode == _VERIFIER_FEEDBACK_NONE else 0.0
+                ),
+                "self_distillation/verifier_feedback_mode_final_turn_only": (
+                    1.0 if verifier_feedback_mode == _VERIFIER_FEEDBACK_FINAL_TURN_ONLY else 0.0
+                ),
+                "self_distillation/verifier_feedback_mode_all_turns": (
+                    1.0 if verifier_feedback_mode == _VERIFIER_FEEDBACK_ALL_TURNS else 0.0
+                ),
+                "self_distillation/legacy_distillation_gating_policy_resolved_only": (
+                    1.0 if legacy_distillation_gating_policy == _LEGACY_GATING_RESOLVED_ONLY else 0.0
+                ),
+                "self_distillation/legacy_distillation_gating_policy_feedback_present": (
+                    1.0 if legacy_distillation_gating_policy == _LEGACY_GATING_FEEDBACK_PRESENT else 0.0
+                ),
+                "self_distillation/legacy_distillation_gating_policy_always": (
+                    1.0 if legacy_distillation_gating_policy == _LEGACY_GATING_ALWAYS else 0.0
+                ),
             }
             LOGGER.debug(
-                "Built self-distillation batch with turn_supervision_mode=%s (active=%s/%s, turn_pairs=%s).",
+                (
+                    "Built self-distillation batch with turn_supervision_mode=%s, "
+                    "verifier_feedback_mode=%s, legacy_gating=%s (active=%s/%s, turn_pairs=%s)."
+                ),
                 turn_supervision_mode,
+                verifier_feedback_mode,
+                legacy_distillation_gating_policy,
                 active_count,
                 len(rows),
                 turn_pair_count,
