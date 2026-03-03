@@ -468,8 +468,9 @@ _resolve_sdpo_wandb_run_id() {
 
   if [[ -n "${trainer_log_path}" && -f "${trainer_log_path}" ]]; then
     run_id="$(
-      grep -Eo 'wandb: setting up run [A-Za-z0-9]+' "${trainer_log_path}" 2>/dev/null \
-        | awk '{print $NF}' \
+      grep -E 'wandb: setting up run ' "${trainer_log_path}" 2>/dev/null \
+        | sed -E 's/.*wandb: setting up run[[:space:]]+//' \
+        | awk '{print $1}' \
         | tail -n 1
     )"
   fi
