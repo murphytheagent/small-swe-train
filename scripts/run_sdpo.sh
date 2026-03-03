@@ -678,10 +678,21 @@ PY
   return 0
 }
 
+_mark_sdpo_trainer_started_from_log() {
+  local trainer_log_path="${SDPO_TRAINER_LOG_PATH:-}"
+  if [[ -z "${trainer_log_path}" ]] || [[ ! -f "${trainer_log_path}" ]]; then
+    return 0
+  fi
+  if grep -Eq 'wandb: setting up run[[:space:]]+' "${trainer_log_path}" 2>/dev/null; then
+    _SDPO_TRAINER_LAUNCHED=1
+  fi
+}
+
 _on_sdpo_exit() {
   local exit_code=$?
   _stop_sdpo_watchdog
   _cleanup_sdpo_runtime_once
+  _mark_sdpo_trainer_started_from_log
   _repair_sdpo_wandb_from_metrics "${exit_code}"
   return "${exit_code}"
 }
@@ -691,6 +702,7 @@ _on_sdpo_int() {
   _stop_sdpo_watchdog
   _terminate_sdpo_trainer_if_running
   _cleanup_sdpo_runtime_once
+  _mark_sdpo_trainer_started_from_log
   _repair_sdpo_wandb_from_metrics 130
   exit 130
 }
@@ -700,6 +712,7 @@ _on_sdpo_term() {
   _stop_sdpo_watchdog
   _terminate_sdpo_trainer_if_running
   _cleanup_sdpo_runtime_once
+  _mark_sdpo_trainer_started_from_log
   _repair_sdpo_wandb_from_metrics 143
   exit 143
 }
@@ -1478,7 +1491,6 @@ if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
   mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"
   : > "${SDPO_TRAINER_LOG_PATH}"
   echo "run_sdpo.sh watchdog: enabled interval=${SDPO_MONITOR_INTERVAL_SEC}s stall_warn=${SDPO_STALL_WARN_SEC}s trainer_log=${SDPO_TRAINER_LOG_PATH}"
-  _SDPO_TRAINER_LAUNCHED=1
   set +e
   "${CMD[@]}" > >(tee -a "${SDPO_TRAINER_LOG_PATH}") 2>&1 &
   _SDPO_TRAINER_PID="$!"
@@ -1492,7 +1504,6 @@ else
   echo "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)"
   mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"
   : > "${SDPO_TRAINER_LOG_PATH}"
-  _SDPO_TRAINER_LAUNCHED=1
   set +e
   "${CMD[@]}" > >(tee -a "${SDPO_TRAINER_LOG_PATH}") 2>&1
   TRAINER_EXIT_CODE=$?
