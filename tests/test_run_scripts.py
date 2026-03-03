@@ -194,10 +194,10 @@ def _write_python_wandb_repair_probe_stub(tmp_path: Path) -> Path:
         "    fi\n"
         "    exit 0\n"
         "  fi\n"
-        "  printf '%s' \"${payload}\" | python3 \"$@\"\n"
+        f"  printf '%s' \"${{payload}}\" | {shlex.quote(sys.executable)} \"$@\"\n"
         "  exit $?\n"
         "fi\n"
-        "exec python3 \"$@\"\n",
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
         encoding="utf-8",
     )
     stub_path.chmod(0o755)
@@ -842,6 +842,22 @@ def test_run_sdpo_script_wandb_repair_uses_trainer_project_override(tmp_path: Pa
 def test_run_sdpo_script_wandb_repair_defaults_to_config_project_name(tmp_path: Path) -> None:
     script_path = _repo_root() / "scripts" / "run_sdpo.sh"
     fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    broken_python3 = tmp_path / "python3"
+    broken_python3.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == \"-\" ]]; then\n"
+        "  payload=\"$(cat)\"\n"
+        "  if [[ \"${payload}\" == *\"trainer_indent = None\"* ]]; then\n"
+        "    exit 127\n"
+        "  fi\n"
+        f"  printf '%s' \"${{payload}}\" | {shlex.quote(sys.executable)} \"$@\"\n"
+        "  exit $?\n"
+        "fi\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    broken_python3.chmod(0o755)
     fake_checkpoint = tmp_path / "rft-checkpoint"
     fake_checkpoint.mkdir()
     fake_parquet = tmp_path / "sdpo_tasks.parquet"
@@ -870,6 +886,7 @@ def test_run_sdpo_script_wandb_repair_defaults_to_config_project_name(tmp_path: 
             "SDPO_WANDB_PROJECT_NAME": "",
             "SDPO_WANDB_PROJECT": "",
             "WANDB_PROJECT": "",
+            "PATH": f"{tmp_path}{os.pathsep}{env.get('PATH', '')}",
         }
     )
     subprocess.run(

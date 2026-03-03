@@ -764,7 +764,7 @@ _resolve_sdpo_wandb_project_name() {
     return 0
   fi
   local default_project_name=""
-  default_project_name="$(python3 - "${CONFIG_DIR}/sdpo_swe.yaml" <<'PY' 2>/dev/null || true
+  default_project_name="$("${PYTHON_BIN}" - "${CONFIG_DIR}/sdpo_swe.yaml" <<'PY' 2>/dev/null || true
 import re
 import sys
 from pathlib import Path
