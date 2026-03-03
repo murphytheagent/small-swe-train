@@ -94,6 +94,12 @@ _SDPO_CLEANUP_COMPLETED=0
 _SDPO_MONITOR_PID=""
 _SDPO_TRAINER_PID=""
 _SDPO_TRAINER_LAUNCHED=0
+_SDPO_TRAINER_EXIT_CODE=0
+_SDPO_TRAINER_LOG_MTIME_BEFORE=0
+_SDPO_TRAINER_LOG_SIZE_BEFORE=0
+_SDPO_METRICS_MTIME_BEFORE=0
+_SDPO_METRICS_SIZE_BEFORE=0
+_SDPO_REPAIR_BASELINE_CAPTURED=0
 SDPO_WANDB_PROJECT_NAME="${SDPO_WANDB_PROJECT_NAME:-${SDPO_WANDB_PROJECT:-${WANDB_PROJECT:-}}}"
 
 _resolve_slurm_job_id() {
@@ -331,6 +337,26 @@ _resolve_file_mtime_epoch() {
   fi
   if mtime="$(stat -f %m "${path}" 2>/dev/null)"; then
     printf '%s' "${mtime}"
+    return 0
+  fi
+
+  printf '0'
+}
+
+_resolve_file_size_bytes() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    printf '0'
+    return 0
+  fi
+
+  local size
+  if size="$(stat -c %s "${path}" 2>/dev/null)"; then
+    printf '%s' "${size}"
+    return 0
+  fi
+  if size="$(stat -f %z "${path}" 2>/dev/null)"; then
+    printf '%s' "${size}"
     return 0
   fi
 
@@ -678,21 +704,71 @@ PY
   return 0
 }
 
-_mark_sdpo_trainer_started_from_log() {
+_capture_sdpo_repair_baseline() {
   local trainer_log_path="${SDPO_TRAINER_LOG_PATH:-}"
-  if [[ -z "${trainer_log_path}" ]] || [[ ! -f "${trainer_log_path}" ]]; then
+  _SDPO_TRAINER_LOG_MTIME_BEFORE="$(_resolve_file_mtime_epoch "${trainer_log_path}")"
+  _SDPO_TRAINER_LOG_SIZE_BEFORE="$(_resolve_file_size_bytes "${trainer_log_path}")"
+
+  local metrics_jsonl_path
+  metrics_jsonl_path="$(_resolve_sdpo_metrics_jsonl_path)"
+  _SDPO_METRICS_MTIME_BEFORE="$(_resolve_file_mtime_epoch "${metrics_jsonl_path}")"
+  _SDPO_METRICS_SIZE_BEFORE="$(_resolve_file_size_bytes "${metrics_jsonl_path}")"
+  _SDPO_REPAIR_BASELINE_CAPTURED=1
+}
+
+_mark_sdpo_trainer_launch_observed() {
+  if [[ "${_SDPO_TRAINER_LAUNCHED}" == "1" ]]; then
     return 0
   fi
-  if grep -Eq 'wandb: setting up run[[:space:]]+' "${trainer_log_path}" 2>/dev/null; then
+  if [[ "${_SDPO_REPAIR_BASELINE_CAPTURED}" != "1" ]]; then
+    return 0
+  fi
+
+  local trainer_log_path="${SDPO_TRAINER_LOG_PATH:-}"
+  local trainer_log_mtime_now
+  trainer_log_mtime_now="$(_resolve_file_mtime_epoch "${trainer_log_path}")"
+  local trainer_log_size_now
+  trainer_log_size_now="$(_resolve_file_size_bytes "${trainer_log_path}")"
+  if [[ "${trainer_log_mtime_now}" =~ ^[0-9]+$ ]] \
+    && [[ "${_SDPO_TRAINER_LOG_MTIME_BEFORE}" =~ ^[0-9]+$ ]] \
+    && [[ "${trainer_log_size_now}" =~ ^[0-9]+$ ]] \
+    && [[ "${_SDPO_TRAINER_LOG_SIZE_BEFORE}" =~ ^[0-9]+$ ]]; then
+    if (( 10#${trainer_log_mtime_now} > 10#${_SDPO_TRAINER_LOG_MTIME_BEFORE} )) \
+      || (( 10#${trainer_log_size_now} > 10#${_SDPO_TRAINER_LOG_SIZE_BEFORE} )); then
+      _SDPO_TRAINER_LAUNCHED=1
+      return 0
+    fi
+  fi
+
+  local metrics_jsonl_path
+  metrics_jsonl_path="$(_resolve_sdpo_metrics_jsonl_path)"
+  local metrics_mtime_now
+  metrics_mtime_now="$(_resolve_file_mtime_epoch "${metrics_jsonl_path}")"
+  local metrics_size_now
+  metrics_size_now="$(_resolve_file_size_bytes "${metrics_jsonl_path}")"
+  if [[ "${metrics_mtime_now}" =~ ^[0-9]+$ ]] \
+    && [[ "${_SDPO_METRICS_MTIME_BEFORE}" =~ ^[0-9]+$ ]] \
+    && [[ "${metrics_size_now}" =~ ^[0-9]+$ ]] \
+    && [[ "${_SDPO_METRICS_SIZE_BEFORE}" =~ ^[0-9]+$ ]]; then
+    if (( 10#${metrics_mtime_now} > 10#${_SDPO_METRICS_MTIME_BEFORE} )) \
+      || (( 10#${metrics_size_now} > 10#${_SDPO_METRICS_SIZE_BEFORE} )); then
+      _SDPO_TRAINER_LAUNCHED=1
+      return 0
+    fi
+  fi
+
+  if [[ "${_SDPO_TRAINER_EXIT_CODE}" == "0" ]] && [[ -n "${SDPO_WANDB_RUN_ID:-${WANDB_RUN_ID:-}}" ]]; then
     _SDPO_TRAINER_LAUNCHED=1
+    return 0
   fi
 }
 
 _on_sdpo_exit() {
   local exit_code=$?
+  _SDPO_TRAINER_EXIT_CODE="${exit_code}"
   _stop_sdpo_watchdog
   _cleanup_sdpo_runtime_once
-  _mark_sdpo_trainer_started_from_log
+  _mark_sdpo_trainer_launch_observed
   _repair_sdpo_wandb_from_metrics "${exit_code}"
   return "${exit_code}"
 }
@@ -702,7 +778,8 @@ _on_sdpo_int() {
   _stop_sdpo_watchdog
   _terminate_sdpo_trainer_if_running
   _cleanup_sdpo_runtime_once
-  _mark_sdpo_trainer_started_from_log
+  _SDPO_TRAINER_EXIT_CODE=130
+  _SDPO_TRAINER_LAUNCHED=1
   _repair_sdpo_wandb_from_metrics 130
   exit 130
 }
@@ -712,7 +789,8 @@ _on_sdpo_term() {
   _stop_sdpo_watchdog
   _terminate_sdpo_trainer_if_running
   _cleanup_sdpo_runtime_once
-  _mark_sdpo_trainer_started_from_log
+  _SDPO_TRAINER_EXIT_CODE=143
+  _SDPO_TRAINER_LAUNCHED=1
   _repair_sdpo_wandb_from_metrics 143
   exit 143
 }
@@ -1490,6 +1568,7 @@ echo "run_sdpo.sh launch: train_files=${RESOLVED_TRAIN_FILES:-<config-default>} 
 if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
   mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"
   : > "${SDPO_TRAINER_LOG_PATH}"
+  _capture_sdpo_repair_baseline
   echo "run_sdpo.sh watchdog: enabled interval=${SDPO_MONITOR_INTERVAL_SEC}s stall_warn=${SDPO_STALL_WARN_SEC}s trainer_log=${SDPO_TRAINER_LOG_PATH}"
   set +e
   "${CMD[@]}" > >(tee -a "${SDPO_TRAINER_LOG_PATH}") 2>&1 &
@@ -1497,6 +1576,7 @@ if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
   _start_sdpo_watchdog "${_SDPO_TRAINER_PID}" "${SDPO_TRAINER_LOG_PATH}" "${SDPO_MONITOR_INTERVAL_SEC}" "${SDPO_STALL_WARN_SEC}" "${SDPO_MONITOR_GPU_SNAPSHOT}"
   wait "${_SDPO_TRAINER_PID}"
   TRAINER_EXIT_CODE=$?
+  _SDPO_TRAINER_EXIT_CODE="${TRAINER_EXIT_CODE}"
   set -e
   _SDPO_TRAINER_PID=""
   _stop_sdpo_watchdog
@@ -1504,9 +1584,11 @@ else
   echo "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)"
   mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"
   : > "${SDPO_TRAINER_LOG_PATH}"
+  _capture_sdpo_repair_baseline
   set +e
   "${CMD[@]}" > >(tee -a "${SDPO_TRAINER_LOG_PATH}") 2>&1
   TRAINER_EXIT_CODE=$?
+  _SDPO_TRAINER_EXIT_CODE="${TRAINER_EXIT_CODE}"
   set -e
 fi
 
