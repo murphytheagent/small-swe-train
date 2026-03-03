@@ -89,9 +89,11 @@ SDPO_STALL_WARN_SEC="${SDPO_STALL_WARN_SEC:-900}"
 SDPO_MONITOR_GPU_SNAPSHOT="${SDPO_MONITOR_GPU_SNAPSHOT:-1}"
 SDPO_MONITOR_LOG_DIR="${SDPO_MONITOR_LOG_DIR:-${PROJECT_ROOT}/outputs/slurm/sdpo_monitor}"
 SDPO_TRAINER_LOG_PATH="${SDPO_TRAINER_LOG_PATH:-}"
+SDPO_PROC_ROOT="${SDPO_PROC_ROOT:-/proc}"
 _SDPO_CLEANUP_COMPLETED=0
 _SDPO_MONITOR_PID=""
 _SDPO_TRAINER_PID=""
+SDPO_WANDB_PROJECT_NAME="${SDPO_WANDB_PROJECT_NAME:-${SDPO_WANDB_PROJECT:-${WANDB_PROJECT:-}}}"
 
 _resolve_slurm_job_id() {
   local job_id="${SLURM_JOB_ID:-${SLURM_JOBID:-}}"
@@ -118,12 +120,32 @@ _collect_slurm_job_ray_pids() {
     [[ -n "${pid}" ]] || continue
     [[ "${pid}" =~ ^[0-9]+$ ]] || continue
     [[ "${pid}" != "$$" ]] || continue
-    [[ -r "/proc/${pid}/environ" ]] || continue
-    if tr '\0' '\n' <"/proc/${pid}/environ" \
-      | grep -Eq "^SLURM_JOB_ID=${job_id}$|^SLURM_JOBID=${job_id}$"; then
+    if _pid_matches_slurm_job "${pid}" "${job_id}"; then
       printf '%s\n' "${pid}"
     fi
   done < <(pgrep -u "$(id -u)" -f "${process_pattern}" || true)
+}
+
+_pid_matches_slurm_job() {
+  local pid="$1"
+  local job_id="$2"
+  [[ -n "${job_id}" ]] || return 1
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  local environ_path="${SDPO_PROC_ROOT}/${pid}/environ"
+  [[ -r "${environ_path}" ]] || return 1
+  tr '\0' '\n' <"${environ_path}" | grep -Eq "^SLURM_JOB_ID=${job_id}$|^SLURM_JOBID=${job_id}$"
+}
+
+_collect_live_slurm_job_pids() {
+  local job_id="$1"
+  shift || true
+  local pid
+  for pid in "$@"; do
+    [[ -n "${pid}" ]] || continue
+    if kill -0 "${pid}" 2>/dev/null && _pid_matches_slurm_job "${pid}" "${job_id}"; then
+      printf '%s\n' "${pid}"
+    fi
+  done
 }
 
 _cleanup_slurm_job_ray_processes() {
@@ -171,15 +193,25 @@ _cleanup_slurm_job_ray_processes() {
     pids=("${pids_after_drain[@]}")
   fi
 
+  local -a verified_pids=()
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    verified_pids+=("${pid}")
+  done < <(_collect_live_slurm_job_pids "${job_id}" "${pids[@]}")
+  if [[ "${#verified_pids[@]}" -eq 0 ]]; then
+    echo "run_sdpo.sh cleanup: no matching runtime processes remained after drain for SLURM job ${job_id}."
+    return 0
+  fi
+  pids=("${verified_pids[@]}")
+
   echo "run_sdpo.sh cleanup: sending SIGTERM to ${#pids[@]} runtime process(es) for SLURM job ${job_id}."
   kill "${pids[@]}" 2>/dev/null || true
   sleep "${SDPO_CLEANUP_GRACE_SEC}"
 
-  for pid in "${pids[@]}"; do
-    if kill -0 "${pid}" 2>/dev/null; then
-      still_running+=("${pid}")
-    fi
-  done
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    still_running+=("${pid}")
+  done < <(_collect_live_slurm_job_pids "${job_id}" "${pids[@]}")
 
   if [[ "${#still_running[@]}" -gt 0 ]]; then
     echo "run_sdpo.sh cleanup: force-killing ${#still_running[@]} lingering process(es)."
@@ -475,7 +507,7 @@ _repair_sdpo_wandb_from_metrics() {
   fi
 
   set +e
-  "${PYTHON_BIN}" - "${wandb_run_id}" "${metrics_jsonl_path}" "${TASK}" "${EXPERIMENT}" "${trainer_exit_code}" <<'PY'
+  "${PYTHON_BIN}" - "${wandb_run_id}" "${metrics_jsonl_path}" "${SDPO_WANDB_PROJECT_NAME}" "${EXPERIMENT}" "${trainer_exit_code}" <<'PY'
 import json
 import math
 import os
@@ -715,6 +747,20 @@ _extract_override_value() {
     esac
   done
   return 1
+}
+
+_resolve_sdpo_wandb_project_name() {
+  local arg_project_name=""
+  arg_project_name="$(_extract_override_value "trainer.project_name" "$@" || true)"
+  if [[ -n "${arg_project_name}" ]]; then
+    printf '%s' "${arg_project_name}"
+    return 0
+  fi
+  if [[ -n "${SDPO_WANDB_PROJECT_NAME:-}" ]]; then
+    printf '%s' "${SDPO_WANDB_PROJECT_NAME}"
+    return 0
+  fi
+  printf '%s' "${TASK}"
 }
 
 _count_visible_gpus() {
@@ -1076,6 +1122,8 @@ if [[ "${SDPO_ROLLOUT_ONLY_E2E}" == "1" ]]; then
     ROLLOUT_ONLY_OVERRIDES+=("trainer.val_before_train=false")
   fi
 fi
+
+SDPO_WANDB_PROJECT_NAME="$(_resolve_sdpo_wandb_project_name "$@")"
 
 CMD=(
   "${PYTHON_BIN}" -m "${SDPO_TRAINER_MODULE}"
