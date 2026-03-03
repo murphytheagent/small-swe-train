@@ -773,34 +773,62 @@ _extract_override_value() {
 
 _resolve_sdpo_wandb_project_token() {
   local project_token="${1:-}"
+  local project_config_path="${2:-}"
   [[ -n "${project_token}" ]] || return 1
 
   local resolved=""
-  resolved="$("${PYTHON_BIN}" - "${project_token}" <<'PY' 2>/dev/null || true
+  resolved="$("${PYTHON_BIN}" - "${project_token}" "${project_config_path}" <<'PY' 2>/dev/null || true
 import os
 import re
 import sys
+from pathlib import Path
 
 
 def _strip_quotes(value: str) -> str:
     value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", chr(34)):
         return value[1:-1]
     return value
 
 
+def _lookup_dotted_path(payload, dotted_path: str):
+    current = payload
+    for part in dotted_path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
 value = _strip_quotes(sys.argv[1])
-env_match = re.fullmatch(r"\$\{oc\.env:([A-Za-z_][A-Za-z0-9_]*)(?:,(.*))?\}", value)
-if env_match:
-    env_key = env_match.group(1)
-    default_value = env_match.group(2)
-    env_value = os.environ.get(env_key)
-    if env_value not in (None, ""):
-        value = env_value
-    elif default_value is not None:
-        value = _strip_quotes(default_value)
-    else:
+config_path = Path(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else None
+max_hops = 4
+for _ in range(max_hops):
+    env_match = re.fullmatch(r"\$\{oc\.env:([A-Za-z_][A-Za-z0-9_]*)(?:,(.*))?\}", value)
+    if env_match:
+        env_key = env_match.group(1)
+        default_value = env_match.group(2)
+        env_value = os.environ.get(env_key)
+        if env_value not in (None, ""):
+            value = env_value
+            continue
+        if default_value is not None:
+            value = _strip_quotes(default_value)
+            continue
         raise SystemExit(1)
+
+    key_match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_.]*)\}", value)
+    if key_match and config_path is not None and config_path.is_file():
+        try:
+            import yaml
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            resolved = _lookup_dotted_path(payload, key_match.group(1))
+            if isinstance(resolved, (str, int, float, bool)):
+                value = str(resolved)
+                continue
+        except Exception:
+            pass
+    break
 
 if '${' in value:
     raise SystemExit(1)
@@ -857,7 +885,7 @@ _resolve_sdpo_wandb_project_name() {
   arg_project_name="$(_extract_override_value "trainer.project_name" "$@" || true)"
   if [[ -n "${arg_project_name}" ]]; then
     local resolved_arg_project_name=""
-    resolved_arg_project_name="$(_resolve_sdpo_wandb_project_token "${arg_project_name}" || true)"
+    resolved_arg_project_name="$(_resolve_sdpo_wandb_project_token "${arg_project_name}" "${config_path}" || true)"
     if [[ -n "${resolved_arg_project_name}" ]]; then
       printf '%s' "${resolved_arg_project_name}"
       return 0
@@ -1005,7 +1033,7 @@ PY
 )"
   if [[ -n "${default_project_name}" ]]; then
     local resolved_default_project_name=""
-    resolved_default_project_name="$(_resolve_sdpo_wandb_project_token "${default_project_name}" || true)"
+    resolved_default_project_name="$(_resolve_sdpo_wandb_project_token "${default_project_name}" "${config_path}" || true)"
     if [[ -n "${resolved_default_project_name}" ]]; then
       printf '%s' "${resolved_default_project_name}"
       return 0
