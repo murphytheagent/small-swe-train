@@ -773,6 +773,7 @@ def test_run_sdpo_script_wandb_repair_propagates_trainer_exit_code(tmp_path: Pat
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
             "STUB_TRAINER_EXIT_CODE": "17",
         }
     )
@@ -828,6 +829,7 @@ def test_run_sdpo_script_wandb_repair_parses_non_alnum_run_id_from_trainer_log(
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run run-with_dash_123",
             "WANDB_RUN_ID": "",
             "SDPO_WANDB_RUN_ID": "",
         }
@@ -933,6 +935,7 @@ def test_run_sdpo_script_wandb_repair_uses_trainer_project_override(tmp_path: Pa
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
         }
     )
     subprocess.run(
@@ -985,6 +988,7 @@ def test_run_sdpo_script_wandb_repair_uses_double_plus_trainer_project_override(
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
         }
     )
     subprocess.run(
@@ -1037,6 +1041,7 @@ def test_run_sdpo_script_wandb_repair_uses_last_trainer_project_override(
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
         }
     )
     subprocess.run(
@@ -1104,6 +1109,7 @@ def test_run_sdpo_script_wandb_repair_defaults_to_config_project_name(tmp_path: 
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
             "SDPO_TASK_NAME": "custom-task-name",
             "SDPO_WANDB_PROJECT_NAME": "",
             "SDPO_WANDB_PROJECT": "",
@@ -1160,6 +1166,7 @@ def test_run_sdpo_script_wandb_repair_prefers_config_project_over_wandb_project_
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
             "WANDB_PROJECT": "global-wandb-project",
             "SDPO_WANDB_PROJECT_NAME": "",
             "SDPO_WANDB_PROJECT": "",
@@ -1222,6 +1229,7 @@ def test_run_sdpo_script_wandb_repair_uses_project_from_overridden_hydra_config(
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
             "WANDB_PROJECT": "global-wandb-project",
             "SDPO_WANDB_PROJECT_NAME": "",
             "SDPO_WANDB_PROJECT": "",
@@ -1291,6 +1299,7 @@ def test_run_sdpo_script_wandb_repair_config_parser_ignores_nested_project_name(
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
             "WANDB_PROJECT": "global-wandb-project",
             "SDPO_WANDB_PROJECT_NAME": "",
             "SDPO_WANDB_PROJECT": "",
@@ -1358,6 +1367,7 @@ def test_run_sdpo_script_wandb_repair_config_parser_accepts_trainer_header_comme
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
             "WANDB_PROJECT": "global-wandb-project",
             "SDPO_WANDB_PROJECT_NAME": "",
             "SDPO_WANDB_PROJECT": "",
@@ -1428,6 +1438,7 @@ def test_run_sdpo_script_wandb_repair_resolves_project_from_defaults_tree(
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run defaultsTree123",
             "WANDB_PROJECT": "global-wandb-project",
             "SDPO_WANDB_PROJECT_NAME": "",
             "SDPO_WANDB_PROJECT": "",
@@ -1539,6 +1550,7 @@ def test_run_sdpo_script_wandb_repair_resolves_oc_env_project_interpolation(
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run testRun123",
             "SDPO_TEST_WANDB_PROJECT": "resolved-oc-env-project",
             "WANDB_PROJECT": "",
             "SDPO_WANDB_PROJECT_NAME": "",
@@ -1842,6 +1854,7 @@ def test_run_sdpo_script_runs_cleanup_before_wandb_repair(tmp_path: Path) -> Non
                 "VERL_FILE_LOGGER_PATH": str(metrics_path),
                 "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
                 "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+                "STUB_TRAINER_STDOUT": "wandb: setting up run cleanupOrder123",
                 "STUB_REPAIR_STDOUT_MARKER": "repair-called",
             }
         )
@@ -1915,6 +1928,7 @@ def test_run_sdpo_script_signal_shutdown_runs_wandb_repair(
             "VERL_FILE_LOGGER_PATH": str(metrics_path),
             "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
             "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_STDOUT": "wandb: setting up run signalRepair123",
             "STUB_TRAINER_SLEEP_SEC": "30",
         }
     )

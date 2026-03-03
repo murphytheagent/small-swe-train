@@ -1463,6 +1463,7 @@ if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
 else
   echo "run_sdpo.sh watchdog: disabled (SDPO_MONITOR_ENABLE=0)"
   mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"
+  : > "${SDPO_TRAINER_LOG_PATH}"
   _SDPO_TRAINER_LAUNCHED=1
   set +e
   "${CMD[@]}" > >(tee -a "${SDPO_TRAINER_LOG_PATH}") 2>&1
