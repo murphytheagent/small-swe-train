@@ -756,6 +756,43 @@ _extract_override_value() {
 }
 
 _resolve_sdpo_wandb_project_name() {
+  local config_dir_override="${CONFIG_DIR}"
+  local config_name_override="sdpo_swe"
+  local arg
+  local next_is_config_dir=0
+  local next_is_config_name=0
+  for arg in "$@"; do
+    if [[ "${next_is_config_dir}" == "1" ]]; then
+      config_dir_override="${arg}"
+      next_is_config_dir=0
+      continue
+    fi
+    if [[ "${next_is_config_name}" == "1" ]]; then
+      config_name_override="${arg}"
+      next_is_config_name=0
+      continue
+    fi
+    case "${arg}" in
+      --config-dir)
+        next_is_config_dir=1
+        ;;
+      --config-name)
+        next_is_config_name=1
+        ;;
+      --config-dir=*)
+        config_dir_override="${arg#*=}"
+        ;;
+      --config-name=*)
+        config_name_override="${arg#*=}"
+        ;;
+    esac
+  done
+  local config_file_name="${config_name_override}"
+  if [[ "${config_file_name}" != *.yaml ]]; then
+    config_file_name="${config_file_name}.yaml"
+  fi
+  local config_path="${config_dir_override%/}/${config_file_name}"
+
   local arg_project_name=""
   arg_project_name="$(_extract_override_value "trainer.project_name" "$@" || true)"
   if [[ -n "${arg_project_name}" ]]; then
@@ -763,7 +800,7 @@ _resolve_sdpo_wandb_project_name() {
     return 0
   fi
   local default_project_name=""
-  default_project_name="$("${PYTHON_BIN}" - "${CONFIG_DIR}/sdpo_swe.yaml" <<'PY' 2>/dev/null || true
+  default_project_name="$("${PYTHON_BIN}" - "${config_path}" <<'PY' 2>/dev/null || true
 import re
 import sys
 from pathlib import Path
