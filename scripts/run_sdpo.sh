@@ -670,8 +670,8 @@ PY
 _on_sdpo_exit() {
   local exit_code=$?
   _stop_sdpo_watchdog
-  _repair_sdpo_wandb_from_metrics "${exit_code}"
   _cleanup_sdpo_runtime_once
+  _repair_sdpo_wandb_from_metrics "${exit_code}"
   return "${exit_code}"
 }
 
