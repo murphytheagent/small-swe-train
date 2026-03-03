@@ -377,6 +377,50 @@ def test_sitecustomize_marks_fast_tokenizer_pad_warning_as_handled(monkeypatch, 
     assert tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] is True
 
 
+def test_sitecustomize_coerces_pad_outputs_to_tensors(monkeypatch) -> None:
+    torch = pytest.importorskip("torch")
+
+    class _FakeTokenizer:
+        def __init__(self) -> None:
+            self.deprecation_warnings: dict[str, bool] = {}
+
+        def pad(self, *args, **kwargs):
+            _ = args, kwargs
+            return {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_utils_pkg = types.ModuleType("verl.utils")
+    fake_utils_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_tokenizer_module = types.ModuleType("verl.utils.tokenizer")
+
+    def _fake_hf_tokenizer(name_or_path, *args, **kwargs):
+        _ = name_or_path, args, kwargs
+        return _FakeTokenizer()
+
+    def _fake_hf_processor(name_or_path, *args, **kwargs):
+        _ = name_or_path, args, kwargs
+        return None
+
+    fake_tokenizer_module.hf_tokenizer = _fake_hf_tokenizer
+    fake_tokenizer_module.hf_processor = _fake_hf_processor
+    fake_utils_pkg.tokenizer = fake_tokenizer_module
+    fake_utils_pkg.hf_tokenizer = _fake_hf_tokenizer
+    fake_utils_pkg.hf_processor = _fake_hf_processor
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.tokenizer", fake_tokenizer_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+    tokenizer = fake_tokenizer_module.hf_tokenizer("/tmp/model")
+    padded = tokenizer.pad({"input_ids": [1, 2, 3]}, return_tensors="pt")
+
+    assert isinstance(padded["input_ids"], torch.Tensor)
+    assert isinstance(padded["attention_mask"], torch.Tensor)
+
+
 def test_sitecustomize_tokenizer_patch_falls_back_when_fix_flag_is_unsupported(monkeypatch) -> None:
     fake_verl_pkg = types.ModuleType("verl")
     fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]

@@ -14,6 +14,11 @@ from importlib.machinery import ModuleSpec
 from pathlib import Path
 from typing import Any
 
+try:  # pragma: no cover - exercised in train runtime
+    import torch
+except ModuleNotFoundError:  # pragma: no cover - unit-test environments without train deps
+    torch = None  # type: ignore[assignment]
+
 _MISTRAL_MODEL_TYPES = {
     "mistral",
     "mistral3",
@@ -301,6 +306,43 @@ def _suppress_fast_tokenizer_pad_warning(tokenizer: Any) -> None:
     deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
 
+def _install_tokenizer_pad_tensor_guard(tokenizer: Any) -> None:
+    if torch is None or tokenizer is None:
+        return
+    if getattr(tokenizer, "_small_swe_pad_tensor_guard_installed", False):
+        return
+
+    original_pad = getattr(tokenizer, "pad", None)
+    if not callable(original_pad):
+        return
+
+    def _small_swe_pad(*args, **kwargs):
+        pad_output = original_pad(*args, **kwargs)
+        if kwargs.get("return_tensors") != "pt":
+            return pad_output
+
+        for key in ("input_ids", "attention_mask"):
+            try:
+                value = pad_output.get(key) if hasattr(pad_output, "get") else pad_output[key]
+            except Exception:
+                continue
+            if not isinstance(value, (list, tuple)):
+                continue
+            try:
+                tensor_value = torch.as_tensor(value)
+            except Exception:
+                continue
+            try:
+                pad_output[key] = tensor_value
+            except Exception:
+                continue
+        return pad_output
+
+    _small_swe_pad.__name__ = "_small_swe_pad"
+    tokenizer.pad = _small_swe_pad
+    setattr(tokenizer, "_small_swe_pad_tensor_guard_installed", True)
+
+
 def _install_verl_tokenizer_compat_patches() -> None:
     try:
         from verl.utils import tokenizer as tokenizer_module
@@ -341,6 +383,7 @@ def _install_verl_tokenizer_compat_patches() -> None:
             else:
                 raise
         _suppress_fast_tokenizer_pad_warning(tokenizer)
+        _install_tokenizer_pad_tensor_guard(tokenizer)
         return tokenizer
 
     def _small_swe_hf_processor(name_or_path, *args, **kwargs):
