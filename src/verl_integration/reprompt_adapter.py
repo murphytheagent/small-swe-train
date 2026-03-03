@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping, Sequence
 
 from data.feedback_canonicalizer import build_feedback_packet
@@ -16,6 +17,7 @@ _DEFAULT_OUTPUT_CONTRACT_BLOCK = build_teacher_output_contract_block()
 _TURN_SUPERVISION_NEXT = "next_turn"
 _TURN_SUPERVISION_CURRENT = "current_turn"
 _TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
+LOGGER = logging.getLogger(__name__)
 
 
 def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str, bool]:
@@ -247,10 +249,17 @@ def _build_assistant_turn_spans(
             if not selected:
                 spans.append(None)
                 continue
+            if any((left + 1) != right for left, right in zip(selected, selected[1:])):
+                LOGGER.warning(
+                    "Detected non-contiguous generated token positions for turn %s; disabling supervision for that turn.",
+                    turn_index,
+                )
+                spans.append(None)
+                cursor += len(selected)
+                continue
             spans.append((selected[0], selected[-1] + 1))
             cursor += len(selected)
-        if any(span is not None for span in spans):
-            return spans
+        return spans
 
     spans = []
     current_start: int | None = None

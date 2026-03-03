@@ -19,6 +19,7 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
     non_tensor_batch = getattr(batch, "non_tensor_batch", {}) or {}
     responses = getattr(batch, "batch", {}).get("responses")
     response_mask = getattr(batch, "batch", {}).get("response_mask")
+    swe_batch = _batch_looks_like_swe(non_tensor_batch)
 
     batch_size = _resolve_batch_size(responses=responses, non_tensor_batch=non_tensor_batch)
     rows: list[dict[str, Any]] = []
@@ -27,6 +28,7 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
         response_mask_row = _resolve_response_mask(
             raw_mask_value=_select_index(response_mask, index),
             fallback_length=max(len(response_ids), 1),
+            require_explicit_mask=swe_batch,
         )
         generated_response_ids = _filter_generated_token_ids(
             token_ids=response_ids,
@@ -397,11 +399,29 @@ def _extract_reward_ground_truth(reward_model_value: Any) -> Mapping[str, Any]:
     return {}
 
 
-def _resolve_response_mask(*, raw_mask_value: Any, fallback_length: int) -> list[int]:
+def _resolve_response_mask(
+    *,
+    raw_mask_value: Any,
+    fallback_length: int,
+    require_explicit_mask: bool,
+) -> list[int]:
     mask = _coerce_binary_mask(raw_mask_value)
     if mask:
         return mask
+    if require_explicit_mask:
+        raise ValueError("SWE rows require non-empty _response_mask; refusing all-ones fallback.")
     return [1] * max(fallback_length, 1)
+
+
+def _batch_looks_like_swe(non_tensor_batch: Mapping[str, Any]) -> bool:
+    swe_keys = {
+        "trajectory_steps",
+        "trajectory_turn_tool_response_blocks",
+        "trajectory_assistant_turns",
+        "loop_exit_reason",
+        "trajectory_tool_validation_errors",
+    }
+    return any(key in non_tensor_batch for key in swe_keys)
 
 
 def _coerce_binary_mask(value: Any, *, length_hint: int | None = None) -> list[int]:
