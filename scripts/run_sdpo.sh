@@ -482,6 +482,9 @@ _repair_sdpo_wandb_from_metrics() {
   if ! [[ "${trainer_exit_code}" =~ ^-?[0-9]+$ ]]; then
     trainer_exit_code=0
   fi
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    return 0
+  fi
 
   if [[ "${SDPO_WANDB_REPAIR_ON_EXIT}" != "1" ]]; then
     return 0
@@ -758,6 +761,48 @@ _resolve_sdpo_wandb_project_name() {
   fi
   if [[ -n "${SDPO_WANDB_PROJECT_NAME:-}" ]]; then
     printf '%s' "${SDPO_WANDB_PROJECT_NAME}"
+    return 0
+  fi
+  local default_project_name=""
+  default_project_name="$(python3 - "${CONFIG_DIR}/sdpo_swe.yaml" <<'PY' 2>/dev/null || true
+import re
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+if not config_path.is_file():
+    raise SystemExit(1)
+
+lines = config_path.read_text(encoding="utf-8").splitlines()
+trainer_indent = None
+for line in lines:
+    if trainer_indent is None:
+        if re.match(r"^\s*trainer:\s*$", line):
+            trainer_indent = len(line) - len(line.lstrip())
+        continue
+
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+
+    indent = len(line) - len(line.lstrip())
+    if indent <= trainer_indent:
+        break
+
+    match = re.match(r"^\s*project_name:\s*(.+?)\s*(?:#.*)?$", line)
+    if not match:
+        continue
+    value = match.group(1).strip()
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        value = value[1:-1]
+    print(value)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+)"
+  if [[ -n "${default_project_name}" ]]; then
+    printf '%s' "${default_project_name}"
     return 0
   fi
   printf '%s' "${TASK}"
