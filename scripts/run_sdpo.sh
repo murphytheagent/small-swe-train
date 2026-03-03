@@ -164,10 +164,14 @@ _cleanup_slurm_job_ray_processes() {
     return 0
   fi
 
-  if [[ "${SDPO_CLEANUP_DRAIN_SEC}" =~ ^[0-9]+$ ]] && [[ "${SDPO_CLEANUP_DRAIN_SEC}" -gt 0 ]]; then
+  local drain_sec=0
+  if [[ "${SDPO_CLEANUP_DRAIN_SEC}" =~ ^[0-9]+$ ]]; then
+    drain_sec=$((10#${SDPO_CLEANUP_DRAIN_SEC}))
+  fi
+  if (( drain_sec > 0 )); then
     local drain_deadline_epoch
     local now_epoch
-    drain_deadline_epoch=$(( $(date +%s) + SDPO_CLEANUP_DRAIN_SEC ))
+    drain_deadline_epoch=$(( $(date +%s) + drain_sec ))
     pids_after_drain=("${pids[@]}")
     while [[ "${#pids_after_drain[@]}" -gt 0 ]]; do
       now_epoch="$(date +%s)"
@@ -187,7 +191,7 @@ _cleanup_slurm_job_ray_processes() {
       sleep 1
     done
     if [[ "${#pids_after_drain[@]}" -eq 0 ]]; then
-      echo "run_sdpo.sh cleanup: all runtime processes exited during ${SDPO_CLEANUP_DRAIN_SEC}s drain window for SLURM job ${job_id}."
+      echo "run_sdpo.sh cleanup: all runtime processes exited during ${drain_sec}s drain window for SLURM job ${job_id}."
       return 0
     fi
     pids=("${pids_after_drain[@]}")
@@ -743,15 +747,21 @@ _has_override_for_key() {
 _extract_override_value() {
   local prefix="$1"
   shift
+  local found=0
+  local resolved=""
   local arg
   for arg in "$@"; do
     case "${arg}" in
       "${prefix}"=*|+"${prefix}"=*|++"${prefix}"=*)
-        printf '%s' "${arg#*=}"
-        return 0
+        resolved="${arg#*=}"
+        found=1
         ;;
     esac
   done
+  if [[ "${found}" == "1" ]]; then
+    printf '%s' "${resolved}"
+    return 0
+  fi
   return 1
 }
 
