@@ -731,7 +731,7 @@ _has_override_for_key() {
   local arg
   for arg in "$@"; do
     case "${arg}" in
-      "${key}"=*|+"${key}"=*|~"${key}")
+      "${key}"=*|+"${key}"=*|++"${key}"=*|~"${key}")
         return 0
         ;;
     esac
@@ -745,7 +745,7 @@ _extract_override_value() {
   local arg
   for arg in "$@"; do
     case "${arg}" in
-      "${prefix}"=*|+"${prefix}"=*)
+      "${prefix}"=*|+"${prefix}"=*|++"${prefix}"=*)
         printf '%s' "${arg#*=}"
         return 0
         ;;
