@@ -26,6 +26,16 @@ def _thinking_delimiters_balanced(response_text: str) -> bool:
     return response_text.count("<think>") == response_text.count("</think>")
 
 
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
     if value is None:
         return fallback

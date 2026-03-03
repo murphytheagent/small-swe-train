@@ -172,3 +172,28 @@ def test_reward_fn_rejects_terminal_metadata_when_submit_is_not_singleton() -> N
     expected_reward = 1.0 - config.TERMINAL_VALIDITY_PENALTY
     assert rewards == [expected_reward]
     assert info["terminal_submission"] == [False]
+
+
+def test_reward_fn_coerces_explicit_submission_final_response_to_text() -> None:
+    data = [
+        {
+            "response_text": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
+            "submission_final_response": {"summary": "done"},
+            "final_turn_has_submit": True,
+            "final_submit_format_valid": True,
+            "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+            "tool_output": {
+                "metadata": {
+                    "fail_to_pass_results": {"tests/test_bug.py::test_bugfix": True},
+                    "pass_to_pass_results": {"tests/test_ok.py::test_regression": True},
+                }
+            },
+        }
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [1.0]
+    assert info["terminal_submission"] == [True]
+    assert info["terminal_submit_content"] == ["{'summary': 'done'}"]
