@@ -141,3 +141,4 @@ For 8-GPU runs (`NPROC_PER_NODE=8`), the locked rollout defaults are:
 ## Notes
 - End-to-end RFT runtime orchestration lives in `src/trainer/rft_runtime_loop.py`.
 - Design and implementation history remains in `design.md` and `IMPLEMENTATION_BLUEPRINT.md`.
+- Dataset-integration rollout plan (SWE-smith-go/js/ts + SWE-rebench) lives in `docs/plans/swe-smith-rebench-integration-milestones.md`.
