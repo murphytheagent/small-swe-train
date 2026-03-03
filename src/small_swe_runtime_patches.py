@@ -407,6 +407,182 @@ def _install_verl_tokenizer_compat_patches() -> None:
         setattr(verl_utils_module, "hf_processor", tokenizer_module.hf_processor)
 
 
+def _resolve_sequence_length(value: Any) -> int:
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        try:
+            if len(shape) > 0:
+                resolved = int(shape[-1])
+                if resolved >= 0:
+                    return resolved
+        except Exception:
+            pass
+    try:
+        resolved = int(len(value))
+    except Exception:
+        return 0
+    if resolved < 0:
+        return 0
+    return resolved
+
+
+def _coerce_non_negative_index(value: Any, *, fallback: int, upper_bound: int | None = None) -> int:
+    parsed: int | None = None
+    if torch is not None and isinstance(value, torch.Tensor):
+        tensor_value = value.detach()
+        if tensor_value.numel() == 0:
+            parsed = fallback
+        else:
+            try:
+                parsed = int(tensor_value.sum().item())
+            except Exception:
+                try:
+                    parsed = int(tensor_value.reshape(-1)[0].item())
+                except Exception:
+                    parsed = fallback
+    elif isinstance(value, (list, tuple)):
+        parsed = 0
+        for item in value:
+            parsed += _coerce_non_negative_index(item, fallback=0)
+    elif hasattr(value, "item"):
+        try:
+            parsed = int(value.item())
+        except Exception:
+            parsed = None
+    if parsed is None:
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = fallback
+    if parsed < 0:
+        parsed = 0
+    if upper_bound is not None and parsed > upper_bound:
+        parsed = upper_bound
+    return parsed
+
+
+def _slice_response_ids_for_decode(response_ids: Any, valid_response_length: int) -> Any:
+    if valid_response_length <= 0:
+        return response_ids[:0] if hasattr(response_ids, "__getitem__") else []
+
+    if torch is not None and isinstance(response_ids, torch.Tensor):
+        flattened = response_ids.detach().reshape(-1)
+        return flattened[:valid_response_length]
+
+    try:
+        return response_ids[:valid_response_length]
+    except Exception:
+        pass
+
+    if hasattr(response_ids, "tolist"):
+        try:
+            list_value = response_ids.tolist()
+        except Exception:
+            return []
+        if isinstance(list_value, list):
+            if list_value and isinstance(list_value[0], list):
+                list_value = list_value[0]
+            return list_value[:valid_response_length]
+    return []
+
+
+def _install_reward_loop_valid_response_length_guard() -> None:
+    try:
+        from verl.experimental.reward_loop.reward_manager.naive import NaiveRewardManager
+    except Exception:
+        return
+
+    if getattr(NaiveRewardManager, "_small_swe_valid_response_length_guard", False):
+        return
+
+    original_run_single = getattr(NaiveRewardManager, "run_single", None)
+    if not callable(original_run_single):
+        return
+
+    async def _small_swe_run_single(self, data):
+        try:
+            return await original_run_single(self, data)
+        except TypeError as exc:
+            if "only integer tensors of a single element can be converted to an index" not in str(exc):
+                raise
+
+        assert len(data) == 1, "Only support single data item"
+        data_item = data[0]
+        response_ids = data_item.batch["responses"]
+        response_length = _resolve_sequence_length(response_ids)
+        attention_mask = data_item.batch["attention_mask"]
+        attention_tail = attention_mask[-response_length:] if response_length > 0 else attention_mask
+        try:
+            raw_valid_response_length = attention_tail.sum()
+        except Exception:
+            raw_valid_response_length = attention_tail
+        valid_response_length = _coerce_non_negative_index(
+            raw_valid_response_length,
+            fallback=response_length,
+            upper_bound=response_length if response_length > 0 else None,
+        )
+        valid_response_ids = _slice_response_ids_for_decode(response_ids, valid_response_length)
+
+        data_source = data_item.non_tensor_batch["data_source"]
+        ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
+        extra_info = data_item.non_tensor_batch.get("extra_info", {})
+        tool_extra_fields = data_item.non_tensor_batch.get("tool_extra_fields", None)
+        if tool_extra_fields is not None:
+            extra_info.update(tool_extra_fields.items())
+
+        num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
+        rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
+        extra_info["num_turns"] = num_turns
+        extra_info["rollout_reward_scores"] = rollout_reward_scores
+
+        response_str = await self.loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(valid_response_ids, skip_special_tokens=True),
+        )
+
+        extra_reward_kwargs = (
+            {
+                "reward_router_address": self.reward_router_address,
+                "reward_model_tokenizer": self.reward_model_tokenizer,
+            }
+            if self.reward_router_address is not None
+            else {}
+        )
+        if self.is_async_reward_score:
+            result = await self.compute_score(
+                data_source=data_source,
+                solution_str=response_str,
+                ground_truth=ground_truth,
+                extra_info=extra_info,
+                **extra_reward_kwargs,
+            )
+        else:
+            result = await self.loop.run_in_executor(
+                None,
+                lambda: self.compute_score(
+                    data_source=data_source,
+                    solution_str=response_str,
+                    ground_truth=ground_truth,
+                    extra_info=extra_info,
+                    **extra_reward_kwargs,
+                ),
+            )
+
+        reward_extra_info: dict[str, Any] = {}
+        if isinstance(result, dict):
+            score = result["score"]
+            for key, value in result.items():
+                reward_extra_info[key] = value
+        else:
+            score = result
+            reward_extra_info["acc"] = score
+        return {"reward_score": score, "reward_extra_info": reward_extra_info}
+
+    _small_swe_run_single.__name__ = "_small_swe_run_single"
+    NaiveRewardManager.run_single = _small_swe_run_single
+    setattr(NaiveRewardManager, "_small_swe_valid_response_length_guard", True)
+
+
 def _install_transformers_torch_dtype_warning_filter() -> None:
     logger_names = (
         "transformers.configuration_utils",
@@ -466,6 +642,7 @@ def apply_small_swe_runtime_patches() -> None:
         _install_self_distillation_config_compat_patch()
         _install_ray_worker_local_rank_device_patch()
         _install_verl_tokenizer_compat_patches()
+        _install_reward_loop_valid_response_length_guard()
         _install_transformers_torch_dtype_property_patch()
         _install_transformers_torch_dtype_warning_filter()
         _install_known_warning_filters()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import builtins
 import importlib.util
 import os
@@ -492,3 +493,80 @@ def test_sitecustomize_patches_transformers_torch_dtype_property(monkeypatch) ->
             setattr(PretrainedConfig, "_small_swe_torch_dtype_property_patch", original_marker)
         else:
             delattr(PretrainedConfig, "_small_swe_torch_dtype_property_patch")
+
+
+def test_sitecustomize_patches_reward_loop_valid_response_length_indexing(monkeypatch) -> None:
+    torch = pytest.importorskip("torch")
+
+    class _FakeLoop:
+        async def run_in_executor(self, executor, fn):
+            _ = executor
+            return fn()
+
+    class _FakeNaiveRewardManager:
+        def __init__(self) -> None:
+            self.loop = _FakeLoop()
+            self.is_async_reward_score = False
+            self.reward_router_address = None
+            self.reward_model_tokenizer = None
+            self.compute_score = lambda **kwargs: {"score": 0.25, "solution": kwargs["solution_str"]}
+            self.decoded_ids: list[int] = []
+
+            def _decode(token_ids, skip_special_tokens: bool = True):
+                _ = skip_special_tokens
+                if hasattr(token_ids, "tolist"):
+                    token_ids = token_ids.tolist()
+                self.decoded_ids = [int(item) for item in token_ids]
+                return "decoded"
+
+            self.tokenizer = types.SimpleNamespace(decode=_decode)
+
+        async def run_single(self, data):
+            data_item = data[0]
+            response_ids = data_item.batch["responses"]
+            response_length = response_ids.shape[-1]
+            valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
+            _ = response_ids[:valid_response_length]
+            return {"reward_score": 0.0, "reward_extra_info": {"acc": 0.0}}
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_experimental_pkg = types.ModuleType("verl.experimental")
+    fake_experimental_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_reward_loop_pkg = types.ModuleType("verl.experimental.reward_loop")
+    fake_reward_loop_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_reward_manager_pkg = types.ModuleType("verl.experimental.reward_loop.reward_manager")
+    fake_reward_manager_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_naive_module = types.ModuleType("verl.experimental.reward_loop.reward_manager.naive")
+    fake_naive_module.NaiveRewardManager = _FakeNaiveRewardManager
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.experimental", fake_experimental_pkg)
+    monkeypatch.setitem(sys.modules, "verl.experimental.reward_loop", fake_reward_loop_pkg)
+    monkeypatch.setitem(
+        sys.modules,
+        "verl.experimental.reward_loop.reward_manager",
+        fake_reward_manager_pkg,
+    )
+    monkeypatch.setitem(sys.modules, "verl.experimental.reward_loop.reward_manager.naive", fake_naive_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+
+    manager = _FakeNaiveRewardManager()
+    item = types.SimpleNamespace(
+        batch={
+            "responses": torch.tensor([11, 22, 33, 44], dtype=torch.long),
+            "attention_mask": torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=torch.float32),
+        },
+        non_tensor_batch={
+            "data_source": "swe-smith",
+            "reward_model": {"ground_truth": {}},
+        },
+    )
+    result = asyncio.run(manager.run_single([item]))
+
+    assert result["reward_score"] == 0.25
+    assert result["reward_extra_info"]["score"] == 0.25
+    assert result["reward_extra_info"]["solution"] == "decoded"
+    assert manager.decoded_ids == [11, 22, 33, 44]
