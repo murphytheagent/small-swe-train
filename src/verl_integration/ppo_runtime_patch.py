@@ -159,6 +159,10 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
         if self_distillation_cfg is None:
             return None
 
+        turn_supervision_mode = _normalize_turn_supervision_mode(
+            _cfg_get(self_distillation_cfg, "turn_supervision_mode", _TURN_SUPERVISION_NEXT)
+        )
+
         try:
             if torch is None:
                 raise RuntimeError("torch is required for self-distillation runtime patch.")
@@ -178,9 +182,6 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             )
             max_reprompt_len = int(_cfg_get(self_distillation_cfg, "max_reprompt_len", 10240))
             num_recent_raw_blocks = int(_cfg_get(self_distillation_cfg, "num_recent_raw_blocks", 3))
-            turn_supervision_mode = _normalize_turn_supervision_mode(
-                _cfg_get(self_distillation_cfg, "turn_supervision_mode", _TURN_SUPERVISION_NEXT)
-            )
             reprompt_batch = build_self_distillation_batch(
                 rows,
                 include_student_attempt_for_teacher=include_student_attempt,

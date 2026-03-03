@@ -139,6 +139,26 @@ def test_patched_hooks_fallback_to_original_for_non_swe_loops() -> None:
     assert distill_out[0] == "original_distill"
 
 
+def test_patched_distillation_hook_raises_for_invalid_turn_supervision_mode() -> None:
+    trainer_cls = _build_swe_trainer_class()
+    fake_module = SimpleNamespace(
+        RayPPOTrainer=trainer_cls,
+        DataProto=object,
+        compute_position_id_with_mask=lambda mask: mask,
+    )
+    assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
+
+    trainer = trainer_cls()
+    trainer.config.actor_rollout_ref.actor.self_distillation["turn_supervision_mode"] = "curr_turn"
+
+    with pytest.raises(ValueError, match="turn_supervision_mode"):
+        trainer._maybe_build_self_distillation_batch(
+            batch="batch",
+            reward_tensor="reward",
+            reward_extra_infos_dict=None,
+        )
+
+
 def test_patched_reward_hook_uses_local_adapter_for_swe_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
