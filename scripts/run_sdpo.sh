@@ -761,10 +761,6 @@ _resolve_sdpo_wandb_project_name() {
     printf '%s' "${arg_project_name}"
     return 0
   fi
-  if [[ -n "${SDPO_WANDB_PROJECT_NAME:-}" ]]; then
-    printf '%s' "${SDPO_WANDB_PROJECT_NAME}"
-    return 0
-  fi
   local default_project_name=""
   default_project_name="$("${PYTHON_BIN}" - "${CONFIG_DIR}/sdpo_swe.yaml" <<'PY' 2>/dev/null || true
 import re
@@ -805,6 +801,10 @@ PY
 )"
   if [[ -n "${default_project_name}" ]]; then
     printf '%s' "${default_project_name}"
+    return 0
+  fi
+  if [[ -n "${SDPO_WANDB_PROJECT_NAME:-}" ]]; then
+    printf '%s' "${SDPO_WANDB_PROJECT_NAME}"
     return 0
   fi
   printf '%s' "${TASK}"
