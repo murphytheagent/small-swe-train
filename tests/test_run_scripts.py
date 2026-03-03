@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import shlex
 import subprocess
@@ -184,6 +185,9 @@ def _write_python_wandb_repair_probe_stub(tmp_path: Path) -> Path:
         "  exit 0\n"
         "fi\n"
         "if [[ \"${1:-}\" == \"-m\" ]]; then\n"
+        "  if [[ -n \"${STUB_TRAINER_SLEEP_SEC:-}\" ]]; then\n"
+        "    sleep \"${STUB_TRAINER_SLEEP_SEC}\"\n"
+        "  fi\n"
         "  exit ${STUB_TRAINER_EXIT_CODE:-0}\n"
         "fi\n"
         "if [[ \"${1:-}\" == \"-\" ]]; then\n"
@@ -1143,6 +1147,78 @@ def test_run_sdpo_script_runs_cleanup_before_wandb_repair(tmp_path: Path) -> Non
         except subprocess.TimeoutExpired:
             ray_proc.kill()
             ray_proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("shutdown_signal", "expected_exit_code"),
+    [
+        (signal.SIGINT, 130),
+        (signal.SIGTERM, 143),
+    ],
+)
+def test_run_sdpo_script_signal_shutdown_runs_wandb_repair(
+    tmp_path: Path,
+    shutdown_signal: signal.Signals,
+    expected_exit_code: int,
+) -> None:
+    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
+    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
+    fake_checkpoint = tmp_path / "rft-checkpoint"
+    fake_checkpoint.mkdir()
+    fake_parquet = tmp_path / "sdpo_tasks.parquet"
+    fake_parquet.write_text("stub", encoding="utf-8")
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    trainer_log_path = tmp_path / "trainer.log"
+    trainer_log_path.write_text("wandb: setting up run signalRepair123\n", encoding="utf-8")
+    repair_log_path = tmp_path / "repair-calls.log"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
+            "SDPO_TRAINER_MODULE": "dummy.module",
+            "SDPO_MONITOR_ENABLE": "0",
+            "SDPO_CLEANUP_ON_EXIT": "0",
+            "VERL_FILE_LOGGER_PATH": str(metrics_path),
+            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
+            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
+            "STUB_TRAINER_SLEEP_SEC": "30",
+        }
+    )
+    proc = subprocess.Popen(
+        [
+            "bash",
+            str(script_path),
+            f"data.train_files={fake_parquet}",
+            f"data.val_files={fake_parquet}",
+        ],
+        cwd=_repo_root(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+    )
+
+    try:
+        time.sleep(0.6)
+        os.killpg(proc.pid, shutdown_signal)
+        stdout, stderr = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=5)
+
+    assert proc.returncode == expected_exit_code, (stdout, stderr)
+    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
+    assert len(logged_invocations) == 1
+    repair_argv = shlex.split(logged_invocations[0])
+    assert repair_argv[-1] == str(expected_exit_code)
 
 
 def test_run_sdpo_script_dry_run_sets_ray_num_cpus_from_slurm_cpus_per_task() -> None:

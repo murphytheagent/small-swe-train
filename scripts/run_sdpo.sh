@@ -680,6 +680,7 @@ _on_sdpo_int() {
   _stop_sdpo_watchdog
   _terminate_sdpo_trainer_if_running
   _cleanup_sdpo_runtime_once
+  _repair_sdpo_wandb_from_metrics 130
   exit 130
 }
 
@@ -688,6 +689,7 @@ _on_sdpo_term() {
   _stop_sdpo_watchdog
   _terminate_sdpo_trainer_if_running
   _cleanup_sdpo_runtime_once
+  _repair_sdpo_wandb_from_metrics 143
   exit 143
 }
 
