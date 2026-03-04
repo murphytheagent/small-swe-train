@@ -132,7 +132,8 @@ def _validate_explicit_masks(rows: Sequence[Mapping[str, Any]], violations: list
                     )
                 )
                 continue
-            turn_mask = _coerce_binary_mask(raw_turn_mask, width=len(response_mask))
+            if len(turn_mask) < len(response_mask):
+                turn_mask.extend([0] * (len(response_mask) - len(turn_mask)))
             _validate_mask_subset(
                 response_mask=response_mask,
                 turn_mask=turn_mask,
@@ -204,7 +205,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not response_mask:
             continue
         for turn_index, turn_mask_raw in enumerate(masks):
-            turn_mask = _coerce_binary_mask(turn_mask_raw, width=len(response_mask))
+            turn_mask = _coerce_binary_mask(turn_mask_raw)
+            if len(turn_mask) > len(response_mask):
+                violations.append(
+                    "row={row} turn={turn}: generated turn_response_mask length ({turn_len}) exceeds "
+                    "_response_mask length ({resp_len}).".format(
+                        row=row_index,
+                        turn=turn_index,
+                        turn_len=len(turn_mask),
+                        resp_len=len(response_mask),
+                    )
+                )
+                continue
+            if len(turn_mask) < len(response_mask):
+                turn_mask.extend([0] * (len(response_mask) - len(turn_mask)))
             _validate_mask_subset(
                 response_mask=response_mask,
                 turn_mask=turn_mask,
