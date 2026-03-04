@@ -144,6 +144,40 @@ def _validate_explicit_masks(rows: Sequence[Mapping[str, Any]], violations: list
             )
 
 
+def _count_truncated_prompts(
+    *,
+    prompt_truncated: Sequence[bool],
+    turn_prompt_truncated: Any,
+) -> tuple[int, int]:
+    total_prompt_count = 0
+    truncated_count = 0
+    row_turn_flags: Sequence[Any] = ()
+    has_turn_rows = isinstance(turn_prompt_truncated, Sequence) and not isinstance(
+        turn_prompt_truncated,
+        (str, bytes),
+    )
+
+    for row_index, row_flag in enumerate(prompt_truncated):
+        if has_turn_rows and row_index < len(turn_prompt_truncated):
+            candidate = turn_prompt_truncated[row_index]
+            if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
+                row_turn_flags = candidate
+            else:
+                row_turn_flags = ()
+        else:
+            row_turn_flags = ()
+
+        if row_turn_flags:
+            total_prompt_count += len(row_turn_flags)
+            truncated_count += sum(1 for flag in row_turn_flags if bool(flag))
+            continue
+
+        total_prompt_count += 1
+        truncated_count += int(bool(row_flag))
+
+    return total_prompt_count, truncated_count
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     rows = _load_rows(Path(args.input))
@@ -162,13 +196,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     prompt_truncated = [bool(item) for item in batch.get("prompt_truncated", [])]
     turn_prompt_truncated = batch.get("turn_prompt_truncated", [])
-    total_prompt_count = len(prompt_truncated)
-    truncated_count = sum(1 for flag in prompt_truncated if flag)
-    if isinstance(turn_prompt_truncated, Sequence):
-        for row_flags in turn_prompt_truncated:
-            if isinstance(row_flags, Sequence) and not isinstance(row_flags, (str, bytes)):
-                total_prompt_count += len(row_flags)
-                truncated_count += sum(1 for flag in row_flags if bool(flag))
+    total_prompt_count, truncated_count = _count_truncated_prompts(
+        prompt_truncated=prompt_truncated,
+        turn_prompt_truncated=turn_prompt_truncated,
+    )
 
     truncation_rate = (truncated_count / total_prompt_count) if total_prompt_count > 0 else 0.0
     if truncation_rate > float(args.max_truncation_rate):

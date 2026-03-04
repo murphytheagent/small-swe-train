@@ -239,6 +239,7 @@ def _build_assistant_turn_spans(
     generated_positions = [index for index, flag in enumerate(response_mask) if int(flag) != 0]
     if len(turn_token_lengths) >= turn_count and generated_positions:
         spans: list[tuple[int, int] | None] = []
+        had_non_contiguous = False
         cursor = 0
         for turn_index in range(turn_count):
             token_length = max(int(turn_token_lengths[turn_index]), 0)
@@ -254,12 +255,14 @@ def _build_assistant_turn_spans(
                     "Detected non-contiguous generated token positions for turn %s; disabling supervision for that turn.",
                     turn_index,
                 )
+                had_non_contiguous = True
                 spans.append(None)
                 cursor += len(selected)
                 continue
             spans.append((selected[0], selected[-1] + 1))
             cursor += len(selected)
-        return spans
+        if any(span is not None for span in spans) or had_non_contiguous:
+            return spans
 
     spans = []
     current_start: int | None = None
