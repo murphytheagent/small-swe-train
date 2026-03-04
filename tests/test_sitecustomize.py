@@ -167,6 +167,8 @@ def test_sitecustomize_accepts_self_distillation_compat_fields_on_older_verl_con
             alpha=0.25,
             num_recent_raw_blocks=7,
             turn_supervision_mode="current_turn",
+            verifier_feedback_mode="all_turns",
+            legacy_distillation_gating_policy="feedback_present",
         )
     finally:
         builtins.__import__ = original_import
@@ -174,6 +176,8 @@ def test_sitecustomize_accepts_self_distillation_compat_fields_on_older_verl_con
     assert cfg.alpha == 0.25
     assert getattr(cfg, "num_recent_raw_blocks") == 7
     assert getattr(cfg, "turn_supervision_mode") == "current_turn"
+    assert getattr(cfg, "verifier_feedback_mode") == "all_turns"
+    assert getattr(cfg, "legacy_distillation_gating_policy") == "feedback_present"
 
 
 def test_sitecustomize_rejects_invalid_turn_supervision_mode_on_older_verl_config(monkeypatch) -> None:
