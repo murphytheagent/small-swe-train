@@ -235,18 +235,21 @@ def _build_teacher_turn_generator(
 
         prompt_index = min(max(int(turn_index), 0), len(prompts_for_row) - 1)
         teacher_prompt = str(prompts_for_row[prompt_index])
-        completion_payload = _post_chat_completion(
-            base_url=vllm_config.base_url,
-            payload={
-                "model": vllm_config.model_name,
-                "messages": [{"role": "user", "content": teacher_prompt}],
-                "temperature": vllm_config.temperature,
-                "top_p": vllm_config.top_p,
-                "max_tokens": vllm_config.max_tokens,
-            },
-            timeout_sec=vllm_config.request_timeout_sec,
-        )
-        teacher_turn = _extract_assistant_content(completion_payload).strip()
+        try:
+            completion_payload = _post_chat_completion(
+                base_url=vllm_config.base_url,
+                payload={
+                    "model": vllm_config.model_name,
+                    "messages": [{"role": "user", "content": teacher_prompt}],
+                    "temperature": vllm_config.temperature,
+                    "top_p": vllm_config.top_p,
+                    "max_tokens": vllm_config.max_tokens,
+                },
+                timeout_sec=vllm_config.request_timeout_sec,
+            )
+            teacher_turn = _extract_assistant_content(completion_payload).strip()
+        except Exception:
+            teacher_turn = ""
         if teacher_turn:
             return teacher_turn
         return fallback_turn_generator(

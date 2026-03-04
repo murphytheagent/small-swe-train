@@ -142,3 +142,61 @@ def test_teacher_generator_injects_reprompt_once_then_uses_fallback(monkeypatch)
     assert turn_2 == "fallback-2"
     assert len(posted_payloads) == 1
     assert posted_payloads[0]["messages"] == [{"role": "user", "content": "prompt-turn-1"}]
+
+
+def test_teacher_generator_falls_back_when_teacher_completion_fails(monkeypatch) -> None:
+    pilot = _load_pilot_module()
+    trace = pilot.BaselineTrace(
+        task_id="task-1",
+        attempt_index=0,
+        problem_statement="Fix issue",
+        assistant_turns=("turn-0", "turn-1"),
+        turn_tool_response_blocks=((), ()),
+        verification_feedback="",
+        verification_error="",
+        resolved=False,
+    )
+
+    def _fallback_turn_generator(*, task, attempt_index, turn_index, step_index, history):
+        _ = task, attempt_index, step_index, history
+        return f"fallback-{turn_index}"
+
+    def _fake_build_self_distillation_batch(*args, **kwargs):
+        _ = args, kwargs
+        return {"turn_teacher_prompts": [["prompt-turn-0", "prompt-turn-1"]]}
+
+    def _raise_post_error(*, base_url, payload, timeout_sec):
+        _ = base_url, payload, timeout_sec
+        raise RuntimeError("temporary timeout")
+
+    monkeypatch.setattr(pilot, "build_self_distillation_batch", _fake_build_self_distillation_batch)
+    monkeypatch.setattr(pilot, "_post_chat_completion", _raise_post_error)
+
+    generator = pilot._build_teacher_turn_generator(
+        baseline_trace_map={("task-1", 0): trace},
+        fallback_turn_generator=_fallback_turn_generator,
+        vllm_config=pilot.VLLMTurnGeneratorConfig(
+            base_url="http://127.0.0.1:8000/v1",
+            model_name="local-model",
+            request_timeout_sec=10,
+            max_tokens=128,
+            temperature=0.0,
+            top_p=1.0,
+            system_prompt="ignored",
+        ),
+        teacher_reprompt_turn_index=1,
+        max_reprompt_len=1024,
+        num_recent_raw_blocks=3,
+        turn_supervision_mode="current_turn",
+        verifier_feedback_mode="all_turns",
+    )
+    task = SimpleNamespace(task_id="task-1")
+
+    turn_1 = generator(
+        task=task,
+        attempt_index=0,
+        turn_index=1,
+        step_index=0,
+        history=["turn-0", '<tool_response>{"exit_code":1}</tool_response>'],
+    )
+    assert turn_1 == "fallback-1"
