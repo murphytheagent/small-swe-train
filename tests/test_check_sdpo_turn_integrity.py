@@ -171,6 +171,52 @@ def test_recent_raw_leakage_detector_flags_target_turn_marker() -> None:
     assert module._recent_raw_block_contains_target_turn(prompt, turn_index=1) is False
 
 
+def test_integrity_script_forwards_verifier_feedback_mode_to_adapter(tmp_path: Path) -> None:
+    rows = [{"prompt": "Fix issue", "_response_mask": [1]}]
+    input_path = tmp_path / "verifier_feedback_mode.jsonl"
+    _write_jsonl(input_path, rows)
+
+    module = _load_script_module()
+    call_args: dict[str, object] = {}
+
+    def _fake_build_self_distillation_batch(
+        _rows: list[dict],
+        *,
+        include_student_attempt_for_teacher: bool,
+        turn_supervision_mode: str,
+        verifier_feedback_mode: str,
+    ) -> dict[str, list]:
+        call_args["rows"] = _rows
+        call_args["include_student_attempt_for_teacher"] = include_student_attempt_for_teacher
+        call_args["turn_supervision_mode"] = turn_supervision_mode
+        call_args["verifier_feedback_mode"] = verifier_feedback_mode
+        return {
+            "prompt_truncated": [False],
+            "turn_prompt_truncated": [[]],
+            "turn_teacher_prompts": [[]],
+            "turn_response_masks": [[]],
+            "turn_distillation_mask": [[]],
+        }
+
+    module.build_self_distillation_batch = _fake_build_self_distillation_batch
+    rc = module.main(
+        [
+            "--input",
+            str(input_path),
+            "--turn-supervision-mode",
+            "current_turn",
+            "--verifier-feedback-mode",
+            "all_turns",
+        ]
+    )
+
+    assert rc == 0
+    assert call_args["rows"] == rows
+    assert call_args["include_student_attempt_for_teacher"] is True
+    assert call_args["turn_supervision_mode"] == "current_turn"
+    assert call_args["verifier_feedback_mode"] == "all_turns"
+
+
 def test_integrity_script_allows_explicit_no_student_attempt(tmp_path: Path) -> None:
     rows = [
         {

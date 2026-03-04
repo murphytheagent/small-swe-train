@@ -39,6 +39,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=True,
         help="Include current student attempt block when building reprompts (default: enabled).",
     )
+    parser.add_argument(
+        "--verifier-feedback-mode",
+        default="all_turns",
+        choices=("none", "final_turn_only", "all_turns"),
+        help="Verifier-feedback mode used for reprompt construction.",
+    )
     return parser.parse_args(argv)
 
 
@@ -229,6 +235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         rows,
         include_student_attempt_for_teacher=args.include_student_attempt_for_teacher,
         turn_supervision_mode=args.turn_supervision_mode,
+        verifier_feedback_mode=args.verifier_feedback_mode,
     )
 
     prompt_truncated = [bool(item) for item in batch.get("prompt_truncated", [])]
