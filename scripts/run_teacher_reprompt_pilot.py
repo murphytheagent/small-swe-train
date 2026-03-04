@@ -83,7 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_NUM_RECENT_RAW_BLOCKS,
     )
     parser.add_argument("--turn-supervision-mode", default=_TURN_SUPERVISION_CURRENT)
-    parser.add_argument("--verifier-feedback-mode", default="final_turn_only")
+    parser.add_argument("--verifier-feedback-mode", default="all_turns")
     return parser
 
 

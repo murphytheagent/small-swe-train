@@ -30,7 +30,6 @@ _ORIGINAL_AGENT_LOOP_GENERATE_ATTR = "_small_swe_original_agent_loop_generate_se
 _AGENT_LOOP_SERVER_PATCH_MARKER_ATTR = "_small_swe_agent_loop_server_patch_applied"
 _ORIGINAL_AGENT_LOOP_CHOOSE_SERVER_ATTR = "_small_swe_original_agent_loop_choose_server"
 _DISTRIBUTED_TURN_LEVEL_EXPANSION_ENV = "SMALL_SWE_ENABLE_DISTRIBUTED_TURN_LEVEL_EXPANSION"
-_ALLOW_VERIFIER_ALL_TURNS_ENV = "SMALL_SWE_SDPO_ALLOW_VERIFIER_FEEDBACK_ALL_TURNS"
 _TURN_SUPERVISION_NEXT = "next_turn"
 _TURN_SUPERVISION_CURRENT = "current_turn"
 _TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
@@ -242,16 +241,8 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             _cfg_get(self_distillation_cfg, "turn_supervision_mode", _TURN_SUPERVISION_CURRENT)
         )
         verifier_feedback_mode = _normalize_verifier_feedback_mode(
-            _cfg_get(self_distillation_cfg, "verifier_feedback_mode", _VERIFIER_FEEDBACK_NONE)
+            _cfg_get(self_distillation_cfg, "verifier_feedback_mode", _VERIFIER_FEEDBACK_ALL_TURNS)
         )
-        if (
-            verifier_feedback_mode == _VERIFIER_FEEDBACK_ALL_TURNS
-            and not _env_flag_enabled(_ALLOW_VERIFIER_ALL_TURNS_ENV, default=False)
-        ):
-            raise ValueError(
-                "verifier_feedback_mode=all_turns is disallowed by default to avoid non-local hindsight leakage. "
-                f"Set {_ALLOW_VERIFIER_ALL_TURNS_ENV}=1 for explicit experiments."
-            )
         legacy_distillation_gating_policy = _normalize_legacy_gating_policy(
             _cfg_get(
                 self_distillation_cfg,

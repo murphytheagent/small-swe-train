@@ -214,7 +214,7 @@ def test_patched_distillation_hook_raises_for_invalid_turn_supervision_mode() ->
         )
 
 
-def test_patched_distillation_hook_rejects_verifier_feedback_all_turns_without_override() -> None:
+def test_patched_distillation_hook_allows_verifier_feedback_all_turns_by_default() -> None:
     trainer_cls = _build_swe_trainer_class()
     fake_module = SimpleNamespace(
         RayPPOTrainer=trainer_cls,
@@ -222,29 +222,6 @@ def test_patched_distillation_hook_rejects_verifier_feedback_all_turns_without_o
         compute_position_id_with_mask=lambda mask: mask,
     )
     assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
-
-    trainer = trainer_cls()
-    trainer.config.actor_rollout_ref.actor.self_distillation["verifier_feedback_mode"] = "all_turns"
-
-    with pytest.raises(ValueError, match="all_turns"):
-        trainer._maybe_build_self_distillation_batch(
-            batch="batch",
-            reward_tensor="reward",
-            reward_extra_infos_dict=None,
-        )
-
-
-def test_patched_distillation_hook_allows_verifier_feedback_all_turns_with_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    trainer_cls = _build_swe_trainer_class()
-    fake_module = SimpleNamespace(
-        RayPPOTrainer=trainer_cls,
-        DataProto=object,
-        compute_position_id_with_mask=lambda mask: mask,
-    )
-    assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
-    monkeypatch.setenv("SMALL_SWE_SDPO_ALLOW_VERIFIER_FEEDBACK_ALL_TURNS", "1")
 
     trainer = trainer_cls()
     trainer.config.actor_rollout_ref.actor.self_distillation["verifier_feedback_mode"] = "all_turns"
@@ -326,7 +303,7 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     )
     assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
 
-    captured = {"resolved": None, "turn_supervision_mode": None}
+    captured = {"resolved": None, "turn_supervision_mode": None, "verifier_feedback_mode": None}
 
     def _fake_rows(batch, tokenizer):
         _ = batch, tokenizer
@@ -354,6 +331,7 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
         )
         captured["resolved"] = [bool(row.get("resolved")) for row in rows]
         captured["turn_supervision_mode"] = turn_supervision_mode
+        captured["verifier_feedback_mode"] = verifier_feedback_mode
         return {
             "teacher_prompts": ["fix one", "fix two"],
             "self_distillation_mask": [True, False],
@@ -410,6 +388,7 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     distill_batch, metrics = output
     assert captured["resolved"] == [True, False]
     assert captured["turn_supervision_mode"] == "current_turn"
+    assert captured["verifier_feedback_mode"] == "all_turns"
     assert list(distill_batch.tensors["self_distillation_mask"].tolist()) == [1.0, 0.0]
     assert distill_batch.tensors["teacher_input_ids"].tolist() == [
         [10, 11, 0, 1, 2],
@@ -431,6 +410,9 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     assert metrics["self_distillation/empty_target_batch"] == pytest.approx(0.0)
     assert metrics["self_distillation/turn_supervision_mode_next_turn"] == pytest.approx(0.0)
     assert metrics["self_distillation/turn_supervision_mode_current_turn"] == pytest.approx(1.0)
+    assert metrics["self_distillation/verifier_feedback_mode_none"] == pytest.approx(0.0)
+    assert metrics["self_distillation/verifier_feedback_mode_final_turn_only"] == pytest.approx(0.0)
+    assert metrics["self_distillation/verifier_feedback_mode_all_turns"] == pytest.approx(1.0)
     assert "self_distillation/teacher_attention_valid_token_ratio" in metrics
     assert "self_distillation/supervised_token_ratio" in metrics
     assert "self_distillation/invalid_supervised_overlap_count" in metrics

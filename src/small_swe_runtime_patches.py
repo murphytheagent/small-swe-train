@@ -303,7 +303,7 @@ def _install_self_distillation_config_compat_patch() -> None:
             setattr(self, "turn_supervision_mode", normalized_mode)
         if not has_native_verifier_feedback_mode:
             verifier_mode_value = (
-                _VERIFIER_FEEDBACK_NONE
+                _VERIFIER_FEEDBACK_ALL_TURNS
                 if raw_verifier_feedback_mode is missing
                 else raw_verifier_feedback_mode
             )

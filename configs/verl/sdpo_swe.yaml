@@ -70,7 +70,7 @@ actor_rollout_ref:
       max_reprompt_len: 12288                 # teacher prompt token budget (raised for protected-section retention)
       num_recent_raw_blocks: 3                # number of preceding turn blocks in RECENT_RAW_BLOCK
       turn_supervision_mode: current_turn     # default to current-turn supervision for teacher reprompt distillation
-      verifier_feedback_mode: final_turn_only # inject verifier feedback on final distilled turn
+      verifier_feedback_mode: all_turns       # inject verifier feedback on every distilled turn
       legacy_distillation_gating_policy: feedback_present  # activate unresolved rows when feedback exists
       reprompt_truncation: right
       dont_reprompt_on_self_success: true      # always include student attempt (§9.2.4)
