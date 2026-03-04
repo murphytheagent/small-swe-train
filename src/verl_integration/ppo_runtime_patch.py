@@ -244,9 +244,16 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
                 device=response_device,
                 dtype=teacher_prompt_tensors["attention_mask"].dtype,
             )
+            teacher_response_attention_mask = _build_teacher_response_attention_mask(
+                responses=responses,
+                response_mask=response_mask_tensor,
+                tokenizer=getattr(self, "tokenizer", None),
+                device=response_device,
+                dtype=teacher_prompt_tensors["attention_mask"].dtype,
+            )
             teacher_input_ids = torch.cat([teacher_prompt_tensors["input_ids"], responses], dim=1)
             teacher_attention_mask = torch.cat(
-                [teacher_prompt_tensors["attention_mask"], response_mask_tensor],
+                [teacher_prompt_tensors["attention_mask"], teacher_response_attention_mask],
                 dim=1,
             )
             teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
@@ -287,6 +294,27 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             active_count = int(sum(self_distillation_mask_values))
             batch_size = max(len(rows), 1)
             turn_pair_count = int(sum(turn_pair_count_per_sample))
+            supervised_token_ratio = float(response_mask_tensor.float().mean().item())
+            teacher_attention_valid_token_ratio = float(
+                teacher_response_attention_mask.float().mean().item()
+            )
+            invalid_supervised_overlap_count = int(
+                ((response_mask_tensor > 0) & (teacher_response_attention_mask == 0))
+                .sum()
+                .item()
+            )
+            response_width = _resolve_response_width(responses) or 0
+            if (
+                response_width > 0
+                and turn_teacher_attention_mask is not None
+                and turn_response_mask is not None
+            ):
+                turn_teacher_response_attention_mask = turn_teacher_attention_mask[..., -response_width:]
+                invalid_supervised_overlap_count += int(
+                    ((turn_response_mask > 0) & (turn_teacher_response_attention_mask == 0))
+                    .sum()
+                    .item()
+                )
 
             metrics = {
                 "self_distillation/success_sample_fraction": resolved_count / batch_size,
@@ -295,6 +323,13 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
                 "self_distillation/prompt_truncated_fraction": sum(prompt_truncated) / batch_size,
                 "self_distillation/empty_target_batch": 1.0 if active_count == 0 else 0.0,
                 "self_distillation/turn_pair_count_per_sample": turn_pair_count / batch_size,
+                "self_distillation/teacher_attention_valid_token_ratio": (
+                    teacher_attention_valid_token_ratio
+                ),
+                "self_distillation/supervised_token_ratio": supervised_token_ratio,
+                "self_distillation/invalid_supervised_overlap_count": float(
+                    invalid_supervised_overlap_count
+                ),
                 "self_distillation/turn_supervision_mode_next_turn": (
                     1.0 if turn_supervision_mode == _TURN_SUPERVISION_NEXT else 0.0
                 ),
@@ -303,11 +338,17 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
                 ),
             }
             LOGGER.debug(
-                "Built self-distillation batch with turn_supervision_mode=%s (active=%s/%s, turn_pairs=%s).",
+                (
+                    "Built self-distillation batch with turn_supervision_mode=%s "
+                    "(active=%s/%s, turn_pairs=%s, supervised_ratio=%.4f, attention_ratio=%.4f, invalid_overlap=%s)."
+                ),
                 turn_supervision_mode,
                 active_count,
                 len(rows),
                 turn_pair_count,
+                supervised_token_ratio,
+                teacher_attention_valid_token_ratio,
+                invalid_supervised_overlap_count,
             )
             tensors = {
                 "teacher_input_ids": teacher_input_ids,
@@ -834,6 +875,26 @@ def _resolve_response_width(responses: Any) -> int | None:
     return None
 
 
+def _build_teacher_response_attention_mask(
+    *,
+    responses: Any,
+    response_mask: Any,
+    tokenizer: Any,
+    device: Any,
+    dtype: Any,
+) -> Any:
+    if torch is None:
+        raise RuntimeError("torch is required for teacher attention-mask construction.")
+    response_mask_tensor = _ensure_tensor_like(response_mask, dtype=dtype, device=device)
+    responses_tensor = _ensure_tensor_like(responses, dtype=torch.long, device=device)
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_token_id is None:
+        return response_mask_tensor
+
+    non_pad_mask = (responses_tensor != int(pad_token_id)).to(dtype=response_mask_tensor.dtype)
+    return ((response_mask_tensor > 0) | (non_pad_mask > 0)).to(dtype=response_mask_tensor.dtype)
+
+
 def _tokenize_teacher_prompts(
     *,
     tokenizer: Any,
@@ -991,14 +1052,28 @@ def _build_turn_level_teacher_tensors(
 
     responses_tensor = _ensure_tensor_like(responses, dtype=torch.long, device=device)
     response_mask_tensor = _ensure_tensor_like(response_mask, dtype=torch.long, device=device)
+    response_attention_mask_tensor = _build_teacher_response_attention_mask(
+        responses=responses_tensor,
+        response_mask=response_mask_tensor,
+        tokenizer=tokenizer,
+        device=device,
+        dtype=torch.long,
+    )
 
     responses_expanded = responses_tensor.unsqueeze(1).expand(batch_size, max_turn_pairs, response_width)
     responses_flat = responses_expanded.reshape(batch_size * max_turn_pairs, response_width)
-    response_mask_expanded = response_mask_tensor.unsqueeze(1).expand(batch_size, max_turn_pairs, response_width)
-    response_mask_flat = response_mask_expanded.reshape(batch_size * max_turn_pairs, response_width)
+    response_attention_mask_expanded = response_attention_mask_tensor.unsqueeze(1).expand(
+        batch_size,
+        max_turn_pairs,
+        response_width,
+    )
+    response_attention_mask_flat = response_attention_mask_expanded.reshape(
+        batch_size * max_turn_pairs,
+        response_width,
+    )
 
     teacher_input_ids_flat = torch.cat([prompt_input_ids, responses_flat], dim=1)
-    teacher_attention_mask_flat = torch.cat([prompt_attention_mask, response_mask_flat], dim=1)
+    teacher_attention_mask_flat = torch.cat([prompt_attention_mask, response_attention_mask_flat], dim=1)
     teacher_position_ids_flat = compute_position_id_with_mask(teacher_attention_mask_flat)
 
     full_width = prompt_width + response_width
