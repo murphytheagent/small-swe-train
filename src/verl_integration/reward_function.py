@@ -15,14 +15,6 @@ _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 _ALLOWED_TOOLS_SET = set(ALLOWED_TOOLS)
 
 
-def _as_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    return str(value)
-
-
 def _parse_response_text(response_text: str, *, max_tool_calls: int) -> ActionEnvelope:
     stripped = response_text.strip()
     if stripped.startswith("<|im_start|>assistant"):
