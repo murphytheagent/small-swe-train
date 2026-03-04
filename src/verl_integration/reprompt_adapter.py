@@ -12,7 +12,6 @@ from teacher.prompt_builder import TeacherPromptInputs, build_teacher_prompt
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 DEFAULT_NUM_RECENT_RAW_BLOCKS = 3
-_DEFAULT_OUTPUT_CONTRACT_BLOCK = build_teacher_output_contract_block()
 _TURN_SUPERVISION_NEXT = "next_turn"
 _TURN_SUPERVISION_CURRENT = "current_turn"
 _TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
@@ -145,13 +144,17 @@ def _normalize_turn_supervision_mode(value: Any) -> str:
     return normalized
 
 
-def _resolve_output_contract_block(sample: Mapping[str, Any]) -> str:
+def _resolve_output_contract_block(
+    sample: Mapping[str, Any],
+    *,
+    supervision_mode: str,
+) -> str:
     explicit = sample.get("output_contract_block")
     if explicit is None:
-        return _DEFAULT_OUTPUT_CONTRACT_BLOCK
+        return build_teacher_output_contract_block(supervision_mode=supervision_mode)
     rendered = str(explicit).strip()
     if not rendered:
-        return _DEFAULT_OUTPUT_CONTRACT_BLOCK
+        return build_teacher_output_contract_block(supervision_mode=supervision_mode)
     return rendered
 
 
@@ -317,6 +320,7 @@ def _build_turn_prompt(
     sample: Mapping[str, Any],
     *,
     current_turn_index: int,
+    supervision_mode: str,
     turn_blocks: Sequence[str],
     turn_tool_blocks: Sequence[Sequence[str]],
     include_student_attempt_for_teacher: bool,
@@ -339,7 +343,10 @@ def _build_turn_prompt(
     )
 
     current_attempt_block = turn_blocks[current_turn_index]
-    if not include_student_attempt_for_teacher:
+    if (
+        supervision_mode == _TURN_SUPERVISION_CURRENT
+        or not include_student_attempt_for_teacher
+    ):
         current_attempt_block = ""
 
     prompt = build_teacher_prompt(
@@ -350,7 +357,10 @@ def _build_turn_prompt(
             critical_facts_block=memory_blocks.critical_facts_block,
             current_attempt_block=current_attempt_block,
             feedback_block=feedback_block,
-            output_contract_block=_resolve_output_contract_block(sample),
+            output_contract_block=_resolve_output_contract_block(
+                sample,
+                supervision_mode=supervision_mode,
+            ),
         )
     )
     truncated_prompt, was_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
@@ -364,6 +374,7 @@ def _build_legacy_prompt_for_sample(
     sample: Mapping[str, Any],
     *,
     step_index: int,
+    supervision_mode: str,
     include_student_attempt_for_teacher: bool,
     max_reprompt_len: int,
 ) -> tuple[str, bool, dict[str, Any]]:
@@ -387,7 +398,10 @@ def _build_legacy_prompt_for_sample(
         or feedback_packet.canonical_feedback.normalized_text
     )
     current_attempt_block = str(sample.get("current_attempt_block") or sample.get("assistant_response") or "")
-    if not include_student_attempt_for_teacher:
+    if (
+        supervision_mode == _TURN_SUPERVISION_CURRENT
+        or not include_student_attempt_for_teacher
+    ):
         current_attempt_block = ""
 
     memory_blocks = build_teacher_memory_blocks(sample, current_turn_index=step_index)
@@ -399,7 +413,10 @@ def _build_legacy_prompt_for_sample(
             critical_facts_block=memory_blocks.critical_facts_block,
             current_attempt_block=current_attempt_block,
             feedback_block=feedback_block,
-            output_contract_block=_resolve_output_contract_block(sample),
+            output_contract_block=_resolve_output_contract_block(
+                sample,
+                supervision_mode=supervision_mode,
+            ),
         )
     )
     truncated_prompt, was_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
@@ -481,6 +498,7 @@ def build_self_distillation_batch(
                 prompt, _has_teacher_signal, metadata = _build_turn_prompt(
                     sample,
                     current_turn_index=current_turn_index,
+                    supervision_mode=normalized_turn_supervision_mode,
                     turn_blocks=turn_blocks,
                     turn_tool_blocks=per_turn_tool_blocks,
                     include_student_attempt_for_teacher=include_student_attempt_for_teacher,
@@ -518,6 +536,7 @@ def build_self_distillation_batch(
         legacy_prompt, has_teacher_signal, metadata = _build_legacy_prompt_for_sample(
             sample,
             step_index=step_index,
+            supervision_mode=normalized_turn_supervision_mode,
             include_student_attempt_for_teacher=include_student_attempt_for_teacher,
             max_reprompt_len=max_reprompt_len,
         )
