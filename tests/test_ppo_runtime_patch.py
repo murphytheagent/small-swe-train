@@ -299,12 +299,16 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
         max_reprompt_len,
         num_recent_raw_blocks,
         turn_supervision_mode,
+        verifier_feedback_mode,
+        legacy_distillation_gating_policy,
     ):
         _ = (
             include_student_attempt_for_teacher,
             max_reprompt_len,
             num_recent_raw_blocks,
             turn_supervision_mode,
+            verifier_feedback_mode,
+            legacy_distillation_gating_policy,
         )
         captured["resolved"] = [bool(row.get("resolved")) for row in rows]
         return {
@@ -641,6 +645,8 @@ def test_patched_distillation_hook_emits_turn_level_tensors(
         max_reprompt_len,
         num_recent_raw_blocks,
         turn_supervision_mode,
+        verifier_feedback_mode,
+        legacy_distillation_gating_policy,
     ):
         _ = (
             rows,
@@ -648,6 +654,8 @@ def test_patched_distillation_hook_emits_turn_level_tensors(
             max_reprompt_len,
             num_recent_raw_blocks,
             turn_supervision_mode,
+            verifier_feedback_mode,
+            legacy_distillation_gating_policy,
         )
         return {
             "teacher_prompts": ["row-level"],

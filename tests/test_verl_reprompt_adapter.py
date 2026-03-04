@@ -100,6 +100,24 @@ def test_build_self_distillation_batch_empty_tool_output_does_not_set_teacher_si
     assert batch["self_distillation_mask"] == [False]
 
 
+def test_feedback_present_gating_treats_metadata_only_tool_output_as_signal() -> None:
+    samples = [
+        {
+            "prompt": "Fix the thing",
+            "assistant_response": "<tool_call>{\"tool\":\"bash\",\"args\":{\"command\":\"true\"}}</tool_call>",
+            "tool_output": {"exit_code": 0},
+            "resolved": False,
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        legacy_distillation_gating_policy="feedback_present",
+    )
+
+    assert batch["self_distillation_mask"] == [True]
+
+
 def test_build_self_distillation_batch_truncation_preserves_newlines() -> None:
     samples = [
         {
@@ -124,6 +142,7 @@ def test_build_self_distillation_batch_treats_false_string_as_unresolved(monkeyp
         supervision_mode,
         include_student_attempt_for_teacher,
         max_reprompt_len,
+        verifier_feedback_mode,
     ):
         _ = (
             sample,
@@ -131,6 +150,7 @@ def test_build_self_distillation_batch_treats_false_string_as_unresolved(monkeyp
             supervision_mode,
             include_student_attempt_for_teacher,
             max_reprompt_len,
+            verifier_feedback_mode,
         )
         return "prompt", False, {"feedback_packet": {}, "prompt_truncated": False}
 
@@ -340,6 +360,16 @@ def test_invalid_turn_supervision_mode_raises() -> None:
         build_self_distillation_batch([], turn_supervision_mode="bad_mode")
 
 
+def test_invalid_verifier_feedback_mode_raises() -> None:
+    with pytest.raises(ValueError, match="verifier_feedback_mode"):
+        build_self_distillation_batch([], verifier_feedback_mode="bad_mode")
+
+
+def test_invalid_legacy_gating_policy_raises() -> None:
+    with pytest.raises(ValueError, match="legacy_distillation_gating_policy"):
+        build_self_distillation_batch([], legacy_distillation_gating_policy="bad_policy")
+
+
 def test_current_turn_mode_omits_target_turn_attempt_text() -> None:
     samples = [
         {
@@ -396,3 +426,167 @@ def test_next_turn_mode_keeps_current_attempt_block_behavior() -> None:
     prompt_turn_0 = batch["turn_teacher_prompts"][0][0]
     assert "TURN0_SECRET_STUDENT_ATTEMPT" in prompt_turn_0
     assert "next turn" in prompt_turn_0.lower()
+
+
+def test_verifier_feedback_all_turns_injection() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1"],
+            "trajectory_assistant_turn_token_lengths": [2, 2],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"]],
+            "verification_feedback": "Verifier: tests failed in parser path",
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        turn_supervision_mode="current_turn",
+        verifier_feedback_mode="all_turns",
+    )
+
+    assert len(batch["turn_teacher_prompts"][0]) == 2
+    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][0]
+    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][1]
+
+
+def test_verifier_feedback_final_turn_only_injection() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1"],
+            "trajectory_assistant_turn_token_lengths": [2, 2],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"]],
+            "verification_feedback": "Verifier: only final action should include this",
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        turn_supervision_mode="current_turn",
+        verifier_feedback_mode="final_turn_only",
+    )
+
+    assert "[VERIFIER_FEEDBACK]" not in batch["turn_teacher_prompts"][0][0]
+    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][1]
+
+
+def test_verifier_feedback_final_turn_only_injection_next_turn_mode() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1"],
+            "trajectory_assistant_turn_token_lengths": [2, 2],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"]],
+            "verification_feedback": "Verifier: final distilled prompt should include this",
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        turn_supervision_mode="next_turn",
+        verifier_feedback_mode="final_turn_only",
+    )
+
+    assert len(batch["turn_teacher_prompts"][0]) == 1
+    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][0]
+
+
+def test_submission_final_response_not_leaked_into_prompt() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1"],
+            "trajectory_assistant_turn_token_lengths": [2, 2],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"]],
+            "verification_feedback": "Verifier: still failing",
+            "submission_final_response": "LEAK_ME_NEVER",
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        turn_supervision_mode="current_turn",
+        verifier_feedback_mode="all_turns",
+    )
+
+    joined_prompts = "\n".join(batch["turn_teacher_prompts"][0])
+    assert "LEAK_ME_NEVER" not in joined_prompts
+
+
+def test_legacy_gating_policy_activation_matrix() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "assistant_response": "attempt",
+            "tool_output": {"stdout": "pytest failed", "stderr": "", "exit_code": 1},
+            "resolved": False,
+        }
+    ]
+
+    resolved_only = build_self_distillation_batch(
+        samples,
+        legacy_distillation_gating_policy="resolved_only",
+    )
+    feedback_present = build_self_distillation_batch(
+        samples,
+        legacy_distillation_gating_policy="feedback_present",
+    )
+    always = build_self_distillation_batch(
+        samples,
+        legacy_distillation_gating_policy="always",
+    )
+
+    assert resolved_only["self_distillation_mask"] == [False]
+    assert feedback_present["self_distillation_mask"] == [True]
+    assert always["self_distillation_mask"] == [True]
+
+
+def test_legacy_prompt_does_not_inject_status_only_verifier_block() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "assistant_response": "attempt",
+            "resolved": True,
+            "verification_missing": False,
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        verifier_feedback_mode="all_turns",
+        legacy_distillation_gating_policy="feedback_present",
+    )
+
+    assert "[VERIFIER_FEEDBACK]" not in batch["teacher_prompts"][0]
+
+
+def test_feedback_present_gating_respects_verifier_mode_and_payload_presence() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "assistant_response": "attempt",
+            "resolved": False,
+            "verification_feedback": "Verifier: failing tests",
+        }
+    ]
+
+    verifier_disabled = build_self_distillation_batch(
+        samples,
+        verifier_feedback_mode="none",
+        legacy_distillation_gating_policy="feedback_present",
+    )
+    verifier_enabled = build_self_distillation_batch(
+        samples,
+        verifier_feedback_mode="all_turns",
+        legacy_distillation_gating_policy="feedback_present",
+    )
+
+    assert verifier_disabled["self_distillation_mask"] == [False]
+    assert verifier_enabled["self_distillation_mask"] == [True]
+    assert "[VERIFIER_FEEDBACK]" not in verifier_disabled["teacher_prompts"][0]
+    assert "[VERIFIER_FEEDBACK]" in verifier_enabled["teacher_prompts"][0]

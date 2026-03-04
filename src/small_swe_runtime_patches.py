@@ -103,6 +103,22 @@ _WANDB_ESSENTIAL_EXACT_KEYS = {
 _WANDB_ESSENTIAL_PREFIXES = (
     "val-aux/num_turns/",
 )
+_VERIFIER_FEEDBACK_NONE = "none"
+_VERIFIER_FEEDBACK_FINAL_TURN_ONLY = "final_turn_only"
+_VERIFIER_FEEDBACK_ALL_TURNS = "all_turns"
+_VERIFIER_FEEDBACK_MODES = {
+    _VERIFIER_FEEDBACK_NONE,
+    _VERIFIER_FEEDBACK_FINAL_TURN_ONLY,
+    _VERIFIER_FEEDBACK_ALL_TURNS,
+}
+_LEGACY_GATING_RESOLVED_ONLY = "resolved_only"
+_LEGACY_GATING_FEEDBACK_PRESENT = "feedback_present"
+_LEGACY_GATING_ALWAYS = "always"
+_LEGACY_GATING_POLICIES = {
+    _LEGACY_GATING_RESOLVED_ONLY,
+    _LEGACY_GATING_FEEDBACK_PRESENT,
+    _LEGACY_GATING_ALWAYS,
+}
 
 
 class _TorchDtypeDeprecationFilter(logging.Filter):
@@ -131,6 +147,30 @@ def _normalize_turn_supervision_mode(value: Any) -> str:
     if normalized not in _TURN_SUPERVISION_MODES:
         supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
         raise ValueError(f"turn_supervision_mode must be one of: {supported}")
+    return normalized
+
+
+def _normalize_verifier_feedback_mode(value: Any) -> str:
+    if value is None:
+        return _VERIFIER_FEEDBACK_NONE
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _VERIFIER_FEEDBACK_NONE
+    if normalized not in _VERIFIER_FEEDBACK_MODES:
+        supported = ", ".join(sorted(_VERIFIER_FEEDBACK_MODES))
+        raise ValueError(f"verifier_feedback_mode must be one of: {supported}")
+    return normalized
+
+
+def _normalize_legacy_gating_policy(value: Any) -> str:
+    if value is None:
+        return _LEGACY_GATING_RESOLVED_ONLY
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _LEGACY_GATING_RESOLVED_ONLY
+    if normalized not in _LEGACY_GATING_POLICIES:
+        supported = ", ".join(sorted(_LEGACY_GATING_POLICIES))
+        raise ValueError(f"legacy_distillation_gating_policy must be one of: {supported}")
     return normalized
 
 
@@ -209,7 +249,19 @@ def _install_self_distillation_config_compat_patch() -> None:
     has_native_turn_supervision_mode = (
         isinstance(dataclass_fields, dict) and "turn_supervision_mode" in dataclass_fields
     )
-    if has_native_num_recent and has_native_turn_supervision_mode:
+    has_native_verifier_feedback_mode = (
+        isinstance(dataclass_fields, dict) and "verifier_feedback_mode" in dataclass_fields
+    )
+    has_native_legacy_gating_policy = (
+        isinstance(dataclass_fields, dict)
+        and "legacy_distillation_gating_policy" in dataclass_fields
+    )
+    if (
+        has_native_num_recent
+        and has_native_turn_supervision_mode
+        and has_native_verifier_feedback_mode
+        and has_native_legacy_gating_policy
+    ):
         return
 
     if getattr(SelfDistillationConfig, "_small_swe_self_distillation_compat", False):
@@ -226,6 +278,12 @@ def _install_self_distillation_config_compat_patch() -> None:
         raw_turn_supervision_mode: Any = missing
         if not has_native_turn_supervision_mode:
             raw_turn_supervision_mode = kwargs.pop("turn_supervision_mode", missing)
+        raw_verifier_feedback_mode: Any = missing
+        if not has_native_verifier_feedback_mode:
+            raw_verifier_feedback_mode = kwargs.pop("verifier_feedback_mode", missing)
+        raw_legacy_gating_policy: Any = missing
+        if not has_native_legacy_gating_policy:
+            raw_legacy_gating_policy = kwargs.pop("legacy_distillation_gating_policy", missing)
 
         original_init(self, *args, **kwargs)
 
@@ -243,6 +301,22 @@ def _install_self_distillation_config_compat_patch() -> None:
             mode_value = _TURN_SUPERVISION_NEXT if raw_turn_supervision_mode is missing else raw_turn_supervision_mode
             normalized_mode = _normalize_turn_supervision_mode(mode_value)
             setattr(self, "turn_supervision_mode", normalized_mode)
+        if not has_native_verifier_feedback_mode:
+            verifier_mode_value = (
+                _VERIFIER_FEEDBACK_NONE
+                if raw_verifier_feedback_mode is missing
+                else raw_verifier_feedback_mode
+            )
+            normalized_verifier_mode = _normalize_verifier_feedback_mode(verifier_mode_value)
+            setattr(self, "verifier_feedback_mode", normalized_verifier_mode)
+        if not has_native_legacy_gating_policy:
+            gating_policy_value = (
+                _LEGACY_GATING_RESOLVED_ONLY
+                if raw_legacy_gating_policy is missing
+                else raw_legacy_gating_policy
+            )
+            normalized_gating_policy = _normalize_legacy_gating_policy(gating_policy_value)
+            setattr(self, "legacy_distillation_gating_policy", normalized_gating_policy)
 
     _small_swe_self_distillation_init.__name__ = "_small_swe_self_distillation_init"
     SelfDistillationConfig.__init__ = _small_swe_self_distillation_init
