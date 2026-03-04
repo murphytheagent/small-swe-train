@@ -507,6 +507,21 @@ def test_teacher_reprompt_pilot_slurm_script_dry_run_accepts_fixed_kv_cache_over
     assert "--num-gpu-blocks-override 8192" in result.stdout
 
 
+def test_teacher_reprompt_pilot_slurm_script_dry_run_succeeds_without_user_env() -> None:
+    script_path = _repo_root() / "scripts" / "run_teacher_reprompt_pilot_slurm.sh"
+    env = {"PATH": os.environ["PATH"], "SLURM_GPUS_ON_NODE": "8", "PILOT_MODEL_PATH": "/tmp/nonexistent-model-ok-for-dry-run"}
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=_repo_root(),
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--tensor-parallel-size 8" in result.stdout
+    assert "--max-in-flight-tasks 64" in result.stdout
+
+
 def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     result = _run_script("run_sdpo.sh", "data.train_batch_size=4")
     assert "-m verl_integration.main_ppo_entry" in result.stdout

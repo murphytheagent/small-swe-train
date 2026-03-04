@@ -11,8 +11,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-${PROJECT_ROOT}/.venv/bin/python}"
 export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
+RUNTIME_USER="${USER:-}"
+if [[ -z "${RUNTIME_USER}" ]]; then
+  RUNTIME_USER="$(id -un 2>/dev/null || true)"
+fi
+if [[ -z "${RUNTIME_USER}" ]]; then
+  RUNTIME_USER="unknown"
+fi
 
-MODEL_PATH="${PILOT_MODEL_PATH:-/data/scratch/${USER}/models/Qwen3-4B-Instruct-2507}"
+MODEL_PATH="${PILOT_MODEL_PATH:-/data/scratch/${RUNTIME_USER}/models/Qwen3-4B-Instruct-2507}"
 SERVED_MODEL="${PILOT_SERVED_MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
 
 if [[ "${DRY_RUN}" -eq 0 ]]; then
@@ -26,9 +33,9 @@ if [[ "${DRY_RUN}" -eq 0 ]]; then
   fi
 fi
 
-DEFAULT_CACHE_BASE="/data/users/${USER}/cache"
-if [[ ! -d "/data/users/${USER}" ]]; then
-  DEFAULT_CACHE_BASE="/data/scratch/${USER}/cache"
+DEFAULT_CACHE_BASE="/data/users/${RUNTIME_USER}/cache"
+if [[ ! -d "/data/users/${RUNTIME_USER}" ]]; then
+  DEFAULT_CACHE_BASE="/data/scratch/${RUNTIME_USER}/cache"
 fi
 export HF_HOME="${HF_HOME:-${DEFAULT_CACHE_BASE}/huggingface}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}"
