@@ -121,10 +121,17 @@ def test_build_self_distillation_batch_treats_false_string_as_unresolved(monkeyp
         sample,
         *,
         step_index,
+        supervision_mode,
         include_student_attempt_for_teacher,
         max_reprompt_len,
     ):
-        _ = (sample, step_index, include_student_attempt_for_teacher, max_reprompt_len)
+        _ = (
+            sample,
+            step_index,
+            supervision_mode,
+            include_student_attempt_for_teacher,
+            max_reprompt_len,
+        )
         return "prompt", False, {"feedback_packet": {}, "prompt_truncated": False}
 
     monkeypatch.setattr(
@@ -294,3 +301,61 @@ def test_current_turn_handles_zero_length_and_span_mismatch() -> None:
 def test_invalid_turn_supervision_mode_raises() -> None:
     with pytest.raises(ValueError, match="turn_supervision_mode"):
         build_self_distillation_batch([], turn_supervision_mode="bad_mode")
+
+
+def test_current_turn_mode_omits_target_turn_attempt_text() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": [
+                "TURN0_SECRET_STUDENT_ATTEMPT",
+                "TURN1_SECRET_STUDENT_ATTEMPT",
+            ],
+            "trajectory_assistant_turn_token_lengths": [2, 2],
+            "trajectory_turn_tool_response_blocks": [
+                ["<tool_response>r0</tool_response>"],
+                ["<tool_response>r1</tool_response>"],
+            ],
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        turn_supervision_mode="current_turn",
+        include_student_attempt_for_teacher=True,
+    )
+
+    prompt_turn_0 = batch["turn_teacher_prompts"][0][0]
+    prompt_turn_1 = batch["turn_teacher_prompts"][0][1]
+    assert "TURN0_SECRET_STUDENT_ATTEMPT" not in prompt_turn_0
+    assert "TURN1_SECRET_STUDENT_ATTEMPT" not in prompt_turn_1
+    assert "current-turn reflection" in prompt_turn_0
+
+
+def test_next_turn_mode_keeps_current_attempt_block_behavior() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": [
+                "TURN0_SECRET_STUDENT_ATTEMPT",
+                "TURN1_SECRET_STUDENT_ATTEMPT",
+            ],
+            "trajectory_assistant_turn_token_lengths": [2, 2],
+            "trajectory_turn_tool_response_blocks": [
+                ["<tool_response>r0</tool_response>"],
+                ["<tool_response>r1</tool_response>"],
+            ],
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        turn_supervision_mode="next_turn",
+        include_student_attempt_for_teacher=True,
+    )
+
+    prompt_turn_0 = batch["turn_teacher_prompts"][0][0]
+    assert "TURN0_SECRET_STUDENT_ATTEMPT" in prompt_turn_0
+    assert "next turn" in prompt_turn_0.lower()
