@@ -2,6 +2,8 @@
 
 Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO stages.
 
+Latest doc update: 2026-02-28.
+
 ## What is implemented
 - Stable protocol types for assistant tool-call envelopes and feedback packets.
 - ChatML assistant-turn parser with `<think>` and ordered `<tool_call>` support.
@@ -14,7 +16,7 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 - RFT checkpoint writes require explicit `global_step` to avoid accidental step-directory reuse.
 - RFT checkpoint argument validation is fail-fast: invalid checkpoint inputs raise before rollout/training side effects.
 - On-policy RFT output artifacts include `rollout_rows.jsonl` and `rollout_artifact_summary.json` (task IDs, task-image pairs, and trajectory counts) when `data.on_policy.output_dir` is set.
-- Live runtime handoff orchestration is centralized in `src/trainer/rft_runtime.py` and emits `rft_runtime_manifest.json` with selected/rejected counts and rejection-reason tallies.
+- Live on-policy handoff is coordinated by `src/trainer/rft_handoff.py`, summarized in `src/trainer/rft_runtime.py`, and persisted by `src/trainer/rft_runtime_loop.py` in `rft_runtime_loop_manifest.json`.
 - Default on-policy turn generation now uses a live OpenAI-compatible vLLM endpoint (`data.on_policy.turn_generator_mode=default`), with runtime settings sourced from centralized policy + `SMALL_SWE_VLLM_*` overrides.
 - RFT rejection-policy logic is centralized in `src/trainer/rft_rejection.py` with typed selection outputs/signatures.
 - RFT rejection now enforces trajectory-level checks (all tool calls formatted, terminal submit present, terminal submit args valid).
@@ -38,7 +40,8 @@ Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO sta
 
 ## Quick start
 ```bash
-python -m pytest
+MAX_JOBS=2 uv sync --python 3.13 --extra train
+uv run python -m pytest
 ```
 
 ## Build and test
@@ -55,7 +58,7 @@ MAX_JOBS=2 uv sync --python 3.13 --extra train
 
 Run the regression suite:
 ```bash
-python3 -m pytest -q
+uv run python -m pytest -q
 ```
 
 ## Run commands
@@ -134,4 +137,4 @@ python scripts/run_step_sdpo_scaffold.py \
 
 ## Notes
 - End-to-end RFT runtime orchestration lives in `src/trainer/rft_runtime_loop.py`.
-- Design artifacts remain under `outputs/1771579678.414229/` as frozen planning context.
+- Design and implementation history remains in `design.md` and `IMPLEMENTATION_BLUEPRINT.md`.

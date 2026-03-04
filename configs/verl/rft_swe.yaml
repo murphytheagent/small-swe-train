@@ -35,8 +35,8 @@ actor_rollout_ref:
   actor:
     strategy: fsdp2
     optim:
-      lr: 5.0e-5
-      lr_warmup_steps: 50
+      lr: 5.0e-6
+      lr_warmup_steps: 5
       weight_decay: 0.01
       lr_scheduler_type: constant_with_warmup
 
@@ -65,7 +65,7 @@ actor_rollout_ref:
 max_model_len: 8192
 
 data:
-  micro_batch_size_per_gpu: 1
+  micro_batch_size_per_gpu: 2
   # SFT row truncation/padding length.
   max_length: ${max_model_len}
   apply_chat_template_kwargs: {}
@@ -83,7 +83,7 @@ data:
 trainer:
   project_name: small-swe-rft
   experiment_name: ${oc.env:EXPERIMENT,rft}
-  default_local_dir: ${oc.env:PROJECT_ROOT,${hydra:runtime.cwd}}/outputs/rft_runtime/${trainer.experiment_name}
+  default_local_dir: ${oc.env:PROJECT_ROOT,${oc.env:PWD,.}}/outputs/rft_runtime/${trainer.experiment_name}
   save_freq: 100
-  test_freq: 100
+  test_freq: 5
   group_name: small-swe-rft

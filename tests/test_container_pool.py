@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from env.command_runner import CommandResult
@@ -71,9 +73,62 @@ def test_batch_container_pool_cleans_up_on_partial_start_failure() -> None:
         pool.acquire([_task("t1", "image:1"), _task("t2", "missing:image")])
 
     rm_commands = [cmd for cmd in commands if cmd[:3] == ["docker", "rm", "-f"]]
-    assert len(rm_commands) == 1
-    assert rm_commands[0][3] == "container-ok"
+    assert len(rm_commands) >= 2
+    assert any(cmd[3] == "container-ok" for cmd in rm_commands)
     assert pool.active_handles == ()
+
+
+def test_batch_container_pool_retries_start_until_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    run_attempts = 0
+
+    monkeypatch.setattr("env.container_pool.time.sleep", lambda _sec: None)
+
+    def runner(command: list[str], *, timeout_sec: int) -> CommandResult:
+        nonlocal run_attempts
+        del timeout_sec
+        commands.append(list(command))
+        if command[:2] == ["docker", "run"]:
+            run_attempts += 1
+            if run_attempts < 3:
+                return CommandResult(returncode=1, stderr="daemon busy")
+            return CommandResult(returncode=0, stdout="container-ok\n")
+        return CommandResult(returncode=0, stdout="")
+
+    pool = BatchContainerPool(
+        env_pool_size=1,
+        container_start_timeout_sec=10,
+        runner=runner,
+    )
+    handles = pool.acquire([_task("t1", "image:1")])
+
+    assert [handle.container_id for handle in handles] == ["container-ok"]
+    run_commands = [cmd for cmd in commands if cmd[:2] == ["docker", "run"]]
+    assert len(run_commands) == 3
+    rm_commands = [cmd for cmd in commands if cmd[:3] == ["docker", "rm", "-f"]]
+    assert len(rm_commands) == 2
+
+    pool.release_all()
+
+
+def test_batch_container_pool_retries_timeout_then_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("env.container_pool.time.sleep", lambda _sec: None)
+
+    def runner(command: list[str], *, timeout_sec: int) -> CommandResult:
+        del command, timeout_sec
+        raise subprocess.TimeoutExpired(cmd=["docker", "run"], timeout=1)
+
+    pool = BatchContainerPool(
+        env_pool_size=1,
+        container_start_timeout_sec=1,
+        runner=runner,
+    )
+    with pytest.raises(RuntimeError, match="timed out .* after 3 attempts"):
+        pool.acquire([_task("t1", "image:1")])
 
 
 def test_batch_container_pool_adds_management_labels(

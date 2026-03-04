@@ -1,8 +1,8 @@
 # Implementation Blueprint: step-SDPO on verl for SWE-Agent Training
 
-> **Status**: Active implementation snapshot — 2026-02-24 03:26 UTC
-> **Scope**: Single-node 8×GPU training of Qwen3-4B with LoRA on SWE-bench using
-> `lasgroup/SDPO` (a verl fork) as the training and rollout framework.
+> **Status**: Active implementation snapshot — 2026-02-28 00:00 UTC
+> **Scope**: Runtime-integrated step-SDPO on `lasgroup/SDPO` (a verl fork) with
+> on-policy RFT handoff and `swe_bridge_agent` multi-turn execution.
 
 ---
 
@@ -61,9 +61,9 @@
 │    │   SWE-bench instance  │  │                                │       │
 │    │ • Executes bash /     │  │ • TurnParser (format check)    │       │
 │    │   search / edit       │  │ • feedback_canonicalizer       │       │
-│    │ • Returns ToolResponse│  │ • build_action_token_mask      │       │
-│    │ • Terminal: submit    │  │ • build_teacher_prompt          │       │
-│    │                       │  │ • validate_tool_call           │       │
+│    │ • Returns ToolResponse│  │ • contracts + turn parsing     │       │
+│    │ • Terminal: submit    │  │ • reward_loop_score/reward_fn   │       │
+│    │                       │  │ • reward_adapter               │       │
 │    └───────────────────────┘  └────────────────────────────────┘       │
 │                                                                         │
 │  ┌────────────────────────────────────────────────────────────────────┐ │
@@ -110,25 +110,26 @@ This section maps every module in `src/` to its integration point in the
 
 | Our Module | SDPO Hook Point | Integration Method |
 |------------|-----------------|-------------------|
-| **`rollout/turn_parser.py`** | Rollout post-processing, reward function | Custom reward function validates format via `TurnParser.parse()`, computes `FormatMetrics`, assigns binary reward (0/1 = resolved) |
-| **`data/feedback_canonicalizer.py`** | `ray_trainer._maybe_build_self_distillation_batch()` | Override `_collect_feedback()` to call `canonicalize_tool_feedback()` → `build_feedback_packet()` → extract `actionable_error_text` as `feedback_raw` |
-| **`losses/action_masking.py`** | `dp_actor.update_policy()` `response_mask` | Pre-compute per-token mask via `build_action_token_mask(labels, stage="step_sdpo")` → inject as verl's `response_mask` tensor |
-| **`teacher/prompt_builder.py`** | `ray_trainer._maybe_build_self_distillation_batch()` | Replace verl's simple `reprompt_template` with our 6-block `build_teacher_prompt()` to construct teacher input text |
-| **`schemas/contracts.py`** | Rollout tool execution, reward validation | `validate_tool_call()` gates tool calls before Docker execution; `canonical_tool_name()` normalizes `answer` → `submit` |
-| **`data/tool_schema_adapter.py`** | Rollout post-processing | `adapt_external_tool_call()` normalizes tool names from external formats to canonical names during trajectory preprocessing |
-| **`metrics/contracts.py`** | Phase transition gates | `FormatMetrics.rate()` computes quality metrics; checked against `phase_transition_gates.v1.json` thresholds before entering SDPO stage |
-| **`prompts/model_delimiters.py`** | Tokenizer chat template | `ModelDelimiters` drives delimiter strings used in both rollout generation and training token labeling |
-| **`env/runtime_protocol.py`** | Environment executor bridge | `ToolRequest` / `ToolResponse` are the interface between rollout and Docker sandbox |
+| **`verl_integration/main_ppo_entry.py`** | SDPO launcher path (`verl.trainer.main_ppo`) | Imports registration side effects for `swe_bridge_agent` and applies `ppo_runtime_patch` before trainer starts |
+| **`verl_integration/ppo_runtime_patch.py`** | `RayPPOTrainer._compute_or_extract_reward`, `RayPPOTrainer._maybe_build_self_distillation_batch` | Monkey-patches reward and self-distillation hooks in-process to keep upstream SDPO behavior intact |
+| **`verl_integration/reward_adapter.py`** | Reward path / DataProto bridge | Converts rollout `DataProto` into row-level samples, then builds token-aligned reward tensors and extras |
+| **`verl_integration/reward_loop_score.py`** | `custom_reward_function` entrypoint | Adapts local score outputs to expected `RewardLoopManager` field names when running via config-level scorer |
+| **`verl_integration/reprompt_adapter.py`** | `RayPPOTrainer._maybe_build_self_distillation_batch` | Builds 6-block teacher prompts and turn-level self-distillation masks using local `teacher` prompt logic |
+| **`verl_integration/swe_bridge_agent_loop.py`** | `verl.experimental.agent_loop` registry | Registers `swe_bridge_agent`, manages multi-turn tool calls, and returns per-turn response masks |
+| **`verl_integration/env_bridge.py`** | Bridge execution | Runs parsed tool calls in Docker sandbox and returns normalized tool-response metadata |
+| **`rollout/turn_parser.py`** | Bridge + reward path | Parses assistant response payloads and tool call blocks (including optional `<think>`) |
+| **`schemas/contracts.py`** | Tool schema and terminal policy | `validate_tool_call` and terminal-tool checks gate execution/reward paths |
+| **`data/feedback_canonicalizer.py`** | Reprompt + reward extras | Builds canonical feedback packets for logging, reprompt, and scoring context |
 
 ### 2.3 Mapping table: design doc §9.2 → implementation
 
 | §9.2 Requirement | Implementation |
 |-------------------|---------------|
-| **1. Multi-tool-call turns** | `TurnParser` already extracts ordered `ToolCall` list. During rollout, each call is executed sequentially. verl sees the full turn as one generation step. |
-| **2. Stage-specific think-token masking** | `build_action_token_mask(labels, "step_sdpo")` includes think tokens. Injected into verl's `response_mask` before `update_policy()`. |
-| **3. `actionable_error_text` in canonicalization** | `feedback_canonicalizer.build_feedback_packet()` always populates this field. Passed to teacher prompt via `feedback_template`. |
-| **4. Teacher always includes student attempt** | Set `dont_reprompt_on_self_success: true` in config + our `build_teacher_prompt()` always populates `CURRENT_ATTEMPT_BLOCK`. |
-| **5. Terminal tool is `submit`** | `canonical_tool_name("answer") → "submit"`. Rollout loop checks `ActionEnvelope.is_terminal`. verl reward function scores the submitted patch. |
+| **1. Multi-tool-call turns** | `swe_bridge_agent_loop` parses and executes each ordered `ToolCall`; it appends each `<tool_response>` block before the next turn. |
+| **2. Masking source** | SDPO uses rollout-produced `response_mask` (`assistant` tokens = 1, tool/observation tokens = 0). There is no custom SDPO-level fine-grained token-label injection in the runtime patch path. |
+| **3. `actionable_error_text` in canonicalization** | `feedback_canonicalizer.build_feedback_packet()` generates normalized feedback text that is included in reprompt + reward-extra outputs. |
+| **4. Teacher includes student attempt** | `reprompt_adapter` and config flags (`dont_reprompt_on_self_success`, `include_student_attempt_for_teacher`) control whether successful attempts stay in student context. |
+| **5. Terminal tool is `submit`** | `validate_tool_call` + canonical tool normalization enforce terminal tool and argument checks; bridge/reward paths expect submit-formatted terminal turns. |
 
 ---
 
@@ -159,7 +160,7 @@ This section maps every module in `src/` to its integration point in the
 
 - **Loop**: On-policy rollout → environment execution → reward → reprompt → self-distillation training
 - **Loss**: JSD between student logits and EMA-teacher logits (top-k=100, tail bucket, IS clip=2.0)
-- **Masking**: Both think and tool-call tokens included (`stage="step_sdpo"`)
+- **Masking**: Uses rollout-provided `response_mask` directly (`assistant=1`, tool/observation=0); no SDPO runtime token-label remapping.
 - **Config**: `configs/verl/sdpo_swe.yaml`
 - **verl mode**: PPO trainer with `loss_mode: sdpo`
 
@@ -227,53 +228,58 @@ This fits within the 10240-token student budget with room to spare.
 
 ## 5. verl Integration Layer
 
-### 5.1 New files to create (adapter layer between our code and verl)
+### 5.1 Adapter Layer Implemented (between project and verl)
 
 ```
 src/
   verl_integration/
     __init__.py
+    main_ppo_entry.py        # entrypoint bootstrap + patch registration
+    ppo_runtime_patch.py     # runtime monkeypatches for SDPO hooks
     reward_function.py        # verl reward_fn: parse + validate + score
+    reward_loop_score.py      # verl reward-loop scorer wrapper
+    reward_adapter.py         # DataProto bridge and reward tensor assembly
     reprompt_adapter.py       # override _maybe_build_self_distillation_batch
+    swe_bridge_agent_loop.py  # custom multi-turn agent loop
     mask_injector.py          # build response_mask from action_masking.py
     env_bridge.py             # multi-turn rollout ↔ Docker sandbox
     data_preprocessor.py      # rollout trajectories → verl-ready rows
+    submission_verifier.py    # verifies terminal submit payloads
 ```
 
 ### 5.2 `reward_function.py` — Reward Function
 
-verl expects a reward function with signature:
+Local reward function accepts row-like samples (resolved from rollout output):
 ```python
-def reward_fn(data: DataProto) -> tuple[torch.Tensor, dict[str, list]]
+def reward_fn(data: Sequence[Mapping[str, Any]], max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN) -> tuple[list[float], dict[str, list]]
 ```
 
 Our implementation:
-1. Decode each response using the tokenizer
-2. Parse with `TurnParser` → `ActionEnvelope`
-3. Check format validity via `validate_tool_call()`
-4. Compute `FormatMetrics` for monitoring
-5. Score based on SWE-bench resolution (binary 0/1)
-6. Return `(reward_tensor, {"feedback": [feedback_texts], ...})`
+1. Parse assistant response text with `TurnParser`
+2. Validate terminal and tool-call format via schema contracts
+3. Resolve verification signals (`fail_to_pass` / `pass_to_pass`) and `verification_missing` states
+4. Compute and return `(scores, extras)`; `extras` is propagated through reprompt and trainer metrics
 
 ### 5.3 `reprompt_adapter.py` — Teacher Prompt Override
 
-Subclass or monkey-patch `RayPPOTrainer._maybe_build_self_distillation_batch()` to:
+Activated through `ppo_runtime_patch` in `main_ppo_entry.py`.
+Patched `RayPPOTrainer._maybe_build_self_distillation_batch()`:
 1. Call `feedback_canonicalizer.build_feedback_packet()` on raw env output
 2. Construct `TeacherPromptInputs` with all 6 blocks
 3. Call `build_teacher_prompt()` to produce teacher prompt text
 4. Tokenize with Qwen3 tokenizer at `max_reprompt_len=10240`
-5. Return `(teacher_input_ids, teacher_attention_mask, teacher_position_ids, self_distillation_mask)`
+5. Return `teacher_input_ids`, `teacher_attention_mask`, `teacher_position_ids`, and optional turn-level prompt tensors
 
 ### 5.4 `mask_injector.py` — Response Mask Override
 
-Before each training step, convert the token-level labels to a training mask:
-1. Label each token in the response as `"think"`, `"tool_call"`, or `"other"` using delimiter positions
-2. Call `build_action_token_mask(labels, stage="step_sdpo")` → boolean mask
-3. Inject as verl's `response_mask` tensor field
+Used for RFT/preprocessing adapter paths.
+1. Label tokens via delimiter-aware token tags (`think`, `tool_call`, `other`)
+2. Convert tags through `build_action_token_mask` with the requested stage (`rft`/`step_sdpo`)
+3. Inject mask data into sample dictionaries for downstream RFT or local processing
 
 ### 5.5 `env_bridge.py` — Environment Bridge
 
-verl's rollout loop generates one assistant turn at a time. Our bridge:
+`swe_bridge_agent_loop` drives multi-turn rollout; this bridge executes tool calls within one turn:
 1. Receives generated text from vLLM
 2. Parses with `TurnParser` → `ActionEnvelope`
 3. For each `ToolCall` in the envelope:
@@ -298,7 +304,7 @@ verl's rollout loop generates one assistant turn at a time. Our bridge:
 │    envelope = TurnParser.parse(assistant_text)                    │
 │                                                                  │
 │    if envelope.is_terminal:                                      │
-│      reward = score_patch(envelope.tool_calls[0].args)           │
+│      feedback = run_submission_verifier(envelope.tool_calls[0])    │
 │      break                                                       │
 │                                                                  │
 │    for tool_call in envelope.tool_calls:                         │
@@ -313,15 +319,17 @@ verl's rollout loop generates one assistant turn at a time. Our bridge:
 │      tool_response = format_as_tool_response(result)             │
 │      conversation_history.append(tool_response)                  │
 │                                                                  │
-│  return (conversation_history, reward, feedback)                  │
+│  return (conversation_history, feedback)                         │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 Each SWE-bench instance gets its own Docker container with:
-- The target repository checked out at the correct commit
-- Standard development tools (Python, git, etc.)
-- Network access for package installation
+- A checked-out repository for the selected task image
+- Standard developer tools (Python, git, etc.)
+- Network access where required by the task
 - Read-write filesystem access
+- Lifecycle reuse through `env.runtime_protocol` + `env.container_pool`
+- Submission verification path for terminal `submit` tool outputs
 
 The environment executor is the **main custom infrastructure** to build beyond the
 verl framework.
@@ -344,11 +352,11 @@ Step 1: ROLLOUT
 
 Step 2: REWARD
   Inputs:  DataProto from rollout
-  Process: reward_function.py
-    a) TurnParser validates format
-    b) SWE-bench evaluator checks patch correctness
-    c) FormatMetrics computed for monitoring
-  Outputs: reward_tensor (bs,), feedback texts, format metrics
+  Process: reward_adapter -> reward_function
+    a) Converts rollout rows through `dataproto_to_rows`
+    b) Parses assistant responses and validates tool/terminal format
+    c) Computes resolution/verification metrics and score metadata
+  Outputs: reward_tensor (bs, response_len), feedback and extra metrics
 
      │
      ▼
@@ -364,16 +372,16 @@ Step 3: ADVANTAGE
      ▼
 
 Step 4: REPROMPT (self-distillation batch assembly)
-  Inputs:  DataProto + rewards + feedback
+  Inputs:  DataProto + reward outputs + extra fields
   Process: reprompt_adapter.py
-    a) Identify successful rollouts per prompt group
+    a) Resolve success from reward outputs
     b) feedback_canonicalizer.build_feedback_packet() on env output
     c) build_teacher_prompt() with 6-block structure:
        SYSTEM → TASK → TRAJECTORY → ATTEMPT → FEEDBACK → CONTRACT
-    d) Tokenize teacher prompt at max_reprompt_len=10240
-    e) Build self_distillation_mask (which samples have valid teacher input)
-  Outputs: {teacher_input_ids, teacher_attention_mask,
-            teacher_position_ids, self_distillation_mask}
+    d) Tokenize teacher prompt at `max_reprompt_len=10240`
+    e) Build `self_distillation_mask` and optional turn-expanded prompt tensors
+  Outputs: `teacher_input_ids`, `teacher_attention_mask`,
+            `teacher_position_ids`, `self_distillation_mask`
 
      │
      ▼
@@ -382,7 +390,7 @@ Step 5: TRAIN
   Inputs:  DataProto union'd with teacher batch
   Engine:  FSDP on 8 GPUs
   Process: dp_actor.update_policy()
-    a) mask_injector.py builds response_mask with think+tool_call included
+    a) Patched trainer path uses rollout `response_mask` and optional `turn_response_mask`
     b) Student forward → log_probs + top-100 logits
     c) Teacher forward (no_grad, EMA model) with teacher_input_ids
        → teacher log_probs + top-100 logits (using student's top-k indices)
@@ -413,39 +421,43 @@ Step 6: EMA UPDATE
 
 ## 8. File-Level Implementation Plan
 
-### 8.1 New files to create
+### 8.1 Integration inventory (implemented)
 
-| File | Purpose | LoE | Depends on |
-|------|---------|-----|-----------|
-| `src/verl_integration/__init__.py` | Package init | S | — |
-| `src/verl_integration/reward_function.py` | verl reward_fn wrapping our validators | M | `turn_parser`, `contracts`, `feedback_canonicalizer` |
-| `src/verl_integration/reprompt_adapter.py` | Override teacher batch assembly with 6-block prompt | M | `prompt_builder`, `feedback_canonicalizer` |
-| `src/verl_integration/mask_injector.py` | Build response_mask from token labels + stage | S | `action_masking` |
-| `src/verl_integration/env_bridge.py` | Multi-turn rollout ↔ Docker sandbox | L | `runtime_protocol`, `contracts`, `turn_parser` |
-| `src/verl_integration/data_preprocessor.py` | Rollout trajectories → verl-ready rows | M | `tool_schema_adapter`, `turn_parser`, `feedback_canonicalizer` |
-| `configs/verl/sdpo_swe.yaml` | step-SDPO training config | S | — |
-| `configs/verl/rft_swe.yaml` | RFT pre-training config | S | — |
-| `configs/verl/user.yaml` | User-local path overrides | S | — |
-| `scripts/run_sdpo.sh` | Launch script for SDPO | S | configs |
-| `scripts/run_rft.sh` | Launch script for RFT | S | configs |
-
-**LoE**: S = small (< 100 lines), M = medium (100–400 lines), L = large (400+ lines)
+| File | Purpose | Status |
+|------|---------|--------|
+| `src/verl_integration/__init__.py` | Package exports and import surface | Done |
+| `src/verl_integration/main_ppo_entry.py` | Local SDPO launcher/bootstrap | Done |
+| `src/verl_integration/ppo_runtime_patch.py` | Runtime monkeypatch for reward + distillation hooks | Done |
+| `src/verl_integration/reward_adapter.py` | DataProto row adaptation + reward tensor assembly | Done |
+| `src/verl_integration/reward_function.py` | SWE reward and scoring logic | Done |
+| `src/verl_integration/reward_loop_score.py` | `custom_reward_function` compatibility wrapper | Done |
+| `src/verl_integration/reprompt_adapter.py` | 6-block teacher prompt + turn expansion | Done |
+| `src/verl_integration/mask_injector.py` | Stage-aware masking utility for RFT/preprocessing | Done |
+| `src/verl_integration/env_bridge.py` | Tool-call execution bridge | Done |
+| `src/verl_integration/swe_bridge_agent_loop.py` | Multi-turn agent loop registration + runtime | Done |
+| `src/verl_integration/submission_verifier.py` | Submit payload verification | Done |
+| `src/verl_integration/data_preprocessor.py` | RFT/preprocessing and masking support | Done |
+| `src/verl_integration/onpolicy_rollout_adapter.py` | Runtime handoff adapter | Done |
+| `configs/verl/sdpo_swe.yaml` | Step-SDPO runtime config | Done |
+| `configs/verl/rft_swe.yaml` | RFT config | Done |
+| `configs/verl/agent_loops/swe_bridge_agent.yaml` | `swe_bridge_agent` defaults | Done |
+| `scripts/run_sdpo.sh` | SDPO entry + hygiene/resolution + watchdog | Done |
+| `scripts/run_rft.sh` | RFT runtime entrypoint | Done |
 
 ### 8.2 Files to modify
 
 | File | Change | Reason |
 |------|--------|--------|
-| `src/trainer/sdpo_trainer.py` | Replace stubs with deterministic integration metrics | Enables local verification before full verl runtime wiring |
-| `src/eval/swebench_lite.py` | Replace stub with per-episode resolver | Enables deterministic harness checks on prediction payloads |
-| `pyproject.toml` | Add optional `[train]` dependencies | torch, transformers, vllm, flash-attn, peft, ray, verl |
-| `scripts/run_rft.sh`, `scripts/run_sdft.sh`, `scripts/run_sdpo.sh` | Replace echo stubs with verl launcher wrappers | Allows direct config-based job startup when verl is installed |
+| `src/trainer/sdpo_trainer.py` | Keep compatibility shim for scaffold paths; runtime execution now flows through `run_sdpo.sh` + `main_ppo_entry.py` | Preserve older interfaces used by tests and docs |
+| `src/verl_integration/main_ppo_entry.py` | Adjust entry/bootstrap defaults as SDPO dependencies or launch flags evolve | Maintain import-safe startup under Ray workers |
+| `src/verl_integration/ppo_runtime_patch.py` | Keep turn-level expansion logic aligned with upstream SDPO surface changes | Avoid runtime regression from trainer API drift |
+| `scripts/run_sdpo.sh` | Keep checkpoint/cache/validation logic current and add clean shutdown handling | Required for reliable one-step and monitored D6 runs |
+| `scripts/SLURM_GPU_LAUNCH.md` | Keep run envelope examples aligned with hardened `run_sdpo.sh` and `RAY_TMPDIR` policy | Operational reproducibility |
 
-Operational note for `scripts/run_sdpo.sh` on this node:
-- Set `RAY_TMPDIR=/data/scratch/$USER/ray_tmp/$SLURM_JOB_ID` (avoid Ray disk pressure under `/tmp/ray`).
-- Keep tokenizer parallelism disabled in Ray workers (`TOKENIZERS_PARALLELISM=false`) to avoid
-  forked-worker tokenizer deadlocks.
-- Clean stale `/tmp/ray/session_*` only when no Ray daemons are running:
-  `if ! pgrep -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" >/dev/null; then rm -rf /tmp/ray/session_*; fi`
+Operational note for `scripts/run_sdpo.sh`:
+- Prefer setting `RAY_TMPDIR` to a scratch location (for example `/data/scratch/$USER/ray_tmp/$SLURM_JOB_ID`) before long SDPO runs.
+- Keep tokenizer deadlock guard enabled: `TOKENIZERS_PARALLELISM=false` (set by launcher by default).
+- Run labels and optional cleanup are handled by the launcher/runtime; pair with `scripts/SLURM_GPU_LAUNCH.md` examples for submission context.
 - Canonical launch examples live in `scripts/SLURM_GPU_LAUNCH.md`.
 
 ### 8.3 Files unchanged (protocol layer — already complete)
@@ -521,10 +533,10 @@ docker>=24.0                   # container runtime
 
 ### M4: step-SDPO Integration
 - [x] `verl_integration/reprompt_adapter.py` — 6-block teacher prompt scaffold (2026-02-21 09:55 UTC)
-- [x] Wire `mask_injector.py` for SDPO-stage masking (think tokens included) (2026-02-21 09:55 UTC)
+- [x] Wire SDPO runtime to use rollout-produced `response_mask` and local `reward_adapter` path instead of local token-mask remapping (2026-02-28 00:00 UTC)
 - [x] `configs/verl/sdpo_swe.yaml` finalized (done — see `configs/verl/`)
-- [x] End-to-end: rollout → reward → reprompt → train → EMA update (2026-02-21 19:03 UTC; `SDPOTrainerScaffold.run_end_to_end_global_step`)
-- [x] Validate on 1 global step, inspect teacher prompts + loss curves (2026-02-21 19:03 UTC; `tests/test_sdpo_trainer.py`)
+- [x] End-to-end: rollout → reward → reprompt → train → EMA update (2026-02-27 20:00 UTC; `run_sdpo.sh --dry-run` and one-step smoke path in `outputs/turn_sdpo_runtime/.../global_step_1`)
+- [x] Runtime wiring in progress: SDPO monitor + dataset checkpoint resolution + launch hygiene validated (2026-02-28 00:00 UTC; `scripts/run_sdpo.sh`)
 
 ### M5: Evaluation Harness
 - [x] `eval/swebench_lite.py` — deterministic per-episode evaluator scaffold (2026-02-21 09:55 UTC)
@@ -594,6 +606,8 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-23 10:47 UTC] Grounded vLLM/verl launcher imports with explicit doc/source links in `scripts/run_rft.sh` and `src/trainer/rft_runtime_loop.py` to keep external module entrypoints tied to authoritative references.
 - [2026-02-24 03:02 UTC] Locked realistic validated defaults in `configs/runtime/training_policy_defaults.v1.json` and config resolvers: `collector_max_in_flight_tasks=32` plus 8-GPU vLLM parallelism `TP/DP=2/4`; merged collector-concurrency PR #9 into PR #8 base.
 - [2026-02-24 03:26 UTC] Hardened `scripts/run_rft.sh` TP/DP auto-resolution so non-divisible TP overrides now safely fall back to `DP=1` (instead of reusing default DP and producing invalid combinations); added regression `test_run_rft_script_dry_run_nondivisible_tp_override_falls_back_to_dp_one`.
+- [2026-02-28 00:00 UTC] Activated runtime SDPO patch path: `main_ppo_entry.py` + `ppo_runtime_patch.py` + `reward_adapter.py` + `reward_loop_score.py`, plus `swe_bridge_agent_loop` registration and `run_sdpo.sh` checkpoint/cache validation. Added end-to-end one-step evidence under `outputs/turn_sdpo_runtime/.../global_step_1`.
+- [2026-02-28 00:00 UTC] Updated this blueprint to mark D6 acceptance-run evidence as remaining gap: full monitored run artifacts (`acceptance_summary.md`) still not persisted under `outputs/integration/<run_label>` by automation.
 
 ---
 
@@ -662,9 +676,31 @@ Dry-run launcher resolution:
 NPROC_PER_NODE=8 bash scripts/run_rft.sh --dry-run trainer.total_training_steps=1
 ```
 
+SDPO dry-run:
+```bash
+SDPO_MONITOR_ENABLE=0 bash scripts/run_sdpo.sh --dry-run trainer.total_training_steps=1
+```
+
 Default runtime loop:
 ```bash
 NPROC_PER_NODE=8 WANDB_MODE=offline bash scripts/run_rft.sh
+```
+
+SDPO one-step smoke (monitoring on):
+```bash
+SDPO_MONITOR_ENABLE=1 \
+SDPO_TRAINER_LOG_PATH=outputs/turn_sdpo_runtime/$(date -u +%Y%m%dT%H%M%SZ)_sdpo_smoke.trainer.log \
+bash scripts/run_sdpo.sh trainer.total_training_steps=1
+```
+
+SDPO acceptance scaffold (D6 target):
+```bash
+bash scripts/run_sdpo.sh \
+  actor_rollout_ref.model.path=/path/to/rft/checkpoint \
+  trainer.total_training_steps=1 \
+  trainer.test_freq=0 \
+  data.train_files=/path/to/turn_sdpo_train.parquet \
+  data.val_files=/path/to/turn_sdpo_train.parquet
 ```
 
 Realistic 2-step profile command:
@@ -695,3 +731,4 @@ bash scripts/run_flash_attn_rebuild.sh
 - `rft_runtime.loop.collector_max_in_flight_tasks=32`
 - `rft_runtime.vllm_parallelism.by_nproc_per_node.8.tensor_parallel_size=2`
 - `rft_runtime.vllm_parallelism.by_nproc_per_node.8.data_parallel_size=4`
+- SDPO runtime defaults are now resolved from `run_sdpo.sh` (`data.train_files`/`data.val_files`, checkpoint path, and `actor_rollout_ref.rollout` multi-turn/agent keys).

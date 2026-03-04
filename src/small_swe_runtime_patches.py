@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import builtins
+import math
 import importlib.util
 import json
 import logging
 import os
 import sys
+import threading
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from importlib.machinery import ModuleSpec
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,77 @@ _TORCH_DTYPE_DEPRECATION_MESSAGE = "`torch_dtype` is deprecated! Use `dtype` ins
 _TURN_SUPERVISION_NEXT = "next_turn"
 _TURN_SUPERVISION_CURRENT = "current_turn"
 _TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
+_WANDB_EXTRA_KEYS_ENV = "SMALL_SWE_WANDB_EXTRA_KEYS"
+_WANDB_EXTRA_PREFIXES_ENV = "SMALL_SWE_WANDB_EXTRA_PREFIXES"
+_WANDB_ESSENTIAL_FILTER_ENV = "SMALL_SWE_WANDB_FILTER_ESSENTIALS"
+
+_WANDB_ESSENTIAL_EXACT_KEYS = {
+    "training/global_step",
+    "training/epoch",
+    "actor/pg_loss",
+    "actor/kl_loss",
+    "actor/entropy",
+    "actor/grad_norm",
+    "actor/lr",
+    "critic/score/mean",
+    "critic/score/max",
+    "critic/score/min",
+    "critic/rewards/mean",
+    "critic/rewards/max",
+    "critic/rewards/min",
+    "global_seqlen/min",
+    "global_seqlen/max",
+    "global_seqlen/mean",
+    "global_seqlen/balanced_min",
+    "global_seqlen/balanced_max",
+    "prompt_length/mean",
+    "prompt_length/max",
+    "prompt_length/min",
+    "response_length/mean",
+    "response_length/max",
+    "response_length/min",
+    "response_length/clip_ratio",
+    "response_length_non_aborted/mean",
+    "response_length_non_aborted/max",
+    "response_length_non_aborted/min",
+    "response/aborted_ratio",
+    "num_turns/mean",
+    "num_turns/max",
+    "num_turns/min",
+    "self_distillation/empty_target_batch",
+    "self_distillation/active_turn_pairs_in_micro_batch",
+    "self_distillation/turn_pair_count_per_sample",
+    "self_distillation/success_sample_fraction",
+    "self_distillation/feedback_available_fraction",
+    "self_distillation/reprompt_sample_fraction",
+    "self_distillation/prompt_truncated_fraction",
+    "rollout_corr/kl",
+    "rollout_corr/k3_kl",
+    "rollout_corr/training_ppl",
+    "rollout_corr/rollout_ppl",
+    "rollout_corr/log_ppl_diff",
+    "rollout_corr/log_ppl_abs_diff",
+    "rollout_corr/ppl_ratio",
+    "training/rollout_probs_diff_mean",
+    "training/rollout_probs_diff_max",
+    "training/rollout_probs_diff_std",
+    "training/rollout_actor_probs_pearson_corr",
+    "timing_s/gen",
+    "timing_s/update_actor",
+    "timing_s/step",
+    "timing_per_token_ms/gen",
+    "timing_per_token_ms/update_actor",
+    "perf/time_per_step",
+    "perf/throughput",
+    "perf/total_num_tokens",
+    "perf/max_memory_allocated_gb",
+    "perf/max_memory_reserved_gb",
+    "perf/cpu_memory_used_gb",
+}
+
+_WANDB_ESSENTIAL_PREFIXES = (
+    "val-aux/num_turns/",
+)
 
 
 class _TorchDtypeDeprecationFilter(logging.Filter):
@@ -633,6 +706,243 @@ def _install_known_warning_filters() -> None:
     )
 
 
+def _parse_csv_env_values(name: str) -> tuple[str, ...]:
+    value = os.environ.get(name)
+    if value is None:
+        return ()
+    parts = [part.strip() for part in value.split(",")]
+    return tuple(part for part in parts if part)
+
+
+def _metric_key_is_wandb_essential(key: str) -> bool:
+    if key in _WANDB_ESSENTIAL_EXACT_KEYS:
+        return True
+    if key.startswith("val-core/") and "/reward/mean@1" in key:
+        return True
+    if key.startswith("val-aux/") and (
+        "/score/mean@1" in key
+        or "/validation_errors/mean@1" in key
+        or "/reward_verification_missing/mean@1" in key
+    ):
+        return True
+    for prefix in _WANDB_ESSENTIAL_PREFIXES:
+        if key.startswith(prefix):
+            return True
+    if key in _parse_csv_env_values(_WANDB_EXTRA_KEYS_ENV):
+        return True
+    for prefix in _parse_csv_env_values(_WANDB_EXTRA_PREFIXES_ENV):
+        if key.startswith(prefix):
+            return True
+    return False
+
+
+def _normalize_scalar_metric_value(value: Any) -> Any | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return value
+    # Handle numpy scalar-like values without importing numpy.
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _normalize_scalar_metric_value(item())
+        except Exception:
+            return None
+    return None
+
+
+def _filter_wandb_metrics_for_sdpo(data: Mapping[str, Any]) -> dict[str, Any]:
+    filtered: dict[str, Any] = {}
+    for raw_key, value in data.items():
+        if not isinstance(raw_key, str):
+            continue
+        if not _metric_key_is_wandb_essential(raw_key):
+            continue
+        normalized = _normalize_scalar_metric_value(value)
+        if normalized is None:
+            continue
+        filtered[raw_key] = normalized
+    return filtered
+
+
+def _sanitize_scalar_metrics(data: Mapping[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for raw_key, value in data.items():
+        if not isinstance(raw_key, str):
+            continue
+        normalized = _normalize_scalar_metric_value(value)
+        if normalized is None:
+            continue
+        sanitized[raw_key] = normalized
+    return sanitized
+
+
+def _safe_finalize_tracking_backend(backend_name: str, logger_instance: Any) -> None:
+    finish_fn = getattr(logger_instance, "finish", None)
+    if not callable(finish_fn):
+        return
+
+    try:
+        if backend_name == "wandb":
+            # wandb.finish can throw when called inside an active async loop.
+            try:
+                import asyncio
+
+                asyncio.get_running_loop()
+                in_async_loop = True
+            except RuntimeError:
+                in_async_loop = False
+            except Exception:
+                in_async_loop = False
+
+            if in_async_loop:
+                thread_error: list[Exception] = []
+
+                def _finish_in_thread() -> None:
+                    try:
+                        try:
+                            finish_fn(exit_code=0, quiet=True)
+                        except TypeError:
+                            finish_fn(exit_code=0)
+                    except Exception as exc:  # pragma: no cover - defensive fallback
+                        thread_error.append(exc)
+
+                finish_thread = threading.Thread(
+                    target=_finish_in_thread,
+                    name="small-swe-wandb-finish",
+                    daemon=True,
+                )
+                finish_thread.start()
+                finish_thread.join(timeout=5.0)
+                if finish_thread.is_alive():
+                    logging.getLogger(__name__).warning(
+                        "Timed out waiting for wandb.finish() in async-loop fallback thread."
+                    )
+                if thread_error:
+                    raise thread_error[0]
+                return
+
+            try:
+                finish_fn(exit_code=0, quiet=True)
+            except TypeError:
+                finish_fn(exit_code=0)
+            return
+
+        finish_fn()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Tracking backend %s finalization failed: %s",
+            backend_name,
+            exc,
+        )
+
+
+def _install_verl_tracking_patch() -> None:
+    try:
+        from verl.utils import tracking as tracking_module
+    except Exception:
+        return
+
+    Tracking = getattr(tracking_module, "Tracking", None)
+    if Tracking is None:
+        return
+    if getattr(Tracking, "_small_swe_tracking_patch", False):
+        return
+
+    original_log = Tracking.log
+
+    def _small_swe_tracking_log(self, data, step, backend=None):
+        if not isinstance(data, Mapping):
+            return original_log(self, data, step, backend=backend)
+
+        logger_map = getattr(self, "logger", {})
+        if not isinstance(logger_map, dict):
+            return original_log(self, data, step, backend=backend)
+
+        payload = dict(data)
+        backend_filter: set[str] | None
+        if backend is None:
+            backend_filter = None
+        elif isinstance(backend, str):
+            backend_filter = {backend}
+        else:
+            backend_filter = {str(item) for item in backend}
+
+        if "wandb" in logger_map and (backend_filter is None or "wandb" in backend_filter):
+            if _coerce_bool_env(_WANDB_ESSENTIAL_FILTER_ENV, default=True):
+                wandb_payload = _filter_wandb_metrics_for_sdpo(payload)
+            else:
+                wandb_payload = _sanitize_scalar_metrics(payload)
+            if wandb_payload:
+                try:
+                    logger_map["wandb"].log(data=wandb_payload, step=step)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "W&B logging failed at step %s: %s",
+                        step,
+                        exc,
+                    )
+
+        for default_backend, logger_instance in logger_map.items():
+            if default_backend == "wandb":
+                continue
+            if backend_filter is not None and default_backend not in backend_filter:
+                continue
+            logger_instance.log(data=payload, step=step)
+
+    def _small_swe_tracking_close(self) -> None:
+        if getattr(self, "_small_swe_tracking_closed", False):
+            return
+        setattr(self, "_small_swe_tracking_closed", True)
+
+        logger_map = getattr(self, "logger", None)
+        if not isinstance(logger_map, dict):
+            return
+
+        ordered_backends = (
+            "wandb",
+            "swanlab",
+            "vemlp_wandb",
+            "tensorboard",
+            "clearml",
+            "trackio",
+            "file",
+        )
+        finalized: set[str] = set()
+        for backend_name in ordered_backends:
+            logger_instance = logger_map.get(backend_name)
+            if logger_instance is None:
+                continue
+            _safe_finalize_tracking_backend(backend_name, logger_instance)
+            finalized.add(backend_name)
+
+        for backend_name, logger_instance in logger_map.items():
+            if backend_name in finalized:
+                continue
+            _safe_finalize_tracking_backend(backend_name, logger_instance)
+
+    def _small_swe_tracking_del(self):
+        close_fn = getattr(self, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                return
+
+    _small_swe_tracking_log.__name__ = "_small_swe_tracking_log"
+    _small_swe_tracking_close.__name__ = "_small_swe_tracking_close"
+    _small_swe_tracking_del.__name__ = "_small_swe_tracking_del"
+
+    Tracking.log = _small_swe_tracking_log
+    Tracking.close = _small_swe_tracking_close
+    Tracking.__del__ = _small_swe_tracking_del
+    setattr(Tracking, "_small_swe_tracking_patch", True)
+
+
 def apply_small_swe_runtime_patches() -> None:
     if _coerce_bool_env("SMALL_SWE_HIDE_EXTERNAL_FLASH_ATTN", default=False):
         _clear_cached_flash_attn_modules()
@@ -645,6 +955,7 @@ def apply_small_swe_runtime_patches() -> None:
         _install_reward_loop_valid_response_length_guard()
         _install_transformers_torch_dtype_property_patch()
         _install_transformers_torch_dtype_warning_filter()
+        _install_verl_tracking_patch()
         _install_known_warning_filters()
         # Ray worker processes do not enter our main wrapper module.
         # Patch lazily once ray_trainer is imported in-process.

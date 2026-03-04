@@ -95,7 +95,7 @@ actor_rollout_ref:
       min_lr_ratio: 0.1                     # keep LR floor at 10% of base LR
 
     # -- Mini-batch / micro-batch ----------------------------------------------
-    ppo_mini_batch_size: 32
+    ppo_mini_batch_size: 8
     ppo_micro_batch_size_per_gpu: 2
     ppo_max_token_len_per_gpu: 24576
     ppo_epochs: 1                             # on-policy: single pass
@@ -135,14 +135,15 @@ actor_rollout_ref:
     dtype: bfloat16
     enforce_eager: true
     free_cache_engine: true
+    # TP and DP can only be set to 1 for this verl version
     tensor_model_parallel_size: 1
     data_parallel_size: 1
-    n: 16                                      # rollouts per prompt
+    n: 2                                     # rollouts per prompt
     temperature: 0.7
     top_p: 0.95
     gpu_memory_utilization: 0.9
     max_num_batched_tokens: 262144
-    max_num_seqs: 64
+    max_num_seqs: 96
     load_format: dummy
     log_prob_micro_batch_size_per_gpu: 4
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
@@ -202,10 +203,12 @@ algorithm:
 # Data
 # ---------------------------------------------------------------------------
 data:
-  train_batch_size: 128                        # prompts per global batch
+  train_batch_size: 16                        # prompts per global batch
+  val_batch_size: 128                         # validation batch size (rows)
+  val_max_samples: 128                        # cap validation subset per eval
   prompt_key: prompt                          # RFT handoff parquet exports metadata-rich `prompt` chats
   max_prompt_length: 4000
-  max_response_length: 8192
+  max_response_length: 12288
   # Preload stage owns any dataset filtering; do not re-filter at SDPO runtime launch.
   filter_overlong_prompts: false
   apply_chat_template_kwargs: {}
@@ -214,7 +217,7 @@ data:
 
 # Avoid hardcoded external reward module paths from upstream defaults.
 custom_reward_function:
-  path: ${oc.env:PROJECT_ROOT,${hydra:runtime.cwd}}/src/verl_integration/reward_loop_score.py
+  path: ${oc.env:PROJECT_ROOT,${oc.env:PWD,.}}/src/verl_integration/reward_loop_score.py
   name: compute_score
 
 # ---------------------------------------------------------------------------
@@ -226,8 +229,8 @@ trainer:
   n_gpus_per_node: 8
   total_epochs: 1
   total_training_steps: null                  # set at launch
-  default_local_dir: ${oc.env:PROJECT_ROOT,${hydra:runtime.cwd}}/outputs/turn_sdpo_runtime/${trainer.experiment_name}
-  val_before_train: true
+  default_local_dir: ${oc.env:PROJECT_ROOT,${oc.env:PWD,.}}/outputs/turn_sdpo_runtime/${trainer.experiment_name}
+  val_before_train: false
   save_freq: 100
-  test_freq: 10                          # PPO validation frequency is step-based
+  test_freq: 10                           # PPO validation frequency is step-based
   group_name: small-swe-sdpo

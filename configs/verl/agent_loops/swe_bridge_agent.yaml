@@ -1,10 +1,15 @@
 - name: swe_bridge_agent
   _target_: verl_integration.swe_bridge_agent_loop.SWEBridgeAgentLoop
   # Runtime knobs are explicitly configured here for SDPO swe_bridge_agent.
-  env_pool_size: 32
-  tool_timeout_sec: 120
-  container_start_timeout_sec: 120
+  # Global cap across all agent workers/processes for this run.
+  # Keep aligned with RFT collector_max_in_flight_tasks.
+  env_pool_size: 96
+  tool_timeout_sec: 240
+  container_start_timeout_sec: 300
   cleanup_timeout_sec: 30
-  attempt_timeout_sec: 300
+  attempt_timeout_sec: 1500
+  # Slot queueing should not consume per-attempt execution budget.
+  # 0 disables slot-wait timeout and allows queued tasks to wait indefinitely.
+  container_slot_wait_timeout_sec: 0
   max_tool_calls_per_turn: 3
   verifier_timeout_sec: 600

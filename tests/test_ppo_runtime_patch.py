@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
+import math
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -81,6 +84,41 @@ def _build_swe_trainer_class():
             reward_extra_infos_dict=None,
         ):
             return ("original_distill", batch, reward_tensor, reward_extra_infos_dict)
+
+    return _Trainer
+
+
+def _build_swe_trainer_with_val_metrics_class():
+    base_cls = _build_swe_trainer_class()
+
+    class _Trainer(base_cls):
+        def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
+            _ = data_sources, sample_uids, sample_turns
+            return reward_extra_infos_dict
+
+    return _Trainer
+
+
+def _build_swe_trainer_with_rm_scores_reward_class():
+    base_cls = _build_swe_trainer_class()
+
+    class _Trainer(base_cls):
+        def _compute_or_extract_reward(self, batch, reward_fn=None, return_dict=False, sum_reward=False):
+            _ = batch, reward_fn
+            if return_dict:
+                return {
+                    "reward_tensor": "reward_tensor",
+                    "reward_extra_info": {
+                        "reward": [1.0, None],
+                        "feedback": [None, "ready"],
+                    },
+                }
+            if sum_reward:
+                return "summed_reward"
+            return "reward_tensor", {
+                "reward": [1.0, None],
+                "feedback": [None, "ready"],
+            }
 
     return _Trainer
 
@@ -652,3 +690,311 @@ def test_patched_distillation_hook_emits_turn_level_tensors(
     assert distill_batch.tensors["turn_teacher_input_ids"].shape[0] == 1
     assert distill_batch.tensors["turn_teacher_input_ids"].shape[1] == 2
     assert distill_batch.tensors["turn_response_mask"].tolist() == [[[1, 0], [0, 1]]]
+
+
+def test_sanitize_validation_reward_extra_infos_handles_none_and_non_numeric_values() -> None:
+    sanitized = runtime_patch._sanitize_validation_reward_extra_infos(
+        {
+            "reward": [1.0, None, 0.0],
+            "pred": ["yes", None, "no"],
+            "metadata": [{"k": "v"}, None, {"k": "w"}],
+            "bad_len": [1.0],
+        },
+        expected_len=3,
+    )
+
+    assert sanitized["reward"][0] == pytest.approx(1.0)
+    assert math.isnan(sanitized["reward"][1])
+    assert sanitized["reward"][2] == pytest.approx(0.0)
+    assert sanitized["pred"] == ["yes", "", "no"]
+    assert sanitized["metadata"][0].startswith("{")
+    assert sanitized["metadata"][1] == ""
+    assert "bad_len" not in sanitized
+
+
+def test_patched_val_metrics_update_sanitizes_reward_infos_before_upstream_call() -> None:
+    trainer_cls = _build_swe_trainer_with_val_metrics_class()
+    fake_module = SimpleNamespace(
+        RayPPOTrainer=trainer_cls,
+        DataProto=object,
+        compute_position_id_with_mask=lambda mask: mask,
+    )
+    assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
+
+    trainer = trainer_cls()
+    sanitized = trainer._val_metrics_update(
+        data_sources=["source", "source"],
+        sample_uids=["uid-1", "uid-2"],
+        reward_extra_infos_dict={"reward": [1.0, None], "pred": ["a", "b"]},
+        sample_turns=[],
+    )
+
+    assert sanitized["reward"][0] == pytest.approx(1.0)
+    assert math.isnan(sanitized["reward"][1])
+    assert sanitized["pred"] == ["a", "b"]
+
+
+def test_patched_reward_hook_sanitizes_rm_scores_reward_info_for_train_and_val_paths() -> None:
+    trainer_cls = _build_swe_trainer_with_rm_scores_reward_class()
+    fake_module = SimpleNamespace(
+        RayPPOTrainer=trainer_cls,
+        DataProto=object,
+        compute_position_id_with_mask=lambda mask: mask,
+    )
+    assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
+
+    trainer = trainer_cls()
+    batch = SimpleNamespace(
+        batch={"rm_scores": [[0.0], [0.0]], "responses": [[1], [2]]},
+        non_tensor_batch={"trajectory_steps": [[], []]},
+    )
+
+    reward_tensor, reward_info = trainer._compute_or_extract_reward(batch=batch, return_dict=False, sum_reward=False)
+    assert reward_tensor == "reward_tensor"
+    assert reward_info["reward"][0] == pytest.approx(1.0)
+    assert math.isnan(reward_info["reward"][1])
+    assert reward_info["feedback"] == ["", "ready"]
+
+    reward_dict = trainer._compute_or_extract_reward(batch=batch, return_dict=True, sum_reward=False)
+    assert reward_dict["reward_tensor"] == "reward_tensor"
+    assert reward_dict["reward_extra_info"]["reward"][0] == pytest.approx(1.0)
+    assert math.isnan(reward_dict["reward_extra_info"]["reward"][1])
+    assert reward_dict["reward_extra_info"]["feedback"] == ["", "ready"]
+
+    summed = trainer._compute_or_extract_reward(batch=batch, return_dict=False, sum_reward=True)
+    assert summed == "summed_reward"
+
+
+def test_resolve_swe_agent_loop_max_in_flight_uses_env_pool_and_worker_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = SimpleNamespace(
+        config=_ConfigNode(
+            actor_rollout_ref=_ConfigNode(
+                rollout=_ConfigNode(
+                    agent=_ConfigNode(default_agent_loop="swe_bridge_agent", num_workers=8),
+                ),
+            )
+        )
+    )
+
+    resolved = runtime_patch._resolve_swe_agent_loop_max_in_flight(
+        worker=worker,
+        batch_size=3892,
+        agent_loop_registry={"swe_bridge_agent": {"env_pool_size": 32}},
+    )
+    assert resolved == 4
+
+    monkeypatch.setenv("SMALL_SWE_SDPO_AGENT_LOOP_MAX_IN_FLIGHT", "6")
+    overridden = runtime_patch._resolve_swe_agent_loop_max_in_flight(
+        worker=worker,
+        batch_size=3892,
+        agent_loop_registry={"swe_bridge_agent": {"env_pool_size": 32}},
+    )
+    assert overridden == 6
+
+
+def test_agent_loop_queue_patch_caps_swe_in_flight_and_preserves_order() -> None:
+    np = pytest.importorskip("numpy")
+
+    class _FakeRolloutTraceConfig:
+        @staticmethod
+        def get_instance() -> Any:
+            return SimpleNamespace(max_samples_per_step_per_worker=None)
+
+    async def _fake_get_trajectory_info(step: int, indices: list[int], validate: bool) -> list[dict[str, Any]]:
+        return [
+            {"step": step, "sample_index": int(index), "rollout_n": 0, "validate": validate}
+            for index in indices
+        ]
+
+    class _FakeBatch:
+        def __init__(self, size: int) -> None:
+            self.non_tensor_batch = {
+                "agent_name": np.array(["swe_bridge_agent"] * size, dtype=object),
+                "sample_index": np.arange(size),
+                "raw_prompt": np.array(["prompt"] * size, dtype=object),
+            }
+            self.meta_info = {"global_steps": 17, "validate": False}
+
+        def __len__(self) -> int:
+            return int(len(self.non_tensor_batch["sample_index"]))
+
+    class _FakeWorker:
+        def __init__(self) -> None:
+            self.config = _ConfigNode(
+                actor_rollout_ref=_ConfigNode(
+                    rollout=_ConfigNode(
+                        temperature=0.7,
+                        top_p=0.9,
+                        calculate_log_probs=False,
+                        val_kwargs=_ConfigNode(top_p=1.0, temperature=0.0),
+                        agent=_ConfigNode(
+                            default_agent_loop="swe_bridge_agent",
+                            max_in_flight_tasks=3,
+                        ),
+                    )
+                )
+            )
+            self.active_calls = 0
+            self.max_active_calls = 0
+
+        async def generate_sequences(self, batch: Any) -> Any:
+            return ("original", len(batch))
+
+        async def _run_agent_loop(
+            self,
+            sampling_params: dict[str, Any],
+            trajectory: dict[str, Any],
+            *,
+            agent_name: str,
+            trace: bool = True,
+            **kwargs: Any,
+        ) -> str:
+            _ = sampling_params, trajectory, agent_name, trace
+            self.active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self.active_calls)
+            try:
+                await asyncio.sleep(0.01)
+                return f"out-{int(kwargs['sample_index'])}"
+            finally:
+                self.active_calls -= 1
+
+        def _postprocess(self, outputs: list[str]) -> list[str]:
+            return outputs
+
+    fake_module = SimpleNamespace(
+        AgentLoopWorker=_FakeWorker,
+        np=np,
+        RolloutTraceConfig=_FakeRolloutTraceConfig,
+        get_trajectory_info=_fake_get_trajectory_info,
+        _agent_loop_registry={"swe_bridge_agent": {"env_pool_size": 32}},
+        tqbridge=lambda: (lambda fn: fn),
+    )
+
+    assert runtime_patch._apply_agent_loop_queue_patch(fake_module) is True
+
+    worker = _FakeWorker()
+    result = asyncio.run(worker.generate_sequences(_FakeBatch(size=12)))
+    assert result == [f"out-{i}" for i in range(12)]
+    assert worker.max_active_calls <= 3
+
+
+def test_agent_loop_queue_patch_falls_back_to_original_for_non_swe() -> None:
+    np = pytest.importorskip("numpy")
+
+    class _FakeRolloutTraceConfig:
+        @staticmethod
+        def get_instance() -> Any:
+            return SimpleNamespace(max_samples_per_step_per_worker=None)
+
+    async def _fake_get_trajectory_info(step: int, indices: list[int], validate: bool) -> list[dict[str, Any]]:
+        return [
+            {"step": step, "sample_index": int(index), "rollout_n": 0, "validate": validate}
+            for index in indices
+        ]
+
+    class _FakeBatch:
+        def __init__(self, size: int) -> None:
+            self.non_tensor_batch = {
+                "agent_name": np.array(["tool_agent"] * size, dtype=object),
+                "sample_index": np.arange(size),
+                "raw_prompt": np.array(["prompt"] * size, dtype=object),
+            }
+            self.meta_info = {"global_steps": 9, "validate": False}
+
+        def __len__(self) -> int:
+            return int(len(self.non_tensor_batch["sample_index"]))
+
+    class _FakeWorker:
+        def __init__(self) -> None:
+            self.config = _ConfigNode(
+                actor_rollout_ref=_ConfigNode(
+                    rollout=_ConfigNode(
+                        temperature=0.7,
+                        top_p=0.9,
+                        calculate_log_probs=False,
+                        val_kwargs=_ConfigNode(top_p=1.0, temperature=0.0),
+                        agent=_ConfigNode(default_agent_loop="tool_agent", max_in_flight_tasks=2),
+                    )
+                )
+            )
+            self.original_called = 0
+
+        async def generate_sequences(self, batch: Any) -> Any:
+            self.original_called += 1
+            return ("original", len(batch))
+
+        async def _run_agent_loop(
+            self,
+            sampling_params: dict[str, Any],
+            trajectory: dict[str, Any],
+            *,
+            agent_name: str,
+            trace: bool = True,
+            **kwargs: Any,
+        ) -> Any:
+            _ = sampling_params, trajectory, agent_name, trace, kwargs
+            raise AssertionError("_run_agent_loop should not be called for non-swe agents")
+
+        def _postprocess(self, outputs: list[Any]) -> list[Any]:
+            return outputs
+
+    fake_module = SimpleNamespace(
+        AgentLoopWorker=_FakeWorker,
+        np=np,
+        RolloutTraceConfig=_FakeRolloutTraceConfig,
+        get_trajectory_info=_fake_get_trajectory_info,
+        _agent_loop_registry={"tool_agent": {"env_pool_size": 4}},
+        tqbridge=lambda: (lambda fn: fn),
+    )
+
+    assert runtime_patch._apply_agent_loop_queue_patch(fake_module) is True
+
+    worker = _FakeWorker()
+    result = asyncio.run(worker.generate_sequences(_FakeBatch(size=4)))
+    assert result == ("original", 4)
+    assert worker.original_called == 1
+
+
+def test_agent_loop_server_routing_patch_spreads_and_sticks() -> None:
+    class _FakeManager:
+        def __init__(self, handles: list[Any]) -> None:
+            self.server_handles = handles
+            self.request_id_to_server: dict[str, Any] = {}
+
+        def _choose_server(self, request_id: str) -> Any:
+            # Original fallback behavior: always first server.
+            return self.server_handles[0]
+
+    fake_module = SimpleNamespace(AsyncLLMServerManager=_FakeManager)
+    assert runtime_patch._apply_agent_loop_server_routing_patch(fake_module) is True
+
+    manager = _FakeManager(handles=[f"server-{idx}" for idx in range(8)])
+    seen_counts: dict[str, int] = {}
+    for idx in range(512):
+        req_id = f"req-{idx}"
+        server = manager._choose_server(req_id)
+        seen_counts[server] = seen_counts.get(server, 0) + 1
+
+    # Hash routing should spread across all servers for a moderate request set.
+    assert len(seen_counts) == 8
+
+    sticky = manager._choose_server("sticky-request")
+    assert sticky == manager._choose_server("sticky-request")
+
+
+def test_agent_loop_server_routing_patch_falls_back_when_handles_missing() -> None:
+    class _FakeManager:
+        def __init__(self) -> None:
+            self.server_handles = None
+            self.request_id_to_server: dict[str, Any] = {}
+
+        def _choose_server(self, request_id: str) -> Any:
+            return f"orig-{request_id}"
+
+    fake_module = SimpleNamespace(AsyncLLMServerManager=_FakeManager)
+    assert runtime_patch._apply_agent_loop_server_routing_patch(fake_module) is True
+
+    manager = _FakeManager()
+    assert manager._choose_server("x") == "orig-x"

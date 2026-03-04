@@ -121,11 +121,11 @@
   "rft_runtime": {
     "loop": {
       "sft_num_epoch_per_batch": 1,
-      "steps": 2,
-      "samples_per_task": 8,
-      "task_batch_size": 256,
+      "steps": 60,
+      "samples_per_task": 4,
+      "task_batch_size": 512,
       "collector_max_in_flight_tasks": 32,
-      "train_batch_size": 8,
+      "train_batch_size": 32,
       "eval_split_fraction": 0.1,
       "eval_min_rows": 1,
       "checkpoint_keep_last": 1
@@ -135,7 +135,7 @@
       "model_name": "Qwen/Qwen3-4B-Instruct-2507",
       "request_timeout_sec": 180,
       "max_tokens": 1024,
-      "temperature": 0.3,
+      "temperature": 0.6,
       "top_p": 1.0
     },
     "vllm_parallelism": {
