@@ -13,13 +13,20 @@ try:  # pragma: no cover - exercised in train runtime
 except ModuleNotFoundError:  # pragma: no cover - unit-test environments without train deps
     torch = None  # type: ignore[assignment]
 
+_SWE_ROW_KEYS = (
+    "trajectory_steps",
+    "trajectory_turn_tool_response_blocks",
+    "trajectory_assistant_turns",
+    "loop_exit_reason",
+    "trajectory_tool_validation_errors",
+)
+
 
 def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
     """Convert a verl DataProto batch into row dictionaries used by local reward logic."""
     non_tensor_batch = getattr(batch, "non_tensor_batch", {}) or {}
     responses = getattr(batch, "batch", {}).get("responses")
     response_mask = getattr(batch, "batch", {}).get("response_mask")
-    swe_batch = _batch_looks_like_swe(non_tensor_batch)
 
     batch_size = _resolve_batch_size(responses=responses, non_tensor_batch=non_tensor_batch)
     rows: list[dict[str, Any]] = []
@@ -28,7 +35,7 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
         response_mask_row = _resolve_response_mask(
             raw_mask_value=_select_index(response_mask, index),
             fallback_length=max(len(response_ids), 1),
-            require_explicit_mask=swe_batch,
+            require_explicit_mask=_row_looks_like_swe(non_tensor_batch, index),
         )
         generated_response_ids = _filter_generated_token_ids(
             token_ids=response_ids,
@@ -413,15 +420,28 @@ def _resolve_response_mask(
     return [1] * max(fallback_length, 1)
 
 
-def _batch_looks_like_swe(non_tensor_batch: Mapping[str, Any]) -> bool:
-    swe_keys = {
-        "trajectory_steps",
-        "trajectory_turn_tool_response_blocks",
-        "trajectory_assistant_turns",
-        "loop_exit_reason",
-        "trajectory_tool_validation_errors",
-    }
-    return any(key in non_tensor_batch for key in swe_keys)
+def _row_looks_like_swe(non_tensor_batch: Mapping[str, Any], index: int) -> bool:
+    for key in _SWE_ROW_KEYS:
+        if key not in non_tensor_batch:
+            continue
+        value = _select_non_tensor(non_tensor_batch, key, index)
+        if _has_row_signal(value):
+            return True
+    return False
+
+
+def _has_row_signal(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, bytes):
+        return bool(value.strip())
+    if isinstance(value, Mapping):
+        return bool(value)
+    if isinstance(value, Sequence):
+        return len(value) > 0
+    return bool(value)
 
 
 def _coerce_binary_mask(value: Any, *, length_hint: int | None = None) -> list[int]:

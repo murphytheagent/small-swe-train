@@ -33,7 +33,7 @@ def test_integrity_script_passes_valid_fixture(tmp_path: Path) -> None:
             "--input",
             str(input_path),
             "--turn-supervision-mode",
-            "current_turn",
+            "next_turn",
         ],
         capture_output=True,
         text=True,
@@ -133,7 +133,6 @@ def test_integrity_script_fails_on_target_turn_leakage(tmp_path: Path) -> None:
             str(input_path),
             "--turn-supervision-mode",
             "current_turn",
-            "--include-student-attempt-for-teacher",
         ],
         capture_output=True,
         text=True,
@@ -142,3 +141,35 @@ def test_integrity_script_fails_on_target_turn_leakage(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "target-turn leakage detected" in result.stdout
+
+
+def test_integrity_script_allows_explicit_no_student_attempt(tmp_path: Path) -> None:
+    rows = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1],
+            "trajectory_assistant_turns": ["LEAKY_TURN_TEXT", "turn-1"],
+            "trajectory_assistant_turn_token_lengths": [2, 1],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"]],
+        }
+    ]
+    input_path = tmp_path / "no_student_attempt.jsonl"
+    _write_jsonl(input_path, rows)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--input",
+            str(input_path),
+            "--turn-supervision-mode",
+            "current_turn",
+            "--no-include-student-attempt-for-teacher",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Integrity check passed." in result.stdout

@@ -34,8 +34,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--include-student-attempt-for-teacher",
-        action="store_true",
-        help="Include current student attempt block when building reprompts.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include current student attempt block when building reprompts (default: enabled).",
     )
     return parser.parse_args(argv)
 

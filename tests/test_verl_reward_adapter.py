@@ -211,3 +211,31 @@ def test_dataproto_to_rows_keeps_non_swe_mask_fallback() -> None:
 
     rows = reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
     assert rows[0]["_response_mask"] == [1, 1, 1]
+
+
+def test_dataproto_to_rows_requires_explicit_mask_only_for_swe_rows_in_mixed_batch() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 12], [21, 22]],
+            "response_mask": [[1, 1], []],
+        },
+        non_tensor_batch={
+            "raw_prompt": [
+                [{"role": "user", "content": "Fix swe task"}],
+                [{"role": "user", "content": "General task"}],
+            ],
+            "task_id": ["task-1", "task-2"],
+            "image_name": ["img-1", "img-2"],
+            "trajectory_steps": [
+                [{"tool": "bash", "stdout": "", "stderr": "", "exit_code": 0}],
+                [],
+            ],
+            "trajectory_assistant_turns": [["turn-0"], []],
+        },
+    )
+
+    rows = reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+    assert rows[0]["_response_mask"] == [1, 1]
+    # Second row is non-SWE despite mixed batch keys, so fallback mask remains available.
+    assert rows[1]["_response_mask"] == [1, 1]
