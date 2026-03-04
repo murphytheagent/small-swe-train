@@ -258,14 +258,14 @@ def test_integrity_script_allows_explicit_no_student_attempt(tmp_path: Path) -> 
 
 
 def test_integrity_script_uses_turn_level_truncation_denominator(tmp_path: Path) -> None:
-    long_turn = " ".join(f"tok{i}" for i in range(12050))
+    long_tool_feedback = " ".join(f"tok{i}" for i in range(12050))
     rows = [
         {
             "prompt": "Fix issue",
             "_response_mask": [0, 0],
-            "trajectory_assistant_turns": ["short turn", long_turn],
+            "trajectory_assistant_turns": ["short turn", "second turn"],
             "trajectory_assistant_turn_token_lengths": [0, 0],
-            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"]],
+            "trajectory_turn_tool_response_blocks": [["r0"], [long_tool_feedback]],
         }
     ]
     input_path = tmp_path / "turn_truncation_denominator.jsonl"

@@ -508,7 +508,7 @@ def test_invalid_legacy_gating_policy_raises() -> None:
         build_self_distillation_batch([], legacy_distillation_gating_policy="bad_policy")
 
 
-def test_current_turn_mode_keeps_target_turn_attempt_text_when_enabled() -> None:
+def test_current_turn_mode_omits_target_turn_attempt_text_when_enabled() -> None:
     samples = [
         {
             "prompt": "Fix issue",
@@ -533,8 +533,10 @@ def test_current_turn_mode_keeps_target_turn_attempt_text_when_enabled() -> None
 
     prompt_turn_0 = batch["turn_teacher_prompts"][0][0]
     prompt_turn_1 = batch["turn_teacher_prompts"][0][1]
-    assert "TURN0_SECRET_STUDENT_ATTEMPT" in prompt_turn_0
-    assert "TURN1_SECRET_STUDENT_ATTEMPT" in prompt_turn_1
+    assert "TURN0_SECRET_STUDENT_ATTEMPT" not in prompt_turn_0
+    assert "TURN1_SECRET_STUDENT_ATTEMPT" not in prompt_turn_1
+    assert "<omitted_current_turn_target_text>" in prompt_turn_0
+    assert "<omitted_current_turn_target_text>" in prompt_turn_1
     assert "current-turn reflection" in prompt_turn_0
 
 

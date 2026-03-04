@@ -17,6 +17,7 @@ DEFAULT_MAX_REPROMPT_LEN = 12288
 _TURN_SUPERVISION_NEXT = "next_turn"
 _TURN_SUPERVISION_CURRENT = "current_turn"
 _TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
+_CURRENT_TURN_ATTEMPT_PLACEHOLDER = "<omitted_current_turn_target_text>"
 LOGGER = logging.getLogger(__name__)
 _VERIFIER_FEEDBACK_NONE = "none"
 _VERIFIER_FEEDBACK_FINAL_TURN_ONLY = "final_turn_only"
@@ -440,6 +441,26 @@ def _normalize_turn_tool_blocks(
     return normalized
 
 
+def _build_current_attempt_block(
+    *,
+    supervision_mode: str,
+    current_turn_index: int,
+    turn_blocks: Sequence[str],
+    turn_tool_blocks: Sequence[Sequence[str]],
+    include_student_attempt_for_teacher: bool,
+) -> str:
+    if not include_student_attempt_for_teacher:
+        return ""
+    if supervision_mode != _TURN_SUPERVISION_CURRENT:
+        return turn_blocks[current_turn_index]
+    # Avoid target-token leakage while preserving same-turn tool-response context.
+    return _format_turn_block(
+        turn_index=current_turn_index,
+        assistant_text=_CURRENT_TURN_ATTEMPT_PLACEHOLDER,
+        tool_response_blocks=turn_tool_blocks[current_turn_index],
+    )
+
+
 def _build_recent_raw_block(
     turn_blocks: Sequence[str],
     *,
@@ -686,9 +707,13 @@ def _build_turn_prompt(
         num_recent_raw_blocks=num_recent_raw_blocks,
     )
 
-    current_attempt_block = turn_blocks[current_turn_index]
-    if not include_student_attempt_for_teacher:
-        current_attempt_block = ""
+    current_attempt_block = _build_current_attempt_block(
+        supervision_mode=supervision_mode,
+        current_turn_index=current_turn_index,
+        turn_blocks=turn_blocks,
+        turn_tool_blocks=turn_tool_blocks,
+        include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+    )
 
     verifier_feedback_block = ""
     if _should_include_verifier_feedback(
