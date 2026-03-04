@@ -66,6 +66,52 @@ def test_integrity_script_fails_on_mask_subset_violation(tmp_path: Path) -> None
     assert "not a subset of _response_mask" in result.stdout
 
 
+def test_integrity_script_fails_on_overlong_turn_response_mask(tmp_path: Path) -> None:
+    rows = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 0],
+            "turn_response_masks": [[1, 0, 1]],
+        }
+    ]
+    input_path = tmp_path / "overlong_mask.jsonl"
+    _write_jsonl(input_path, rows)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH), "--input", str(input_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "turn_response_mask length" in result.stdout
+    assert "exceeds _response_mask length" in result.stdout
+
+
+def test_integrity_script_fails_on_missing_response_mask(tmp_path: Path) -> None:
+    rows = [
+        {
+            "prompt": "Fix issue",
+            "trajectory_assistant_turns": ["turn-0", "turn-1"],
+            "trajectory_assistant_turn_token_lengths": [1, 1],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"]],
+        }
+    ]
+    input_path = tmp_path / "missing_response_mask.jsonl"
+    _write_jsonl(input_path, rows)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH), "--input", str(input_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "missing or empty _response_mask" in result.stdout
+
+
 def test_integrity_script_fails_on_target_turn_leakage(tmp_path: Path) -> None:
     rows = [
         {

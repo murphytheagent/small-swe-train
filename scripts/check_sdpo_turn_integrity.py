@@ -98,13 +98,40 @@ def _validate_mask_subset(
             )
 
 
+def _validate_response_mask_presence(
+    *,
+    row: Mapping[str, Any],
+    row_index: int,
+    violations: list[str],
+) -> list[int]:
+    response_mask = _coerce_binary_mask(row.get("_response_mask"))
+    if response_mask:
+        return response_mask
+    violations.append(f"row={row_index}: missing or empty _response_mask.")
+    return []
+
+
 def _validate_explicit_masks(rows: Sequence[Mapping[str, Any]], violations: list[str]) -> None:
     for row_index, row in enumerate(rows):
         response_mask = _coerce_binary_mask(row.get("_response_mask"))
+        if not response_mask:
+            continue
         explicit_masks = row.get("turn_response_masks")
         if not isinstance(explicit_masks, Sequence) or isinstance(explicit_masks, (str, bytes)):
             continue
         for turn_index, raw_turn_mask in enumerate(explicit_masks):
+            turn_mask = _coerce_binary_mask(raw_turn_mask)
+            if len(turn_mask) > len(response_mask):
+                violations.append(
+                    "row={row} turn={turn}: turn_response_mask length ({turn_len}) exceeds _response_mask "
+                    "length ({resp_len}).".format(
+                        row=row_index,
+                        turn=turn_index,
+                        turn_len=len(turn_mask),
+                        resp_len=len(response_mask),
+                    )
+                )
+                continue
             turn_mask = _coerce_binary_mask(raw_turn_mask, width=len(response_mask))
             _validate_mask_subset(
                 response_mask=response_mask,
@@ -169,9 +196,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             continue
 
-        response_mask = _coerce_binary_mask(row.get("_response_mask"))
+        response_mask = _validate_response_mask_presence(
+            row=row,
+            row_index=row_index,
+            violations=violations,
+        )
         if not response_mask:
-            response_mask = [1]
+            continue
         for turn_index, turn_mask_raw in enumerate(masks):
             turn_mask = _coerce_binary_mask(turn_mask_raw, width=len(response_mask))
             _validate_mask_subset(
