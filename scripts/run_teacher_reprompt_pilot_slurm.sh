@@ -10,6 +10,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-${PROJECT_ROOT}/.venv/bin/python}"
+export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH:-}"
 
 MODEL_PATH="${PILOT_MODEL_PATH:-/data/scratch/${USER}/models/Qwen3-4B-Instruct-2507}"
 SERVED_MODEL="${PILOT_SERVED_MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
