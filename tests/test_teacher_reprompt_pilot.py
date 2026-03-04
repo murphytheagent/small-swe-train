@@ -71,6 +71,10 @@ def test_teacher_generator_injects_reprompt_once_then_uses_fallback(monkeypatch)
         task_id="task-1",
         attempt_index=0,
         problem_statement="Fix issue",
+        raw_prompt_messages=(
+            {"role": "system", "content": "system-contract"},
+            {"role": "user", "content": "initial-user"},
+        ),
         assistant_turns=("turn-0", "turn-1", "turn-2"),
         turn_tool_response_blocks=((), (), ()),
         verification_feedback="",
@@ -141,7 +145,10 @@ def test_teacher_generator_injects_reprompt_once_then_uses_fallback(monkeypatch)
     assert turn_1 == "teacher-turn-1"
     assert turn_2 == "fallback-2"
     assert len(posted_payloads) == 1
-    assert posted_payloads[0]["messages"] == [{"role": "user", "content": "prompt-turn-1"}]
+    assert posted_payloads[0]["messages"] == [
+        {"role": "system", "content": "system-contract"},
+        {"role": "user", "content": "prompt-turn-1"},
+    ]
 
 
 def test_teacher_generator_falls_back_when_teacher_completion_fails(monkeypatch) -> None:
@@ -150,6 +157,7 @@ def test_teacher_generator_falls_back_when_teacher_completion_fails(monkeypatch)
         task_id="task-1",
         attempt_index=0,
         problem_statement="Fix issue",
+        raw_prompt_messages=(),
         assistant_turns=("turn-0", "turn-1"),
         turn_tool_response_blocks=((), ()),
         verification_feedback="",
@@ -200,3 +208,67 @@ def test_teacher_generator_falls_back_when_teacher_completion_fails(monkeypatch)
         history=["turn-0", '<tool_response>{"exit_code":1}</tool_response>'],
     )
     assert turn_1 == "fallback-1"
+
+
+def test_teacher_generator_next_turn_mode_uses_previous_prompt_index(monkeypatch) -> None:
+    pilot = _load_pilot_module()
+    trace = pilot.BaselineTrace(
+        task_id="task-1",
+        attempt_index=0,
+        problem_statement="Fix issue",
+        raw_prompt_messages=(),
+        assistant_turns=("turn-0", "turn-1", "turn-2"),
+        turn_tool_response_blocks=((), (), ()),
+        verification_feedback="",
+        verification_error="",
+        resolved=False,
+    )
+    posted_payloads: list[dict[str, object]] = []
+
+    def _fallback_turn_generator(*, task, attempt_index, turn_index, step_index, history):
+        _ = task, attempt_index, step_index, history
+        return f"fallback-{turn_index}"
+
+    def _fake_build_self_distillation_batch(*args, **kwargs):
+        _ = args, kwargs
+        return {"turn_teacher_prompts": [["prompt-turn-0", "prompt-turn-1"]]}
+
+    def _fake_post_chat_completion(*, base_url, payload, timeout_sec):
+        _ = base_url, timeout_sec
+        posted_payloads.append(dict(payload))
+        return {"choices": [{"message": {"content": "teacher-turn-1"}}]}
+
+    monkeypatch.setattr(pilot, "build_self_distillation_batch", _fake_build_self_distillation_batch)
+    monkeypatch.setattr(pilot, "_post_chat_completion", _fake_post_chat_completion)
+    monkeypatch.setattr(pilot, "_extract_assistant_content", lambda payload: payload["choices"][0]["message"]["content"])
+
+    generator = pilot._build_teacher_turn_generator(
+        baseline_trace_map={("task-1", 0): trace},
+        fallback_turn_generator=_fallback_turn_generator,
+        vllm_config=pilot.VLLMTurnGeneratorConfig(
+            base_url="http://127.0.0.1:8000/v1",
+            model_name="local-model",
+            request_timeout_sec=10,
+            max_tokens=128,
+            temperature=0.0,
+            top_p=1.0,
+            system_prompt="pilot-system",
+        ),
+        teacher_reprompt_turn_index=1,
+        max_reprompt_len=1024,
+        num_recent_raw_blocks=3,
+        turn_supervision_mode="next_turn",
+        verifier_feedback_mode="all_turns",
+    )
+    task = SimpleNamespace(task_id="task-1")
+    injected_turn = generator(
+        task=task,
+        attempt_index=0,
+        turn_index=1,
+        step_index=0,
+        history=["turn-0"],
+    )
+
+    assert injected_turn == "teacher-turn-1"
+    assert len(posted_payloads) == 1
+    assert posted_payloads[0]["messages"][-1] == {"role": "user", "content": "prompt-turn-0"}

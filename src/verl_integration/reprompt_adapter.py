@@ -336,10 +336,10 @@ def _coerce_binary_mask(value: Any) -> list[int]:
 
 def _normalize_turn_supervision_mode(value: Any) -> str:
     if value is None:
-        return _TURN_SUPERVISION_NEXT
+        return _TURN_SUPERVISION_CURRENT
     normalized = str(value).strip().lower()
     if not normalized:
-        return _TURN_SUPERVISION_NEXT
+        return _TURN_SUPERVISION_CURRENT
     if normalized not in _TURN_SUPERVISION_MODES:
         supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
         raise ValueError(f"turn_supervision_mode must be one of: {supported}")

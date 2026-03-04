@@ -283,7 +283,7 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     )
     assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
 
-    captured = {"resolved": None}
+    captured = {"resolved": None, "turn_supervision_mode": None}
 
     def _fake_rows(batch, tokenizer):
         _ = batch, tokenizer
@@ -306,11 +306,11 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
             include_student_attempt_for_teacher,
             max_reprompt_len,
             num_recent_raw_blocks,
-            turn_supervision_mode,
             verifier_feedback_mode,
             legacy_distillation_gating_policy,
         )
         captured["resolved"] = [bool(row.get("resolved")) for row in rows]
+        captured["turn_supervision_mode"] = turn_supervision_mode
         return {
             "teacher_prompts": ["fix one", "fix two"],
             "self_distillation_mask": [True, False],
@@ -366,6 +366,7 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
 
     distill_batch, metrics = output
     assert captured["resolved"] == [True, False]
+    assert captured["turn_supervision_mode"] == "current_turn"
     assert list(distill_batch.tensors["self_distillation_mask"].tolist()) == [1.0, 0.0]
     assert distill_batch.tensors["teacher_input_ids"].tolist() == [
         [10, 11, 0, 1, 2],
@@ -385,8 +386,8 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     assert metrics["self_distillation/reprompt_sample_fraction"] == pytest.approx(0.5)
     assert metrics["self_distillation/prompt_truncated_fraction"] == pytest.approx(0.5)
     assert metrics["self_distillation/empty_target_batch"] == pytest.approx(0.0)
-    assert metrics["self_distillation/turn_supervision_mode_next_turn"] == pytest.approx(1.0)
-    assert metrics["self_distillation/turn_supervision_mode_current_turn"] == pytest.approx(0.0)
+    assert metrics["self_distillation/turn_supervision_mode_next_turn"] == pytest.approx(0.0)
+    assert metrics["self_distillation/turn_supervision_mode_current_turn"] == pytest.approx(1.0)
     assert "self_distillation/teacher_attention_valid_token_ratio" in metrics
     assert "self_distillation/supervised_token_ratio" in metrics
     assert "self_distillation/invalid_supervised_overlap_count" in metrics
@@ -718,6 +719,64 @@ def test_patched_distillation_hook_emits_turn_level_tensors(
     assert distill_batch.tensors["turn_teacher_input_ids"].shape[0] == 1
     assert distill_batch.tensors["turn_teacher_input_ids"].shape[1] == 2
     assert distill_batch.tensors["turn_response_mask"].tolist() == [[[1, 0], [0, 1]]]
+
+
+def test_turn_level_teacher_tensors_intersect_masks_with_runtime_response_mask() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _FakeTokenizer:
+        def apply_chat_template(
+            self,
+            messages,
+            *,
+            tokenize,
+            return_tensors,
+            return_dict,
+            continue_final_message,
+            add_generation_prompt,
+            max_length,
+            padding,
+            truncation,
+        ):
+            _ = (
+                messages,
+                tokenize,
+                return_tensors,
+                return_dict,
+                continue_final_message,
+                add_generation_prompt,
+                max_length,
+                padding,
+                truncation,
+            )
+            return {
+                "input_ids": torch.tensor([[10, 11], [20, 21]], dtype=torch.long),
+                "attention_mask": torch.tensor([[1, 1], [1, 1]], dtype=torch.long),
+            }
+
+    (
+        _turn_teacher_input_ids,
+        _turn_teacher_attention_mask,
+        _turn_teacher_position_ids,
+        turn_response_mask,
+        turn_self_distillation_mask,
+        turn_pair_count_per_sample,
+    ) = runtime_patch._build_turn_level_teacher_tensors(
+        tokenizer=_FakeTokenizer(),
+        rows=[{"_raw_prompt_messages": [{"role": "user", "content": "u"}]}],
+        turn_teacher_prompts=[["turn-0", "turn-1"]],
+        turn_response_masks=[[[1, 1], [0, 1]]],
+        turn_distillation_mask=[[True, True]],
+        responses=torch.tensor([[1, 2]], dtype=torch.long),
+        response_mask=torch.tensor([[1, 0]], dtype=torch.long),
+        max_reprompt_len=64,
+        compute_position_id_with_mask=lambda mask: mask.cumsum(dim=1) - 1,
+        device=None,
+    )
+
+    assert turn_response_mask.tolist() == [[[1, 0], [0, 0]]]
+    assert turn_self_distillation_mask.tolist() == [[1.0, 0.0]]
+    assert turn_pair_count_per_sample == [1]
 
 
 def test_sanitize_validation_reward_extra_infos_handles_none_and_non_numeric_values() -> None:

@@ -481,6 +481,18 @@ def test_run_sdft_script_dry_run_includes_loss_mode_override() -> None:
     assert "actor_rollout_ref.actor.policy_loss.loss_mode=sdft" in result.stdout
 
 
+def test_teacher_reprompt_pilot_slurm_script_dry_run_uses_all_visible_gpus_for_tp() -> None:
+    result = _run_script(
+        "run_teacher_reprompt_pilot_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "8",
+            "PILOT_MODEL_PATH": "/tmp/nonexistent-model-ok-for-dry-run",
+        },
+    )
+    assert "--tensor-parallel-size 8" in result.stdout
+    assert "--max-in-flight-tasks 64" in result.stdout
+
+
 def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     result = _run_script("run_sdpo.sh", "data.train_batch_size=4")
     assert "-m verl_integration.main_ppo_entry" in result.stdout

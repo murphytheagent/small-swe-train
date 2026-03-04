@@ -54,6 +54,7 @@ class BaselineTrace:
     task_id: str
     attempt_index: int
     problem_statement: str
+    raw_prompt_messages: tuple[dict[str, str], ...]
     assistant_turns: tuple[str, ...]
     turn_tool_response_blocks: tuple[tuple[str, ...], ...]
     verification_feedback: str
@@ -120,6 +121,44 @@ def _coerce_text_list(value: Any) -> list[str]:
     return [str(item) for item in value]
 
 
+def _coerce_message_list(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    rows: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        role = str(item.get("role", "")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if role not in {"system", "user", "assistant"} or not content:
+            continue
+        rows.append({"role": role, "content": content})
+    return rows
+
+
+def _build_teacher_request_messages(
+    *,
+    trace: BaselineTrace,
+    teacher_prompt: str,
+    vllm_config: VLLMTurnGeneratorConfig,
+) -> list[dict[str, str]]:
+    # Match runtime distillation chat formatting: prior context messages plus
+    # reprompt as the final user message.
+    prefix_messages = list(trace.raw_prompt_messages[:-1]) if trace.raw_prompt_messages else []
+    messages: list[dict[str, str]] = []
+    for message in prefix_messages:
+        role = str(message.get("role", "")).strip().lower()
+        content = str(message.get("content", "")).strip()
+        if role in {"system", "user", "assistant"} and content:
+            messages.append({"role": role, "content": content})
+    if not messages:
+        system_prompt = str(getattr(vllm_config, "system_prompt", "")).strip()
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": teacher_prompt})
+    return messages
+
+
 def _build_baseline_trace_map(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[str, int], BaselineTrace]:
     trace_map: dict[tuple[str, int], BaselineTrace] = {}
     for row in rows:
@@ -134,6 +173,7 @@ def _build_baseline_trace_map(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[s
             task_id=task_id,
             attempt_index=attempt_index,
             problem_statement=str(row.get("prompt", "")),
+            raw_prompt_messages=tuple(_coerce_message_list(row.get("_raw_prompt_messages"))),
             assistant_turns=tuple(assistant_turns),
             turn_tool_response_blocks=tuple(tuple(items) for items in tool_blocks),
             verification_feedback=str(row.get("verification_feedback", "")),
@@ -205,6 +245,7 @@ def _build_teacher_turn_generator(
 
         sample = {
             "prompt": trace.problem_statement,
+            "_raw_prompt_messages": [dict(message) for message in trace.raw_prompt_messages],
             "trajectory_assistant_turns": list(trace.assistant_turns[: turn_index + 1]),
             "trajectory_turn_tool_response_blocks": [
                 list(items) for items in trace.turn_tool_response_blocks[: turn_index + 1]
@@ -233,14 +274,28 @@ def _build_teacher_turn_generator(
                 history=history,
             )
 
-        prompt_index = min(max(int(turn_index), 0), len(prompts_for_row) - 1)
+        prompt_index = int(turn_index)
+        if str(turn_supervision_mode).strip().lower() == "next_turn":
+            prompt_index = prompt_index - 1
+        if prompt_index < 0 or prompt_index >= len(prompts_for_row):
+            return fallback_turn_generator(
+                task=task,
+                attempt_index=attempt_index,
+                turn_index=turn_index,
+                step_index=step_index,
+                history=history,
+            )
         teacher_prompt = str(prompts_for_row[prompt_index])
         try:
             completion_payload = _post_chat_completion(
                 base_url=vllm_config.base_url,
                 payload={
                     "model": vllm_config.model_name,
-                    "messages": [{"role": "user", "content": teacher_prompt}],
+                    "messages": _build_teacher_request_messages(
+                        trace=trace,
+                        teacher_prompt=teacher_prompt,
+                        vllm_config=vllm_config,
+                    ),
                     "temperature": vllm_config.temperature,
                     "top_p": vllm_config.top_p,
                     "max_tokens": vllm_config.max_tokens,

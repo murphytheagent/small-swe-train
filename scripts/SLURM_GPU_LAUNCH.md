@@ -10,6 +10,7 @@ This note covers GPU-using scripts under `scripts/` and the resource requests th
 | `run_rft_onpolicy_rollout_proof.sh` | Variable (recommend 8) | `8 x GPUs` | `64G x GPUs` | `08:00:00` | Direct proof path, also keyed by GPU count. |
 | `run_sdpo.sh` | **8 required** | 64 | 512G | `24:00:00` | `configs/verl/sdpo_swe.yaml` is 8-GPU tuned (`fsdp_size=8`, rollout TP/DP layout). |
 | `run_sdft.sh` | **8 required** | 64 | 512G | `24:00:00` | Same base config and parallel layout as SDPO. |
+| `run_teacher_reprompt_pilot_slurm.sh` | **8 recommended** | 64 | 256G | `12:00:00` | Teacher-reprompt pilot inference is much faster with vLLM tensor parallel over all 8 GPUs. |
 | `run_flash_attn_rebuild.sh` | 0 (default) | 8 | 128G | `03:00:00` | Build job defaults to no GPU request; override if your site requires one. |
 
 ## Shared Setup
@@ -258,6 +259,39 @@ Dry-run (prints resolved command including auto-overrides; does not start Ray):
 
 ```bash
 bash scripts/run_sdpo.sh --dry-run trainer.total_training_steps=1
+```
+
+## 4) `scripts/run_teacher_reprompt_pilot_slurm.sh` (8 GPUs recommended)
+
+This launcher starts a local vLLM OpenAI endpoint and runs
+`scripts/run_teacher_reprompt_pilot.py` against it. By default it maps
+`--tensor-parallel-size` to the Slurm GPU allocation (`SLURM_GPUS_ON_NODE`), so
+requesting `--gres=gpu:8` yields `tensor-parallel-size=8`.
+
+Example submit:
+
+```bash
+sbatch \
+  --partition=gpu \
+  --nodes=1 \
+  --gres=gpu:8 \
+  --cpus-per-task=64 \
+  --mem=256G \
+  --time=12:00:00 \
+  --job-name=teacher-reprompt-pilot \
+  --output="$PWD/outputs/slurm/%x-%j.out" \
+  --error="$PWD/outputs/slurm/%x-%j.err" \
+  --wrap "cd $PWD \
+    && export PYTHON_BIN=$PWD/.venv/bin/python \
+    && export PILOT_MODEL_PATH=/data/scratch/\$USER/models/Qwen3-4B-Instruct-2507 \
+    && export PILOT_SERVED_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
+    && bash scripts/run_teacher_reprompt_pilot_slurm.sh"
+```
+
+Dry-run:
+
+```bash
+bash scripts/run_teacher_reprompt_pilot_slurm.sh --dry-run
 ```
 
 ## 4) `scripts/run_sdft.sh` (8 GPUs required)

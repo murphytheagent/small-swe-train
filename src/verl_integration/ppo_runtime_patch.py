@@ -89,10 +89,10 @@ def _should_skip_turn_level_expansion_for_distributed() -> bool:
 
 def _normalize_turn_supervision_mode(value: Any) -> str:
     if value is None:
-        return _TURN_SUPERVISION_NEXT
+        return _TURN_SUPERVISION_CURRENT
     normalized = str(value).strip().lower()
     if not normalized:
-        return _TURN_SUPERVISION_NEXT
+        return _TURN_SUPERVISION_CURRENT
     if normalized not in _TURN_SUPERVISION_MODES:
         supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
         raise ValueError(f"turn_supervision_mode must be one of: {supported}")
@@ -238,7 +238,7 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             return None
 
         turn_supervision_mode = _normalize_turn_supervision_mode(
-            _cfg_get(self_distillation_cfg, "turn_supervision_mode", _TURN_SUPERVISION_NEXT)
+            _cfg_get(self_distillation_cfg, "turn_supervision_mode", _TURN_SUPERVISION_CURRENT)
         )
         verifier_feedback_mode = _normalize_verifier_feedback_mode(
             _cfg_get(self_distillation_cfg, "verifier_feedback_mode", _VERIFIER_FEEDBACK_NONE)
@@ -1064,7 +1064,6 @@ def _build_turn_level_teacher_tensors(
                 prompts_for_row = [
                     str(item)
                     for item in (turn_teacher_prompts[row_index] or [])
-                    if str(item).strip()
                 ]
         normalized_prompts.append(prompts_for_row)
         max_turn_pairs = max(max_turn_pairs, len(prompts_for_row))
@@ -1167,6 +1166,17 @@ def _build_turn_level_teacher_tensors(
         dtype=torch.float32,
         device=device,
     )
+    # Enforce token-level subset semantics against the actual runtime response mask.
+    response_mask_expanded = response_mask_tensor.unsqueeze(1).to(dtype=turn_response_mask_tensor.dtype)
+    turn_response_mask_tensor = turn_response_mask_tensor * (response_mask_expanded > 0).to(
+        dtype=turn_response_mask_tensor.dtype
+    )
+    active_turn_pairs = (turn_response_mask_tensor.sum(dim=-1) > 0).to(dtype=turn_self_distillation_mask_tensor.dtype)
+    turn_self_distillation_mask_tensor = turn_self_distillation_mask_tensor * active_turn_pairs
+    turn_pair_count_per_sample = [
+        int(value)
+        for value in active_turn_pairs.sum(dim=-1).detach().cpu().tolist()
+    ]
     return (
         teacher_input_ids,
         teacher_attention_mask,
@@ -1522,8 +1532,8 @@ def _run_turn_level_sequential_update_policy(
                 max_token_len = actor.config.ppo_max_token_len_per_gpu * actor.ulysses_sequence_parallel_size
                 micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
             else:
-                actor.gradient_accumulation = actor.config.ppo_mini_batch_size // actor.config.ppo_micro_batch_size_per_gpu
                 micro_batches = mini_batch.split(actor.config.ppo_micro_batch_size_per_gpu)
+            actor.gradient_accumulation = max(len(micro_batches), 1)
 
             actor.actor_optimizer.zero_grad()
 
@@ -1542,20 +1552,24 @@ def _run_turn_level_sequential_update_policy(
                 if actor.config.use_dynamic_bsz:
                     loss_scale_factor = response_mask.shape[0] / actor.config.ppo_mini_batch_size
                 else:
-                    loss_scale_factor = 1 / actor.gradient_accumulation
+                    loss_scale_factor = 1.0 / float(actor.gradient_accumulation)
 
                 teacher_regularization = "ema"
                 return_all_logps = False
                 distill_topk = None
                 if self_distillation_enabled:
-                    teacher_regularization = self_distillation_cfg.get("teacher_regularization", "ema")
+                    teacher_regularization = str(
+                        _cfg_get(self_distillation_cfg, "teacher_regularization", "ema")
+                    ).strip().lower() or "ema"
                     if teacher_regularization == "trust-region" and actor.use_fused_kernels:
                         raise ValueError("trust-region teacher requires disabling fused kernels to access logits.")
+                    full_logit_distillation = bool(_cfg_get(self_distillation_cfg, "full_logit_distillation", False))
+                    distillation_topk = _cfg_get(self_distillation_cfg, "distillation_topk", None)
                     return_all_logps = (
-                        self_distillation_cfg.full_logit_distillation and not self_distillation_cfg.distillation_topk
+                        full_logit_distillation and not distillation_topk
                     )
                     distill_topk = (
-                        self_distillation_cfg.distillation_topk if self_distillation_cfg.full_logit_distillation else None
+                        distillation_topk if full_logit_distillation else None
                     )
                 outputs = actor._forward_micro_batch(
                     model_inputs,

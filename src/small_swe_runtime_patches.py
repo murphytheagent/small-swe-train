@@ -140,10 +140,10 @@ def _coerce_bool_env(name: str, *, default: bool) -> bool:
 
 def _normalize_turn_supervision_mode(value: Any) -> str:
     if value is None:
-        return _TURN_SUPERVISION_NEXT
+        return _TURN_SUPERVISION_CURRENT
     normalized = str(value).strip().lower()
     if not normalized:
-        return _TURN_SUPERVISION_NEXT
+        return _TURN_SUPERVISION_CURRENT
     if normalized not in _TURN_SUPERVISION_MODES:
         supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
         raise ValueError(f"turn_supervision_mode must be one of: {supported}")
@@ -298,7 +298,7 @@ def _install_self_distillation_config_compat_patch() -> None:
             setattr(self, "num_recent_raw_blocks", normalized)
 
         if not has_native_turn_supervision_mode:
-            mode_value = _TURN_SUPERVISION_NEXT if raw_turn_supervision_mode is missing else raw_turn_supervision_mode
+            mode_value = _TURN_SUPERVISION_CURRENT if raw_turn_supervision_mode is missing else raw_turn_supervision_mode
             normalized_mode = _normalize_turn_supervision_mode(mode_value)
             setattr(self, "turn_supervision_mode", normalized_mode)
         if not has_native_verifier_feedback_mode:
