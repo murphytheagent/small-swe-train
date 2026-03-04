@@ -493,6 +493,20 @@ def test_teacher_reprompt_pilot_slurm_script_dry_run_uses_all_visible_gpus_for_t
     assert "--max-in-flight-tasks 64" in result.stdout
 
 
+def test_teacher_reprompt_pilot_slurm_script_dry_run_accepts_fixed_kv_cache_overrides() -> None:
+    result = _run_script(
+        "run_teacher_reprompt_pilot_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "8",
+            "PILOT_MODEL_PATH": "/tmp/nonexistent-model-ok-for-dry-run",
+            "PILOT_VLLM_KV_CACHE_MEMORY_BYTES": "17179869184",
+            "PILOT_VLLM_NUM_GPU_BLOCKS_OVERRIDE": "8192",
+        },
+    )
+    assert "--kv-cache-memory-bytes 17179869184" in result.stdout
+    assert "--num-gpu-blocks-override 8192" in result.stdout
+
+
 def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     result = _run_script("run_sdpo.sh", "data.train_batch_size=4")
     assert "-m verl_integration.main_ppo_entry" in result.stdout

@@ -73,6 +73,12 @@ VLLM_CMD=(
   --gpu-memory-utilization "${PILOT_GPU_MEMORY_UTILIZATION:-0.90}"
   --max-model-len "${PILOT_MAX_MODEL_LEN:-32768}"
 )
+if [[ -n "${PILOT_VLLM_KV_CACHE_MEMORY_BYTES:-}" ]]; then
+  VLLM_CMD+=(--kv-cache-memory-bytes "${PILOT_VLLM_KV_CACHE_MEMORY_BYTES}")
+fi
+if [[ -n "${PILOT_VLLM_NUM_GPU_BLOCKS_OVERRIDE:-}" ]]; then
+  VLLM_CMD+=(--num-gpu-blocks-override "${PILOT_VLLM_NUM_GPU_BLOCKS_OVERRIDE}")
+fi
 
 OUTPUT_DIR="${PROJECT_ROOT}/outputs/teacher_reprompt_pilot/job${SLURM_JOB_ID:-manual}"
 mkdir -p "${OUTPUT_DIR}"
