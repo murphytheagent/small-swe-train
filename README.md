@@ -1,6 +1,6 @@
 # small-swe-train
 
-Scaffold repository for a chat-style SWE training stack with RFT + step-SDPO stages.
+Repository for a chat-style SWE training stack with RFT + step-SDPO stages.
 
 Latest doc update: 2026-02-28.
 
@@ -11,10 +11,6 @@ Latest doc update: 2026-02-28.
 - Deterministic adapter layer from SWE-style tool traces into canonical tools.
 - Stage-aware masking policy helpers for `rft` and `step_sdpo`.
 - Initial trainer/prompt/eval interface signatures.
-- Dedicated `RFTTrainerScaffold` for on-policy RFT rollout/rejection/checkpoint flow, with `SDPOTrainerScaffold` delegating RFT compatibility calls.
-- Optional RFT checkpoint scaffold manifests under `checkpoints/global_step_<n>/rft_step_manifest.json`.
-- RFT checkpoint writes require explicit `global_step` to avoid accidental step-directory reuse.
-- RFT checkpoint argument validation is fail-fast: invalid checkpoint inputs raise before rollout/training side effects.
 - On-policy RFT output artifacts include `rollout_rows.jsonl` and `rollout_artifact_summary.json` (task IDs, task-image pairs, and trajectory counts) when `data.on_policy.output_dir` is set.
 - Live on-policy handoff is coordinated by `src/trainer/rft_handoff.py`, summarized in `src/trainer/rft_runtime.py`, and persisted by `src/trainer/rft_runtime_loop.py` in `rft_runtime_loop_manifest.json`.
 - Default on-policy turn generation now uses a live OpenAI-compatible vLLM endpoint (`data.on_policy.turn_generator_mode=default`), with runtime settings sourced from centralized policy + `SMALL_SWE_VLLM_*` overrides.
@@ -35,7 +31,7 @@ Latest doc update: 2026-02-28.
 - `src/data/`: feedback canonicalizer + external tool-schema adapters.
 - `src/losses/`: stage-aware action masking helpers.
 - `src/teacher/`: block-structured teacher prompt builder.
-- `src/trainer/`: trainer scaffold signatures.
+- `src/trainer/`: RFT runtime loop + handoff utilities.
 - `tests/`: protocol stability tests.
 
 ## Quick start
@@ -127,13 +123,6 @@ For 8-GPU runs (`NPROC_PER_NODE=8`), the locked rollout defaults are:
 - `rft_runtime.loop.collector_max_in_flight_tasks=32`
 - `rft_runtime.vllm_parallelism.by_nproc_per_node.8.tensor_parallel_size=2`
 - `rft_runtime.vllm_parallelism.by_nproc_per_node.8.data_parallel_size=4`
-
-Run one deterministic Step-SDPO scaffold step from JSON/JSONL rows:
-```bash
-python scripts/run_step_sdpo_scaffold.py \
-  --input /path/to/rollout_rows.jsonl \
-  --output-dir /path/to/sdpo_step_outputs
-```
 
 ## Notes
 - End-to-end RFT runtime orchestration lives in `src/trainer/rft_runtime_loop.py`.

@@ -1,6 +1,6 @@
 # Implementation Blueprint: step-SDPO on verl for SWE-Agent Training
 
-> **Status**: Active implementation snapshot — 2026-02-28 00:00 UTC
+> **Status**: Active implementation snapshot — 2026-03-04 00:00 UTC
 > **Scope**: Runtime-integrated step-SDPO on `lasgroup/SDPO` (a verl fork) with
 > on-policy RFT handoff and `swe_bridge_agent` multi-turn execution.
 
@@ -20,6 +20,7 @@
 10. [Milestone Schedule](#10-milestone-schedule)
 11. [Configuration & Type Authority](#11-configuration--type-authority)
 12. [Current Build and Run Commands](#12-current-build-and-run-commands)
+13. [Risks, Non-goals, Completion, Missing Items](#13-risks-non-goals-completion-missing-items)
 
 ---
 
@@ -87,6 +88,17 @@ The 8 GPUs serve **dual duty** — verl manages the lifecycle:
 verl's colocated worker pattern offloads vLLM weights before loading FSDP training
 state, and vice versa, on every global step. The reference model (EMA teacher target)
 shares GPU allocation with the actor.
+
+### 1.3 Locked Decisions (Step-SDPO Slice)
+
+These are already agreed and should not be reopened during this implementation slice.
+
+1. No custom fine-grained token masking for step-SDPO runtime.
+2. Step-SDPO supervision uses rollout-produced `response_mask` from the multi-turn agent loop.
+3. Upstream SDPO divergence/loss internals remain unchanged unless a hard blocker is discovered.
+4. Multi-turn rollout is required for SWE tool-use trajectories.
+5. Local integration layers are narrow adapters only: custom agent loop (`swe_bridge_agent`),
+   reward adapter (DataProto <-> row contract), self-distillation reprompt assembly hook.
 
 ---
 
@@ -291,6 +303,19 @@ Used for RFT/preprocessing adapter paths.
 5. Appends to conversation history for next vLLM generation
 6. If `ActionEnvelope.is_terminal` (submit), ends the episode
 
+### 5.6 Upstream SDPO Surfaces Assumed Stable
+
+We treat these surfaces as stable integration points:
+1. Rollout generation path in `RayPPOTrainer.fit`.
+2. Reward computation hook path (DataProto-compatible interface).
+3. `_maybe_build_self_distillation_batch(...)` path for teacher reprompt assembly.
+
+### 5.7 Multi-Turn Assumptions
+
+1. Multi-turn is supported but not default; explicit config enablement is required.
+2. Agent loop selection is config-driven; default single-turn behavior is insufficient for SWE tool trajectories.
+3. Role-aware mask correctness depends on agent loop behavior, not on generic trainer fallback mask computation.
+
 ---
 
 ## 6. Environment Executor Design
@@ -337,6 +362,47 @@ verl framework.
 ---
 
 ## 7. Data Flow per SDPO Step
+
+### 7.1 SWE Trajectory Record Contract (Minimum Required Fields)
+
+Response masking contract (authoritative for step-SDPO runtime):
+- `response_mask[t] = 1` iff token `t` is model-generated assistant output.
+- `response_mask[t] = 0` iff token `t` is tool response, observation, or user-injected context.
+- Non-goal: no token-label masking (`think`, `tool_call`, or similar) is injected for SDPO runtime.
+
+Each sample must carry metadata for reward + reprompt paths (via DataProto non-tensors or equivalent):
+
+- `prompt` (string): task prompt.
+- `task_id` (string).
+- `image_name` (string): container image used for tool execution.
+- `assistant_response` (string): last assistant turn to score.
+- `tool_output` (mapping): last tool execution payload (`stdout`, `stderr`, `exit_code`, metadata).
+- `resolved` (bool): Phase-1 heuristic defined below.
+- `step_index` (int).
+- `attempt_index` (int).
+- `turn_index` (int).
+- `trajectory_steps` (list).
+- `trajectory_tool_validation_errors` (list[str]).
+- `final_turn_has_submit` (bool).
+- `final_submit_format_valid` (bool).
+- `executor_error` / `bridge_error` / `timeout_error` (optional strings when present).
+
+Terminal submit edge-case contract:
+- If terminal `submit` occurs without prior non-submit tool step, preserve terminal `assistant_response`.
+- Set `tool_output = {}` for that row.
+- Reward adapter must handle this deterministically (no shape/type special-case crash).
+
+### 7.2 `resolved` Definition (Phase-1 Heuristic)
+
+`resolved = true` iff all are true:
+1. Terminal tool call is `submit`.
+2. Submit payload/schema is valid.
+3. No tool step has non-zero `exit_code`.
+4. No bridge/executor/timeout error flags are present.
+
+Phase-2 (future, out-of-scope here): replace heuristic with harness-based task resolution signal.
+
+### 7.3 SDPO Step Trace
 
 This traces one complete global step through the system.
 
@@ -468,6 +534,68 @@ consumed by the integration layer. `src/data/` contains `feedback_canonicalizer.
 `tool_schema_adapter.py`, and `tokenization.py` (the offline ingestion module
 `trajectory_ingestion.py` was removed in v1.9).
 
+### 8.4 Step-SDPO Implementation Sequence (Exact Order)
+
+Phase 0: Doc and policy alignment for masking pivot
+- Objective: align design docs so step-SDPO mask source is rollout `response_mask`.
+- Actions: remove SDPO runtime references to token-label masking; mark scaffold helpers as non-runtime.
+- Exit criteria: no design doc claims SDPO runtime `response_mask` is produced by token-label injection.
+- Status: complete.
+
+Phase A: Runner hygiene and authoritative entrypoint
+- Objective: make SDPO launch path as reliable as RFT launch path.
+- Actions: `scripts/run_sdpo.sh` handles hygiene and `main_ppo_entry.py` is the entrypoint.
+- Exit criteria: dry-run resolves a command importing local integration modules without path issues.
+- Status: complete.
+
+Phase B: Baseline upstream multi-turn + bridge loop
+- Objective: confirm multi-turn plumbing before custom loop insertion.
+- Actions: explicit multi-turn keys in `configs/verl/sdpo_swe.yaml`; route rollouts through `swe_bridge_agent`.
+- Exit criteria: multi-turn active in resolved config; rollout `response_mask` semantics present.
+- Status: complete.
+
+Phase C: Task metadata propagation into SDPO rollouts
+- Objective: guarantee rollout loop has `task_id`, `image_name`, and prompt data per sample.
+- Actions: require metadata-rich parquet fields and validate at reward/reprompt boundaries.
+- Exit criteria: agent loop receives `task_id`, `image_name`, and prompt text for each sample.
+- Status: complete.
+
+Phase D: Implement `swe_bridge_agent` loop
+- Objective: replace generic tool-loop execution with SWE bridge semantics.
+- Actions: deterministic Docker lifecycle, per-turn tool execution, correct `response_mask` semantics.
+- Exit criteria: `swe_bridge_agent` active, no container leaks in smoke run, tool-response blocks present.
+- Status: complete.
+
+Phase E: Reward adapter for DataProto path
+- Objective: reuse existing reward function in PPO DataProto flow without SDPO loss changes.
+- Actions: map DataProto to rows, call `reward_fn(...)`, return reward tensor + extras.
+- Exit criteria: reward computation runs without shape/type mismatch; `feedback` aligned.
+- Status: complete.
+
+Phase F: Self-distillation reprompt hook
+- Objective: swap only teacher prompt construction to local SWE reprompt adapter.
+- Actions: patch `_maybe_build_self_distillation_batch(...)`, enforce truncation, keep SDPO loss intact.
+- Exit criteria: distillation tensors produced with stable shapes; hook integrates without fallback breakage.
+- Status: complete.
+
+Phase G: Verification and smoke E2E
+- Objective: prove end-to-end wiring with minimal monitored run.
+- Actions: one-step training run, verify bridge + reward + reprompt + masking behavior, clean up.
+- Exit criteria: one complete SDPO training step finishes and D6 acceptance artifacts are captured.
+- Status: one-step smoke complete; D6 acceptance artifacts pending.
+
+### 8.5 Deliverables (D0..D6) and Acceptance Criteria
+
+| ID | Deliverable | Primary Files | Acceptance Criteria | Status |
+| --- | --- | --- | --- | --- |
+| D0 | Root guiding plan | `step_sdpo_implementation_plan.md` (merged here) | Guiding plan tracked and current | Done |
+| D1 | Multi-turn + loop defaults in SDPO config | `configs/verl/sdpo_swe.yaml` | Required keys explicit in YAML (not only CLI) | Done |
+| D2 | SWE bridge agent loop integration | `configs/verl/agent_loops/swe_bridge_agent.yaml`, `src/verl_integration/swe_bridge_agent_loop.py` | Per-turn bridge call integrated; terminal submit edge case deterministic | Done |
+| D3 | SDPO trainer reprompt hook integration | `src/verl_integration/main_ppo_entry.py` (patch module) | `_maybe_build_self_distillation_batch` uses local reprompt adapter; SDPO loss math unchanged | Done |
+| D4 | DataProto reward adapter | `src/verl_integration/reward_adapter.py` + call site | Reward tensor and feedback extras produced with stable alignment | Done |
+| D5 | SDPO launcher hygiene | `scripts/run_sdpo.sh` | Launcher exports PYTHONPATH, resolves checkpoints, executes local entry | Done |
+| D6 | Monitored e2e step-SDPO run from RFT checkpoint | `outputs/integration/<run_label>/...` | Run satisfies Section 12.4 success gate with required artifacts | Pending |
+
 ---
 
 ## 9. Dependency Stack
@@ -585,8 +713,6 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-22 11:17 UTC] Follow-up next-step implementation after PR #4 merge: aligned `onpolicy_collector` row `turn_index` with the sampled `assistant_response`/`tool_output` turn (instead of terminal submit turn), added regression assertions in `tests/test_onpolicy_collector.py`, and revalidated full local suite (`104 passed, 2 skipped`).
 - [2026-02-22 21:27 UTC] Addressed PR #6 P1 reliability findings in `src/rollout/onpolicy_collector.py` and `src/env/docker_executor.py`: task patches are now streamed via stdin to `docker exec -i` (instead of embedding full base64 patch payload in argv), and task-env init executor exceptions are downgraded into row-level `executor_error` values so one failing task does not crash batch collection.
 - [2026-02-22 21:27 UTC] Added regressions in `tests/test_onpolicy_collector.py` and `tests/test_docker_executor.py`; validation status: `python3 -m pytest tests/test_onpolicy_collector.py tests/test_onpolicy_rollout_adapter.py tests/test_sdpo_trainer.py tests/test_run_scripts.py tests/test_task_dataset.py tests/test_docker_executor.py -q` passing (`34 passed`).
-- [2026-02-22 23:26 UTC] Added explicit Step-SDPO runner I/O interface via `scripts/run_step_sdpo_scaffold.py`: JSON/JSONL input rows in, deterministic scaffold step execution, and stable output artifacts (`rollout_rows.jsonl`, `teacher_prompts.jsonl`, `sdpo_step_summary.json`) out.
-- [2026-02-22 23:26 UTC] Added CLI regression coverage in `tests/test_run_step_sdpo_scaffold_script.py` to validate artifact creation and summary/reward fields.
 - [2026-02-22 23:34 UTC] Added optional RFT checkpoint/saving scaffold in `SDPOTrainerScaffold.run_onpolicy_rft_step(...)`: when `checkpoint_dir` is provided, the trainer now writes `checkpoints/global_step_<n>/rft_step_manifest.json` plus `checkpoints/latest_checkpoint.txt`, and exposes `checkpoint_dir`/`checkpoint_exists` in `OnPolicyRFTStepArtifacts`.
 - [2026-02-22 23:34 UTC] Added regression coverage in `tests/test_sdpo_trainer.py` for checkpoint manifest and latest-pointer writes.
 - [2026-02-22 23:42 UTC] Hardened RFT checkpoint contract to require explicit `global_step` whenever `checkpoint_dir` is set; removed fallback to `total_steps` to prevent iterative runs from overwriting `global_step_1`.
@@ -608,6 +734,7 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-24 03:26 UTC] Hardened `scripts/run_rft.sh` TP/DP auto-resolution so non-divisible TP overrides now safely fall back to `DP=1` (instead of reusing default DP and producing invalid combinations); added regression `test_run_rft_script_dry_run_nondivisible_tp_override_falls_back_to_dp_one`.
 - [2026-02-28 00:00 UTC] Activated runtime SDPO patch path: `main_ppo_entry.py` + `ppo_runtime_patch.py` + `reward_adapter.py` + `reward_loop_score.py`, plus `swe_bridge_agent_loop` registration and `run_sdpo.sh` checkpoint/cache validation. Added end-to-end one-step evidence under `outputs/turn_sdpo_runtime/.../global_step_1`.
 - [2026-02-28 00:00 UTC] Updated this blueprint to mark D6 acceptance-run evidence as remaining gap: full monitored run artifacts (`acceptance_summary.md`) still not persisted under `outputs/integration/<run_label>` by automation.
+- [2026-03-04 00:00 UTC] Merged `step_sdpo_implementation_plan.md` into this blueprint and formalized D0..D6 deliverables, acceptance gate, contracts, and strict missing-items list (D6 artifacts still absent under `outputs/integration/`).
 
 ---
 
@@ -643,10 +770,38 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 
 ### 11.5 Single-source policy checks
 
-- Startup validation should fail fast if:
-  - configured terminal tool is not in schema `ALLOWED_TOOLS`,
-  - configured tool-call bounds are invalid (`min < 1` or `max < min`).
+- Startup validation should fail fast if configured terminal tool is not in schema `ALLOWED_TOOLS` or tool-call bounds are invalid (`min < 1` or `max < min`).
 - This keeps runtime config flexible while preserving schema correctness.
+
+### 11.6 Authoritative Config Flow for Step-SDPO Runs
+
+1. Baseline defaults live in `configs/verl/sdpo_swe.yaml`.
+2. `scripts/run_sdpo.sh` is the authoritative launcher path and handles interpreter/import/runtime hygiene.
+3. CLI/Hydra overrides are run-scoped only.
+
+### 11.7 Source of Truth for Initial Checkpoint
+
+Primary source:
+- `outputs/rft_runtime/rft_runtime_loop_manifest.json` -> `.final_model_path`
+
+Fallback source:
+- Explicit human-provided completed RFT checkpoint path.
+
+Checkpoint must resolve to a valid directory containing model export artifacts.
+
+### 11.8 Required Runtime Keys for Acceptance Run
+
+- `actor_rollout_ref.model.path=<RFT_CHECKPOINT_PATH>`
+- `actor_rollout_ref.rollout.multi_turn.enable=true`
+- `actor_rollout_ref.rollout.multi_turn.max_assistant_turns=<N>`
+- `actor_rollout_ref.rollout.multi_turn.max_user_turns=<N>`
+- `actor_rollout_ref.rollout.agent.default_agent_loop=swe_bridge_agent`
+- `actor_rollout_ref.rollout.agent.agent_loop_config_path=<repo>/configs/verl/agent_loops/swe_bridge_agent.yaml`
+- `trainer.total_training_steps=1`
+- `trainer.default_local_dir=<outputs/integration/<run_label>>`
+- rollout prompt dataset path (`data.train_files`)
+- config-compatibility validation path (`data.val_files`) should mirror `data.train_files`
+- for RL-style e2e acceptance, disable validation rollouts (`trainer.test_freq=0`)
 
 ---
 
@@ -703,6 +858,20 @@ bash scripts/run_sdpo.sh \
   data.val_files=/path/to/turn_sdpo_train.parquet
 ```
 
+Canonical acceptance dry-run example (resolves overrides only):
+```bash
+RFT_MANIFEST="/path/to/rft_runtime_loop_manifest.json"
+RFT_CKPT="$(jq -r '.final_model_path' "${RFT_MANIFEST}")"
+test -d "${RFT_CKPT}"
+
+bash scripts/run_sdpo.sh --dry-run \
+  actor_rollout_ref.model.path="${RFT_CKPT}" \
+  actor_rollout_ref.rollout.multi_turn.enable=true \
+  actor_rollout_ref.rollout.agent.default_agent_loop=swe_bridge_agent \
+  actor_rollout_ref.rollout.agent.agent_loop_config_path="$(pwd)/configs/verl/agent_loops/swe_bridge_agent.yaml" \
+  trainer.total_training_steps=1
+```
+
 Realistic 2-step profile command:
 ```bash
 RFT_STEPS=2 \
@@ -732,3 +901,94 @@ bash scripts/run_flash_attn_rebuild.sh
 - `rft_runtime.vllm_parallelism.by_nproc_per_node.8.tensor_parallel_size=2`
 - `rft_runtime.vllm_parallelism.by_nproc_per_node.8.data_parallel_size=4`
 - SDPO runtime defaults are now resolved from `run_sdpo.sh` (`data.train_files`/`data.val_files`, checkpoint path, and `actor_rollout_ref.rollout` multi-turn/agent keys).
+
+### 12.4 Acceptance Gate (D6, Authoritative)
+
+Step-SDPO integration is accepted only if a single monitored run satisfies all conditions:
+
+1. Checkpoint load correctness: runtime clearly shows `actor_rollout_ref.model.path` equals the RFT-derived checkpoint.
+2. Multi-turn bridge path correctness: `swe_bridge_agent` runs and executes `generate -> bridge -> append tool response -> continue/submit`.
+3. SDPO distillation hook correctness: self-distillation batch path executes via local reprompt hook without loss-path fallback errors.
+4. Masking correctness: training uses rollout `response_mask` policy (assistant-only supervision), with no custom fine-mask injection in runtime.
+5. Step completion: at least one SDPO global step completes and writes outputs.
+6. Evidence completeness: run directory includes all required artifacts listed below.
+
+### 12.5 Required Acceptance Artifacts (D6)
+
+Under `outputs/integration/<run_label>/`:
+- `launch_command.txt`
+- `resolved_runtime_values.json`
+- `train.log`
+- `acceptance_summary.md`
+
+`acceptance_summary.md` must include explicit pass/fail statements for all six success-gate conditions above.
+
+### 12.6 Suggested Slurm Envelope for Acceptance Run
+
+Heavy runtime must run in Slurm with explicit memory. For SDPO on this node, set
+`RAY_TMPDIR` to scratch to avoid `/tmp` disk-pressure crashes. Keep
+`TOKENIZERS_PARALLELISM=false` for Ray SDPO workers to avoid tokenizer deadlocks.
+
+```bash
+srun --mem=384G --gres=gpu:8 --cpus-per-task=32 --time=04:00:00 bash -lc '
+  set -euo pipefail
+  cd /path/to/small-swe-train
+  export NPROC_PER_NODE=8
+  export RAY_TMPDIR=/data/scratch/$USER/ray_tmp/${SLURM_JOB_ID:-manual}
+  mkdir -p "$RAY_TMPDIR"
+
+  RFT_MANIFEST=/path/to/rft_runtime_loop_manifest.json
+  RFT_CKPT="$(jq -r ".final_model_path" "${RFT_MANIFEST}")"
+  RUN_DIR="$(pwd)/outputs/integration/step_sdpo_e2e_from_rft_$(date -u +%Y%m%d_%H%M%S)"
+  mkdir -p "${RUN_DIR}"
+
+  bash scripts/run_sdpo.sh \
+    actor_rollout_ref.model.path="${RFT_CKPT}" \
+    actor_rollout_ref.rollout.multi_turn.enable=true \
+    actor_rollout_ref.rollout.agent.default_agent_loop=swe_bridge_agent \
+    actor_rollout_ref.rollout.agent.agent_loop_config_path="$(pwd)/configs/verl/agent_loops/swe_bridge_agent.yaml" \
+    trainer.total_training_steps=1 \
+    trainer.default_local_dir="${RUN_DIR}" \
+    data.train_files=/path/to/train_data \
+    data.val_files=/path/to/train_data \
+    trainer.test_freq=0 \
+    2>&1 | tee "${RUN_DIR}/train.log"
+'
+```
+
+---
+
+## 13. Risks, Non-goals, Completion, Missing Items
+
+### 13.1 Main Risks and Mitigations
+
+1. Agent-loop registration mismatch. Mitigation: local entry module imports/registers loop explicitly; add loop-instantiation test.
+2. Metadata missing in rollout samples. Mitigation: strict validation at dataset/loop boundary with explicit field error messages.
+3. Response-mask regression in loop path. Mitigation: unit tests asserting assistant tokens are `1`, tool/observation tokens are `0`.
+4. Reward adapter schema mismatch. Mitigation: adapter tests for shape/type/alignment, including submit-only terminal row.
+5. Distillation truncation mismatch. Mitigation: tokenizer-length truncation enforced in hook path.
+6. Container lifecycle leaks during failures. Mitigation: explicit cleanup in success/error/finally paths and post-run leak checks.
+
+### 13.2 Non-goals (This Slice)
+
+1. No runtime introduction of fine-grained SDPO token-label masking.
+2. No rewrite of upstream SDPO divergence/loss internals.
+3. No long multi-step benchmark campaign before one-step acceptance gate passes.
+4. No harness-grade `resolved` replacement in this implementation slice.
+
+### 13.3 Completion Definition for This Slice
+
+This slice is complete when:
+1. This blueprint (merged guiding plan) is tracked and reviewed.
+2. Runtime wiring in Sections 8-12 stays synchronized with repository state.
+3. D6 acceptance artifacts are produced for a monitored SDPO run.
+
+### 13.4 Strict Missing or Pending Items (as of 2026-03-04)
+
+The items below are required for acceptance and are not yet present or captured:
+
+- `outputs/integration/<run_label>/` is empty; no monitored D6 run directory exists yet.
+- Required D6 artifacts are missing: `launch_command.txt`, `resolved_runtime_values.json`, `train.log`, `acceptance_summary.md`.
+- No `acceptance_summary.md` exists that records explicit pass/fail for all six acceptance-gate conditions.
+- Evidence for the six acceptance-gate conditions (checkpoint load correctness, multi-turn bridge path, distillation hook, response-mask policy, step completion, evidence completeness) has not been captured in a monitored run directory.
+- No automation in-repo currently writes the D6 artifacts above (the only references are in this blueprint and the merged plan); artifact capture is still manual.
