@@ -440,7 +440,7 @@ def test_invalid_legacy_gating_policy_raises() -> None:
         build_self_distillation_batch([], legacy_distillation_gating_policy="bad_policy")
 
 
-def test_current_turn_mode_omits_target_turn_attempt_text() -> None:
+def test_current_turn_mode_keeps_target_turn_attempt_text_when_enabled() -> None:
     samples = [
         {
             "prompt": "Fix issue",
@@ -465,8 +465,8 @@ def test_current_turn_mode_omits_target_turn_attempt_text() -> None:
 
     prompt_turn_0 = batch["turn_teacher_prompts"][0][0]
     prompt_turn_1 = batch["turn_teacher_prompts"][0][1]
-    assert "TURN0_SECRET_STUDENT_ATTEMPT" not in prompt_turn_0
-    assert "TURN1_SECRET_STUDENT_ATTEMPT" not in prompt_turn_1
+    assert "TURN0_SECRET_STUDENT_ATTEMPT" in prompt_turn_0
+    assert "TURN1_SECRET_STUDENT_ATTEMPT" in prompt_turn_1
     assert "current-turn reflection" in prompt_turn_0
 
 
@@ -496,6 +496,35 @@ def test_next_turn_mode_keeps_current_attempt_block_behavior() -> None:
     prompt_turn_0 = batch["turn_teacher_prompts"][0][0]
     assert "TURN0_SECRET_STUDENT_ATTEMPT" in prompt_turn_0
     assert "next turn" in prompt_turn_0.lower()
+
+
+def test_current_turn_mode_omits_current_attempt_when_disabled() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": [
+                "TURN0_SECRET_STUDENT_ATTEMPT",
+                "TURN1_SECRET_STUDENT_ATTEMPT",
+            ],
+            "trajectory_assistant_turn_token_lengths": [2, 2],
+            "trajectory_turn_tool_response_blocks": [
+                ["<tool_response>r0</tool_response>"],
+                ["<tool_response>r1</tool_response>"],
+            ],
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        turn_supervision_mode="current_turn",
+        include_student_attempt_for_teacher=False,
+    )
+
+    prompt_turn_0 = batch["turn_teacher_prompts"][0][0]
+    prompt_turn_1 = batch["turn_teacher_prompts"][0][1]
+    assert "TURN0_SECRET_STUDENT_ATTEMPT" not in prompt_turn_0
+    assert "TURN1_SECRET_STUDENT_ATTEMPT" not in prompt_turn_1
 
 
 def test_verifier_feedback_all_turns_injection() -> None:

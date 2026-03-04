@@ -652,10 +652,7 @@ def _build_turn_prompt(
     )
 
     current_attempt_block = turn_blocks[current_turn_index]
-    if (
-        supervision_mode == _TURN_SUPERVISION_CURRENT
-        or not include_student_attempt_for_teacher
-    ):
+    if not include_student_attempt_for_teacher:
         current_attempt_block = ""
 
     verifier_feedback_block = ""
@@ -723,10 +720,7 @@ def _build_legacy_prompt_for_sample(
         or feedback_packet.canonical_feedback.normalized_text
     )
     current_attempt_block = str(sample.get("current_attempt_block") or sample.get("assistant_response") or "")
-    if (
-        supervision_mode == _TURN_SUPERVISION_CURRENT
-        or not include_student_attempt_for_teacher
-    ):
+    if not include_student_attempt_for_teacher:
         current_attempt_block = ""
 
     verifier_feedback_block = ""

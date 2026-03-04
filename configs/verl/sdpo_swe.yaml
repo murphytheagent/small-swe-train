@@ -69,7 +69,7 @@ actor_rollout_ref:
       is_clip: 2.0                            # importance-sampling ratio clip
       max_reprompt_len: 12288                 # teacher prompt token budget (raised for protected-section retention)
       num_recent_raw_blocks: 3                # number of preceding turn blocks in RECENT_RAW_BLOCK
-      turn_supervision_mode: next_turn        # keep next_turn until PR #19 leakage-safe prompting lands
+      turn_supervision_mode: current_turn     # default to current-turn supervision for teacher reprompt distillation
       verifier_feedback_mode: final_turn_only # inject verifier feedback on final distilled turn
       legacy_distillation_gating_policy: feedback_present  # activate unresolved rows when feedback exists
       reprompt_truncation: right
