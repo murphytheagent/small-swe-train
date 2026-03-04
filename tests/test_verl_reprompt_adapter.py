@@ -24,7 +24,7 @@ def test_build_self_distillation_batch_contains_contract_blocks() -> None:
     prompt = batch["teacher_prompts"][0]
     assert "[INITIAL_PROMPT_BLOCK]" in prompt
     assert "[FEEDBACK_BLOCK]" in prompt
-    assert "Teacher objective (turn-level SDPO):" in prompt
+    assert "current turn" in prompt.lower()
     assert "Assistant output contract:" in prompt
     assert batch["self_distillation_mask"] == [False]
 
@@ -100,12 +100,30 @@ def test_build_self_distillation_batch_empty_tool_output_does_not_set_teacher_si
     assert batch["self_distillation_mask"] == [False]
 
 
-def test_feedback_present_gating_treats_metadata_only_tool_output_as_signal() -> None:
+def test_feedback_present_gating_ignores_neutral_exit_code_only_tool_output() -> None:
     samples = [
         {
             "prompt": "Fix the thing",
             "assistant_response": "<tool_call>{\"tool\":\"bash\",\"args\":{\"command\":\"true\"}}</tool_call>",
             "tool_output": {"exit_code": 0},
+            "resolved": False,
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        legacy_distillation_gating_policy="feedback_present",
+    )
+
+    assert batch["self_distillation_mask"] == [False]
+
+
+def test_feedback_present_gating_uses_nonzero_exit_code_as_signal() -> None:
+    samples = [
+        {
+            "prompt": "Fix the thing",
+            "assistant_response": "<tool_call>{\"tool\":\"bash\",\"args\":{\"command\":\"false\"}}</tool_call>",
+            "tool_output": {"exit_code": 2},
             "resolved": False,
         }
     ]
@@ -254,7 +272,11 @@ def test_build_self_distillation_batch_emits_turn_level_pairs() -> None:
         }
     ]
 
-    batch = build_self_distillation_batch(samples, num_recent_raw_blocks=3)
+    batch = build_self_distillation_batch(
+        samples,
+        num_recent_raw_blocks=3,
+        turn_supervision_mode="next_turn",
+    )
 
     assert batch["self_distillation_mask"] == [True]
     assert len(batch["turn_teacher_prompts"][0]) == 2
@@ -267,6 +289,32 @@ def test_build_self_distillation_batch_emits_turn_level_pairs() -> None:
     assert "[TURN_0]" in second_turn_prompt
     assert "[CURRENT_ATTEMPT_BLOCK]" in second_turn_prompt
     assert "[TURN_1]" in second_turn_prompt
+
+
+def test_build_self_distillation_batch_defaults_to_current_turn_supervision() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 0, 1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1", "turn-2"],
+            "trajectory_assistant_turn_token_lengths": [2, 2, 2],
+            "trajectory_turn_tool_response_blocks": [
+                ["<tool_response>a</tool_response>"],
+                ["<tool_response>b</tool_response>"],
+                ["<tool_response>c</tool_response>"],
+            ],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples)
+
+    assert len(batch["turn_teacher_prompts"][0]) == 3
+    assert batch["turn_distillation_mask"][0] == [True, True, True]
+    assert batch["turn_response_masks"][0] == [
+        [1, 1, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 1, 1],
+    ]
 
 
 def test_build_self_distillation_batch_recent_raw_window_handles_short_histories() -> None:

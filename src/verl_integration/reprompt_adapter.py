@@ -35,6 +35,7 @@ _LEGACY_GATING_POLICIES = {
     _LEGACY_GATING_FEEDBACK_PRESENT,
     _LEGACY_GATING_ALWAYS,
 }
+_NON_ACTIONABLE_EXIT_CODE_KEYS = {"exit_code", "return_code", "returncode"}
 
 
 def _token_count(text: str) -> int:
@@ -268,6 +269,28 @@ def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
         if normalized in _FALSE_STRINGS:
             return False
     return fallback
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    return None
 
 
 def _coerce_text_list(value: Any) -> list[str]:
@@ -595,6 +618,12 @@ def _has_feedback_signal(
         for key, value in tool_output.items():
             if key in {"stdout", "stderr"}:
                 continue
+            if key in _NON_ACTIONABLE_EXIT_CODE_KEYS:
+                parsed_exit_code = _coerce_optional_int(value)
+                if parsed_exit_code == 0:
+                    continue
+                if parsed_exit_code is not None:
+                    return True
             if value is None:
                 continue
             if isinstance(value, str) and not value.strip():
@@ -761,7 +790,7 @@ def build_self_distillation_batch(
     include_student_attempt_for_teacher: bool = True,
     max_reprompt_len: int = DEFAULT_MAX_REPROMPT_LEN,
     num_recent_raw_blocks: int = DEFAULT_NUM_RECENT_RAW_BLOCKS,
-    turn_supervision_mode: str = _TURN_SUPERVISION_NEXT,
+    turn_supervision_mode: str = _TURN_SUPERVISION_CURRENT,
     verifier_feedback_mode: str = _VERIFIER_FEEDBACK_NONE,
     legacy_distillation_gating_policy: str = _LEGACY_GATING_RESOLVED_ONLY,
 ) -> dict[str, Any]:
