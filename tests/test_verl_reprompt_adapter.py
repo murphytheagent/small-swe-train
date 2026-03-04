@@ -737,3 +737,51 @@ def test_feedback_present_gating_respects_verifier_mode_and_payload_presence() -
     assert verifier_enabled["self_distillation_mask"] == [True]
     assert "[VERIFIER_FEEDBACK]" not in verifier_disabled["teacher_prompts"][0]
     assert "[VERIFIER_FEEDBACK]" in verifier_enabled["teacher_prompts"][0]
+
+
+def test_current_turn_prompts_do_not_include_future_turn_blocks() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 0, 1, 0],
+            "trajectory_assistant_turns": [
+                "turn-0 payload",
+                "turn-1 payload",
+                "turn-2 payload",
+                "turn-3 payload",
+            ],
+            "trajectory_assistant_turn_token_lengths": [1, 1, 1, 1],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"], ["r2"], ["r3"]],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, turn_supervision_mode="current_turn")
+    prompts = batch["turn_teacher_prompts"][0]
+    assert len(prompts) == 4
+    for prompt_index, prompt in enumerate(prompts):
+        for future_turn in range(prompt_index + 1, 4):
+            assert f"[TURN_{future_turn}]" not in prompt
+
+
+def test_next_turn_prompts_do_not_include_future_turn_blocks() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 0, 1, 0],
+            "trajectory_assistant_turns": [
+                "turn-0 payload",
+                "turn-1 payload",
+                "turn-2 payload",
+                "turn-3 payload",
+            ],
+            "trajectory_assistant_turn_token_lengths": [1, 1, 1, 1],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"], ["r2"], ["r3"]],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, turn_supervision_mode="next_turn")
+    prompts = batch["turn_teacher_prompts"][0]
+    assert len(prompts) == 3
+    for prompt_index, prompt in enumerate(prompts):
+        for future_turn in range(prompt_index + 1, 4):
+            assert f"[TURN_{future_turn}]" not in prompt

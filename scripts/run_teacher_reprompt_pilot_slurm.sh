@@ -85,7 +85,7 @@ PILOT_CMD=(
   --max-in-flight-tasks "${MAX_IN_FLIGHT_TASKS}"
   --teacher-reprompt-turn-index "${PILOT_TEACHER_TURN_INDEX:-1}"
   --turn-supervision-mode "${PILOT_TURN_SUPERVISION_MODE:-current_turn}"
-  --verifier-feedback-mode "${PILOT_VERIFIER_FEEDBACK_MODE:-all_turns}"
+  --verifier-feedback-mode "${PILOT_VERIFIER_FEEDBACK_MODE:-final_turn_only}"
   --max-reprompt-len "${PILOT_MAX_REPROMPT_LEN:-12288}"
   --num-recent-raw-blocks "${PILOT_NUM_RECENT_RAW_BLOCKS:-3}"
 )

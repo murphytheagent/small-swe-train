@@ -214,6 +214,49 @@ def test_patched_distillation_hook_raises_for_invalid_turn_supervision_mode() ->
         )
 
 
+def test_patched_distillation_hook_rejects_verifier_feedback_all_turns_without_override() -> None:
+    trainer_cls = _build_swe_trainer_class()
+    fake_module = SimpleNamespace(
+        RayPPOTrainer=trainer_cls,
+        DataProto=object,
+        compute_position_id_with_mask=lambda mask: mask,
+    )
+    assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
+
+    trainer = trainer_cls()
+    trainer.config.actor_rollout_ref.actor.self_distillation["verifier_feedback_mode"] = "all_turns"
+
+    with pytest.raises(ValueError, match="all_turns"):
+        trainer._maybe_build_self_distillation_batch(
+            batch="batch",
+            reward_tensor="reward",
+            reward_extra_infos_dict=None,
+        )
+
+
+def test_patched_distillation_hook_allows_verifier_feedback_all_turns_with_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer_cls = _build_swe_trainer_class()
+    fake_module = SimpleNamespace(
+        RayPPOTrainer=trainer_cls,
+        DataProto=object,
+        compute_position_id_with_mask=lambda mask: mask,
+    )
+    assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
+    monkeypatch.setenv("SMALL_SWE_SDPO_ALLOW_VERIFIER_FEEDBACK_ALL_TURNS", "1")
+
+    trainer = trainer_cls()
+    trainer.config.actor_rollout_ref.actor.self_distillation["verifier_feedback_mode"] = "all_turns"
+
+    output = trainer._maybe_build_self_distillation_batch(
+        batch="batch",
+        reward_tensor="reward",
+        reward_extra_infos_dict=None,
+    )
+    assert output[0] == "original_distill"
+
+
 def test_patched_reward_hook_uses_local_adapter_for_swe_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -391,6 +434,112 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     assert "self_distillation/teacher_attention_valid_token_ratio" in metrics
     assert "self_distillation/supervised_token_ratio" in metrics
     assert "self_distillation/invalid_supervised_overlap_count" in metrics
+
+
+def test_patched_distillation_hook_clamps_max_reprompt_len_to_sequence_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+    trainer_cls = _build_swe_trainer_class()
+
+    class _FakeDataProto:
+        def __init__(self, *, tensors):
+            self.tensors = tensors
+
+        @classmethod
+        def from_dict(cls, *, tensors):
+            return cls(tensors=tensors)
+
+    fake_module = SimpleNamespace(
+        RayPPOTrainer=trainer_cls,
+        DataProto=_FakeDataProto,
+        compute_position_id_with_mask=lambda mask: mask.cumsum(dim=1) - 1,
+    )
+    assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
+
+    captured: dict[str, int] = {}
+
+    def _fake_rows(batch, tokenizer):
+        _ = batch, tokenizer
+        return [{"_raw_prompt_messages": [{"role": "user", "content": "u"}], "_response_mask": [1] * 40}]
+
+    def _fake_build_self_distillation_batch(
+        rows,
+        *,
+        include_student_attempt_for_teacher,
+        max_reprompt_len,
+        num_recent_raw_blocks,
+        turn_supervision_mode,
+        verifier_feedback_mode,
+        legacy_distillation_gating_policy,
+    ):
+        _ = (
+            rows,
+            include_student_attempt_for_teacher,
+            num_recent_raw_blocks,
+            turn_supervision_mode,
+            verifier_feedback_mode,
+            legacy_distillation_gating_policy,
+        )
+        captured["max_reprompt_len"] = int(max_reprompt_len)
+        return {
+            "teacher_prompts": ["teacher"],
+            "self_distillation_mask": [True],
+            "prompt_truncated": [False],
+        }
+
+    monkeypatch.setattr(runtime_patch, "dataproto_to_rows", _fake_rows)
+    monkeypatch.setattr(runtime_patch, "build_self_distillation_batch", _fake_build_self_distillation_batch)
+
+    trainer = trainer_cls()
+    trainer.config.actor_rollout_ref.actor["ppo_max_token_len_per_gpu"] = 32
+    trainer.config.actor_rollout_ref.actor["ulysses_sequence_parallel_size"] = 2
+    trainer.config.actor_rollout_ref.actor.self_distillation["max_reprompt_len"] = 100
+
+    class _FakeTokenizer:
+        def apply_chat_template(
+            self,
+            messages,
+            *,
+            tokenize,
+            return_tensors,
+            return_dict,
+            continue_final_message,
+            add_generation_prompt,
+            max_length,
+            padding,
+            truncation,
+        ):
+            _ = (
+                messages,
+                tokenize,
+                return_tensors,
+                return_dict,
+                continue_final_message,
+                add_generation_prompt,
+                max_length,
+                padding,
+                truncation,
+            )
+            return {
+                "input_ids": torch.tensor([[10, 11, 12]], dtype=torch.long),
+                "attention_mask": torch.tensor([[1, 1, 1]], dtype=torch.long),
+            }
+
+    trainer.tokenizer = _FakeTokenizer()
+    batch = SimpleNamespace(
+        batch={
+            "responses": torch.arange(40, dtype=torch.long).reshape(1, 40),
+            "response_mask": torch.ones((1, 40), dtype=torch.long),
+        },
+        non_tensor_batch={"trajectory_steps": [[]]},
+    )
+    reward_tensor = torch.zeros((1, 40), dtype=torch.float32)
+    reward_tensor[0, 0] = 1.0
+
+    output = trainer._maybe_build_self_distillation_batch(batch, reward_tensor, {"feedback": ["x"]})
+    assert output is not None
+    assert captured["max_reprompt_len"] == 24
 
 
 def test_turn_level_actor_expansion_builds_per_turn_rows() -> None:

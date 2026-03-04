@@ -30,6 +30,7 @@ _ORIGINAL_AGENT_LOOP_GENERATE_ATTR = "_small_swe_original_agent_loop_generate_se
 _AGENT_LOOP_SERVER_PATCH_MARKER_ATTR = "_small_swe_agent_loop_server_patch_applied"
 _ORIGINAL_AGENT_LOOP_CHOOSE_SERVER_ATTR = "_small_swe_original_agent_loop_choose_server"
 _DISTRIBUTED_TURN_LEVEL_EXPANSION_ENV = "SMALL_SWE_ENABLE_DISTRIBUTED_TURN_LEVEL_EXPANSION"
+_ALLOW_VERIFIER_ALL_TURNS_ENV = "SMALL_SWE_SDPO_ALLOW_VERIFIER_FEEDBACK_ALL_TURNS"
 _TURN_SUPERVISION_NEXT = "next_turn"
 _TURN_SUPERVISION_CURRENT = "current_turn"
 _TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
@@ -243,6 +244,14 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
         verifier_feedback_mode = _normalize_verifier_feedback_mode(
             _cfg_get(self_distillation_cfg, "verifier_feedback_mode", _VERIFIER_FEEDBACK_NONE)
         )
+        if (
+            verifier_feedback_mode == _VERIFIER_FEEDBACK_ALL_TURNS
+            and not _env_flag_enabled(_ALLOW_VERIFIER_ALL_TURNS_ENV, default=False)
+        ):
+            raise ValueError(
+                "verifier_feedback_mode=all_turns is disallowed by default to avoid non-local hindsight leakage. "
+                f"Set {_ALLOW_VERIFIER_ALL_TURNS_ENV}=1 for explicit experiments."
+            )
         legacy_distillation_gating_policy = _normalize_legacy_gating_policy(
             _cfg_get(
                 self_distillation_cfg,
@@ -270,6 +279,29 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             )
             max_reprompt_len = int(_cfg_get(self_distillation_cfg, "max_reprompt_len", DEFAULT_MAX_REPROMPT_LEN))
             num_recent_raw_blocks = int(_cfg_get(self_distillation_cfg, "num_recent_raw_blocks", 3))
+            responses = batch.batch["responses"]
+            response_width = _resolve_response_width(responses) or 0
+            actor_cfg = _cfg_get(_cfg_get(_cfg_get(self, "config"), "actor_rollout_ref"), "actor")
+            ppo_max_token_len_per_gpu = int(_cfg_get(actor_cfg, "ppo_max_token_len_per_gpu", 0) or 0)
+            ulysses_sequence_parallel_size = int(_cfg_get(actor_cfg, "ulysses_sequence_parallel_size", 1) or 1)
+            max_token_len = ppo_max_token_len_per_gpu * max(ulysses_sequence_parallel_size, 1)
+            if response_width > 0 and max_token_len > 0:
+                safe_max_reprompt_len = max_token_len - response_width
+                if safe_max_reprompt_len <= 0:
+                    raise ValueError(
+                        "Invalid SDPO token budget: response width exceeds or equals actor max token length "
+                        f"(response_width={response_width}, max_token_len={max_token_len})."
+                    )
+                if max_reprompt_len > safe_max_reprompt_len:
+                    LOGGER.warning(
+                        "Clipping self_distillation.max_reprompt_len from %s to %s to satisfy "
+                        "teacher sequence budget (response_width=%s, max_token_len=%s).",
+                        max_reprompt_len,
+                        safe_max_reprompt_len,
+                        response_width,
+                        max_token_len,
+                    )
+                    max_reprompt_len = safe_max_reprompt_len
             reprompt_batch = build_self_distillation_batch(
                 rows,
                 include_student_attempt_for_teacher=include_student_attempt,
@@ -283,7 +315,6 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             if not teacher_prompts:
                 return None
 
-            responses = batch.batch["responses"]
             response_mask = batch.batch["response_mask"]
             response_device = getattr(responses, "device", None)
             teacher_prompt_tensors = _tokenize_teacher_prompts(
