@@ -67,7 +67,7 @@ actor_rollout_ref:
       distillation_topk: 100                  # top-k logit distillation
       distillation_add_tail: true             # tail-bucket for residual mass
       is_clip: 2.0                            # importance-sampling ratio clip
-      max_reprompt_len: 10240                 # teacher prompt token budget
+      max_reprompt_len: 12288                 # teacher prompt token budget (raised for protected-section retention)
       num_recent_raw_blocks: 3                # number of preceding turn blocks in RECENT_RAW_BLOCK
       turn_supervision_mode: next_turn        # keep next_turn until PR #19 leakage-safe prompting lands
       verifier_feedback_mode: final_turn_only # inject verifier feedback on final distilled turn

@@ -134,6 +134,76 @@ def test_build_self_distillation_batch_truncation_preserves_newlines() -> None:
     assert batch["prompt_truncated"] == [True]
 
 
+def test_turn_prompt_compaction_retains_protected_sections() -> None:
+    long_tool_feedback = " ".join(f"tooltok{i}" for i in range(180))
+    samples = [
+        {
+            "prompt": "ORIGINAL_PROBLEM_MUST_KEEP reduce flaky parser failures",
+            "_response_mask": [1, 0, 1, 0, 1, 0],
+            "trajectory_assistant_turns": [
+                "TURN0 context",
+                "CURRENT_STUDENT_ATTEMPT_MUST_KEEP patch parser branch and rerun",
+                "TURN2 submit",
+            ],
+            "trajectory_assistant_turn_token_lengths": [1, 1, 1],
+            "trajectory_turn_tool_response_blocks": [
+                ["raw historical output " + " ".join(f"raw{i}" for i in range(160))],
+                [long_tool_feedback],
+                [],
+            ],
+            "verification_feedback": "VERIFIER_RESPONSE_MUST_KEEP parser regression still failing",
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        turn_supervision_mode="next_turn",
+        verifier_feedback_mode="final_turn_only",
+        max_reprompt_len=120,
+    )
+
+    prompt = batch["turn_teacher_prompts"][0][1]
+    assert "ORIGINAL_PROBLEM_MUST_KEEP" in prompt
+    assert "CURRENT_STUDENT_ATTEMPT_MUST_KEEP" in prompt
+    assert "[VERIFIER_FEEDBACK]" in prompt
+    assert "VERIFIER_RESPONSE_MUST_KEEP" in prompt
+    assert "[OUTPUT_CONTRACT_BLOCK]" in prompt
+    assert len(prompt.split()) <= 120
+    assert batch["turn_prompt_truncated"][0][1] is True
+
+
+def test_legacy_prompt_compaction_retains_protected_sections() -> None:
+    samples = [
+        {
+            "prompt": "ORIGINAL_TASK_MUST_KEEP fix timeout handling in verifier pipeline",
+            "assistant_response": "CURRENT_ATTEMPT_MUST_KEEP inspect failing command path",
+            "tool_output": {
+                "stdout": " ".join(f"stdout{i}" for i in range(220)),
+                "stderr": "",
+                "exit_code": 1,
+            },
+            "verification_feedback": "VERIFIER_FEEDBACK_MUST_KEEP command still exits non-zero",
+            "resolved": False,
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        verifier_feedback_mode="all_turns",
+        max_reprompt_len=120,
+        legacy_distillation_gating_policy="feedback_present",
+    )
+
+    prompt = batch["teacher_prompts"][0]
+    assert "ORIGINAL_TASK_MUST_KEEP" in prompt
+    assert "CURRENT_ATTEMPT_MUST_KEEP" in prompt
+    assert "[VERIFIER_FEEDBACK]" in prompt
+    assert "VERIFIER_FEEDBACK_MUST_KEEP" in prompt
+    assert "[OUTPUT_CONTRACT_BLOCK]" in prompt
+    assert len(prompt.split()) <= 120
+    assert batch["prompt_truncated"] == [True]
+
+
 def test_build_self_distillation_batch_treats_false_string_as_unresolved(monkeypatch) -> None:
     def _stub_legacy_prompt_builder(
         sample,

@@ -13,6 +13,7 @@ from teacher.prompt_builder import TeacherPromptInputs, build_teacher_prompt
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 DEFAULT_NUM_RECENT_RAW_BLOCKS = 3
+DEFAULT_MAX_REPROMPT_LEN = 12288
 _TURN_SUPERVISION_NEXT = "next_turn"
 _TURN_SUPERVISION_CURRENT = "current_turn"
 _TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
@@ -25,6 +26,7 @@ _VERIFIER_FEEDBACK_MODES = {
     _VERIFIER_FEEDBACK_FINAL_TURN_ONLY,
     _VERIFIER_FEEDBACK_ALL_TURNS,
 }
+_VERIFIER_FEEDBACK_MARKER = "[VERIFIER_FEEDBACK]"
 _LEGACY_GATING_RESOLVED_ONLY = "resolved_only"
 _LEGACY_GATING_FEEDBACK_PRESENT = "feedback_present"
 _LEGACY_GATING_ALWAYS = "always"
@@ -35,16 +37,17 @@ _LEGACY_GATING_POLICIES = {
 }
 
 
-def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str, bool]:
-    if max_reprompt_len <= 0:
-        raise ValueError("max_reprompt_len must be > 0")
+def _token_count(text: str) -> int:
+    return len(str(text).split())
 
-    if len(prompt.split()) <= max_reprompt_len:
-        return prompt, False
 
-    lines = prompt.split("\n")
+def _truncate_text_to_token_budget(text: str, *, token_budget: int) -> str:
+    if token_budget <= 0:
+        return ""
+
+    lines = str(text).split("\n")
     kept_lines: list[str] = []
-    budget = max_reprompt_len
+    budget = token_budget
 
     for line in lines:
         words = line.split()
@@ -58,10 +61,168 @@ def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str,
         else:
             if budget > 0:
                 kept_lines.append(" ".join(words[:budget]))
-            budget = 0
             break
 
-    return "\n".join(kept_lines), True
+    return "\n".join(kept_lines)
+
+
+def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str, bool]:
+    if max_reprompt_len <= 0:
+        raise ValueError("max_reprompt_len must be > 0")
+
+    if _token_count(prompt) <= max_reprompt_len:
+        return prompt, False
+
+    return _truncate_text_to_token_budget(prompt, token_budget=max_reprompt_len), True
+
+
+def _split_feedback_block(feedback_block: str) -> tuple[str, str]:
+    rendered = str(feedback_block).strip()
+    if not rendered:
+        return "", ""
+    marker_index = rendered.find(_VERIFIER_FEEDBACK_MARKER)
+    if marker_index < 0:
+        return rendered, ""
+    feedback_main = rendered[:marker_index].rstrip()
+    verifier_feedback = rendered[marker_index:].strip()
+    return feedback_main, verifier_feedback
+
+
+def _combine_feedback_sections(*, feedback_main: str, verifier_feedback_block: str) -> str:
+    sections: list[str] = []
+    main = str(feedback_main).strip()
+    verifier = str(verifier_feedback_block).strip()
+    if main:
+        sections.append(main)
+    if verifier:
+        sections.append(verifier)
+    return "\n\n".join(sections)
+
+
+def _render_prompt_from_sections(sections: Mapping[str, str]) -> str:
+    return build_teacher_prompt(
+        TeacherPromptInputs(
+            initial_prompt_block=sections["initial_prompt_block"],
+            recent_raw_block=sections["recent_raw_block"],
+            compressed_memory_block=sections["compressed_memory_block"],
+            critical_facts_block=sections["critical_facts_block"],
+            current_attempt_block=sections["current_attempt_block"],
+            feedback_block=_combine_feedback_sections(
+                feedback_main=sections["feedback_main"],
+                verifier_feedback_block=sections["verifier_feedback_block"],
+            ),
+            output_contract_block=sections["output_contract_block"],
+        )
+    )
+
+
+def _reduce_sections_to_budget(
+    *,
+    sections: dict[str, str],
+    max_reprompt_len: int,
+    reduction_order: Sequence[str],
+    min_token_budget: Mapping[str, int],
+) -> bool:
+    changed = False
+    prompt = _render_prompt_from_sections(sections)
+    overage = _token_count(prompt) - max_reprompt_len
+    if overage <= 0:
+        return changed
+
+    for key in reduction_order:
+        if overage <= 0:
+            break
+        value = sections.get(key, "")
+        current_tokens = _token_count(value)
+        keep_floor = max(int(min_token_budget.get(key, 0)), 0)
+        removable = max(current_tokens - keep_floor, 0)
+        if removable <= 0:
+            continue
+
+        drop = min(removable, overage)
+        keep = current_tokens - drop
+        reduced = _truncate_text_to_token_budget(value, token_budget=keep)
+        if reduced != value:
+            sections[key] = reduced
+            changed = True
+
+        prompt = _render_prompt_from_sections(sections)
+        overage = _token_count(prompt) - max_reprompt_len
+
+    return changed
+
+
+def _compact_teacher_prompt(
+    *,
+    initial_prompt_block: str,
+    recent_raw_block: str,
+    compressed_memory_block: str,
+    critical_facts_block: str,
+    current_attempt_block: str,
+    feedback_block: str,
+    output_contract_block: str,
+    max_reprompt_len: int,
+) -> tuple[str, bool]:
+    if max_reprompt_len <= 0:
+        raise ValueError("max_reprompt_len must be > 0")
+
+    feedback_main, verifier_feedback_block = _split_feedback_block(feedback_block)
+    sections: dict[str, str] = {
+        "initial_prompt_block": str(initial_prompt_block),
+        "recent_raw_block": str(recent_raw_block),
+        "compressed_memory_block": str(compressed_memory_block),
+        "critical_facts_block": str(critical_facts_block),
+        "current_attempt_block": str(current_attempt_block),
+        "feedback_main": str(feedback_main),
+        "verifier_feedback_block": str(verifier_feedback_block),
+        "output_contract_block": str(output_contract_block),
+    }
+
+    full_prompt = _render_prompt_from_sections(sections)
+    if _token_count(full_prompt) <= max_reprompt_len:
+        return full_prompt, False
+
+    was_truncated = False
+    optional_changed = _reduce_sections_to_budget(
+        sections=sections,
+        max_reprompt_len=max_reprompt_len,
+        reduction_order=(
+            "critical_facts_block",
+            "compressed_memory_block",
+            "recent_raw_block",
+            "feedback_main",
+        ),
+        min_token_budget={},
+    )
+    was_truncated = was_truncated or optional_changed
+    prompt = _render_prompt_from_sections(sections)
+    if _token_count(prompt) <= max_reprompt_len:
+        return prompt, True
+
+    protected_token_floors = {
+        "initial_prompt_block": min(_token_count(sections["initial_prompt_block"]), 24),
+        "current_attempt_block": min(_token_count(sections["current_attempt_block"]), 16),
+        "verifier_feedback_block": min(_token_count(sections["verifier_feedback_block"]), 16),
+        "output_contract_block": min(_token_count(sections["output_contract_block"]), 32),
+    }
+    protected_changed = _reduce_sections_to_budget(
+        sections=sections,
+        max_reprompt_len=max_reprompt_len,
+        reduction_order=(
+            "initial_prompt_block",
+            "current_attempt_block",
+            "verifier_feedback_block",
+            "output_contract_block",
+        ),
+        min_token_budget=protected_token_floors,
+    )
+    was_truncated = was_truncated or protected_changed
+    prompt = _render_prompt_from_sections(sections)
+    if _token_count(prompt) <= max_reprompt_len:
+        return prompt, True
+
+    hard_capped, hard_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
+    return hard_capped, bool(was_truncated or hard_truncated)
 
 
 def _coerce_step_index(value: Any, *, fallback: int) -> int:
@@ -513,21 +674,19 @@ def _build_turn_prompt(
             combined_feedback_block = f"[VERIFIER_FEEDBACK]\n{verifier_feedback_block}"
         has_teacher_signal = True
 
-    prompt = build_teacher_prompt(
-        TeacherPromptInputs(
-            initial_prompt_block=_format_initial_prompt_block(sample),
-            recent_raw_block=recent_raw_block,
-            compressed_memory_block=memory_blocks.compressed_memory_block,
-            critical_facts_block=memory_blocks.critical_facts_block,
-            current_attempt_block=current_attempt_block,
-            feedback_block=combined_feedback_block,
-            output_contract_block=_resolve_output_contract_block(
-                sample,
-                supervision_mode=supervision_mode,
-            ),
-        )
+    truncated_prompt, was_truncated = _compact_teacher_prompt(
+        initial_prompt_block=_format_initial_prompt_block(sample),
+        recent_raw_block=recent_raw_block,
+        compressed_memory_block=memory_blocks.compressed_memory_block,
+        critical_facts_block=memory_blocks.critical_facts_block,
+        current_attempt_block=current_attempt_block,
+        feedback_block=combined_feedback_block,
+        output_contract_block=_resolve_output_contract_block(
+            sample,
+            supervision_mode=supervision_mode,
+        ),
+        max_reprompt_len=max_reprompt_len,
     )
-    truncated_prompt, was_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
     return truncated_prompt, has_teacher_signal, {
         "feedback_packet": feedback_packet,
         "prompt_truncated": was_truncated,
@@ -581,21 +740,19 @@ def _build_legacy_prompt_for_sample(
             combined_feedback_block = f"[VERIFIER_FEEDBACK]\n{verifier_feedback_block}"
 
     memory_blocks = build_teacher_memory_blocks(sample, current_turn_index=step_index)
-    prompt = build_teacher_prompt(
-        TeacherPromptInputs(
-            initial_prompt_block=_format_initial_prompt_block(sample),
-            recent_raw_block=str(sample.get("recent_raw_block", "")),
-            compressed_memory_block=memory_blocks.compressed_memory_block,
-            critical_facts_block=memory_blocks.critical_facts_block,
-            current_attempt_block=current_attempt_block,
-            feedback_block=combined_feedback_block,
-            output_contract_block=_resolve_output_contract_block(
-                sample,
-                supervision_mode=supervision_mode,
-            ),
-        )
+    truncated_prompt, was_truncated = _compact_teacher_prompt(
+        initial_prompt_block=_format_initial_prompt_block(sample),
+        recent_raw_block=str(sample.get("recent_raw_block", "")),
+        compressed_memory_block=memory_blocks.compressed_memory_block,
+        critical_facts_block=memory_blocks.critical_facts_block,
+        current_attempt_block=current_attempt_block,
+        feedback_block=combined_feedback_block,
+        output_contract_block=_resolve_output_contract_block(
+            sample,
+            supervision_mode=supervision_mode,
+        ),
+        max_reprompt_len=max_reprompt_len,
     )
-    truncated_prompt, was_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
     has_teacher_signal = feedback_packet.self_containment_checks.has_actionable_error_text
     return truncated_prompt, has_teacher_signal, {
         "feedback_packet": feedback_packet.to_dict(),
@@ -608,7 +765,7 @@ def build_self_distillation_batch(
     samples: Sequence[Mapping[str, Any]],
     *,
     include_student_attempt_for_teacher: bool = True,
-    max_reprompt_len: int = 10240,
+    max_reprompt_len: int = DEFAULT_MAX_REPROMPT_LEN,
     num_recent_raw_blocks: int = DEFAULT_NUM_RECENT_RAW_BLOCKS,
     turn_supervision_mode: str = _TURN_SUPERVISION_NEXT,
     verifier_feedback_mode: str = _VERIFIER_FEEDBACK_NONE,

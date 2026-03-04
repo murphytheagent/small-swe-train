@@ -10,7 +10,10 @@ import numbers
 import os
 from typing import Any, Mapping, Sequence
 
-from verl_integration.reprompt_adapter import build_self_distillation_batch
+from verl_integration.reprompt_adapter import (
+    DEFAULT_MAX_REPROMPT_LEN,
+    build_self_distillation_batch,
+)
 from verl_integration.reward_adapter import dataproto_to_rows, rows_to_reward_tensor
 
 LOGGER = logging.getLogger(__name__)
@@ -265,7 +268,7 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             include_student_attempt = bool(
                 _cfg_get(self_distillation_cfg, "include_student_attempt_for_teacher", True)
             )
-            max_reprompt_len = int(_cfg_get(self_distillation_cfg, "max_reprompt_len", 10240))
+            max_reprompt_len = int(_cfg_get(self_distillation_cfg, "max_reprompt_len", DEFAULT_MAX_REPROMPT_LEN))
             num_recent_raw_blocks = int(_cfg_get(self_distillation_cfg, "num_recent_raw_blocks", 3))
             reprompt_batch = build_self_distillation_batch(
                 rows,
