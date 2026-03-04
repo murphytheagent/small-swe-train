@@ -381,12 +381,21 @@ def _should_include_verifier_feedback(
     verifier_feedback_mode: str,
     current_turn_index: int,
     total_turn_count: int,
+    turn_supervision_mode: str,
 ) -> bool:
     if verifier_feedback_mode == _VERIFIER_FEEDBACK_NONE:
         return False
     if verifier_feedback_mode == _VERIFIER_FEEDBACK_ALL_TURNS:
         return True
-    return total_turn_count > 0 and current_turn_index == (total_turn_count - 1)
+    if total_turn_count <= 0:
+        return False
+
+    if turn_supervision_mode == _TURN_SUPERVISION_CURRENT:
+        final_prompt_turn_index = total_turn_count - 1
+    else:
+        final_prompt_turn_index = total_turn_count - 2
+
+    return final_prompt_turn_index >= 0 and current_turn_index == final_prompt_turn_index
 
 
 def _has_feedback_signal(sample: Mapping[str, Any], *, has_teacher_signal: bool) -> bool:
@@ -424,6 +433,7 @@ def _build_turn_prompt(
     *,
     current_turn_index: int,
     total_turn_count: int,
+    turn_supervision_mode: str,
     turn_blocks: Sequence[str],
     turn_tool_blocks: Sequence[Sequence[str]],
     include_student_attempt_for_teacher: bool,
@@ -455,6 +465,7 @@ def _build_turn_prompt(
         verifier_feedback_mode=verifier_feedback_mode,
         current_turn_index=current_turn_index,
         total_turn_count=total_turn_count,
+        turn_supervision_mode=turn_supervision_mode,
     ):
         verifier_feedback_block = _extract_verifier_feedback_block(sample)
     combined_feedback_block = feedback_block
@@ -627,6 +638,7 @@ def build_self_distillation_batch(
                     sample,
                     current_turn_index=current_turn_index,
                     total_turn_count=len(assistant_turns),
+                    turn_supervision_mode=normalized_turn_supervision_mode,
                     turn_blocks=turn_blocks,
                     turn_tool_blocks=per_turn_tool_blocks,
                     include_student_attempt_for_teacher=include_student_attempt_for_teacher,

@@ -358,6 +358,28 @@ def test_verifier_feedback_final_turn_only_injection() -> None:
     assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][1]
 
 
+def test_verifier_feedback_final_turn_only_injection_next_turn_mode() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1"],
+            "trajectory_assistant_turn_token_lengths": [2, 2],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"]],
+            "verification_feedback": "Verifier: final distilled prompt should include this",
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        turn_supervision_mode="next_turn",
+        verifier_feedback_mode="final_turn_only",
+    )
+
+    assert len(batch["turn_teacher_prompts"][0]) == 1
+    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][0]
+
+
 def test_submission_final_response_not_leaked_into_prompt() -> None:
     samples = [
         {
