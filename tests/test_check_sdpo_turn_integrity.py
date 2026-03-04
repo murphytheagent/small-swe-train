@@ -112,7 +112,7 @@ def test_integrity_script_fails_on_missing_response_mask(tmp_path: Path) -> None
     assert "missing or empty _response_mask" in result.stdout
 
 
-def test_integrity_script_fails_on_target_turn_leakage(tmp_path: Path) -> None:
+def test_integrity_script_current_turn_omits_target_turn_text(tmp_path: Path) -> None:
     rows = [
         {
             "prompt": "Fix issue",
@@ -139,8 +139,9 @@ def test_integrity_script_fails_on_target_turn_leakage(tmp_path: Path) -> None:
         check=False,
     )
 
-    assert result.returncode != 0
-    assert "target-turn leakage detected" in result.stdout
+    assert result.returncode == 0
+    assert "truncation_rate=0.0000" in result.stdout
+    assert "Integrity check passed." in result.stdout
 
 
 def test_integrity_script_allows_explicit_no_student_attempt(tmp_path: Path) -> None:
@@ -206,5 +207,5 @@ def test_integrity_script_uses_turn_level_truncation_denominator(tmp_path: Path)
     )
 
     assert result.returncode == 0
-    assert "truncation_rate=0.5000" in result.stdout
+    assert "truncation_rate=0.0000" in result.stdout
     assert "Integrity check passed." in result.stdout
