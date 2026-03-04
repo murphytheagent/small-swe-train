@@ -177,6 +177,23 @@ def test_patched_hooks_fallback_to_original_for_non_swe_loops() -> None:
     assert distill_out[0] == "original_distill"
 
 
+def test_teacher_attention_mask_uses_pad_token_to_include_non_pad_tokens() -> None:
+    torch = pytest.importorskip("torch")
+    responses = torch.tensor([[5, 0, 7]], dtype=torch.long)
+    response_mask = torch.tensor([[1, 0, 0]], dtype=torch.long)
+    tokenizer = SimpleNamespace(pad_token_id=0)
+
+    mask = runtime_patch._build_teacher_response_attention_mask(
+        responses=responses,
+        response_mask=response_mask,
+        tokenizer=tokenizer,
+        device=responses.device,
+        dtype=torch.long,
+    )
+
+    assert mask.tolist() == [[1, 0, 1]]
+
+
 def test_patched_distillation_hook_raises_for_invalid_turn_supervision_mode() -> None:
     trainer_cls = _build_swe_trainer_class()
     fake_module = SimpleNamespace(
@@ -370,6 +387,9 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     assert metrics["self_distillation/empty_target_batch"] == pytest.approx(0.0)
     assert metrics["self_distillation/turn_supervision_mode_next_turn"] == pytest.approx(1.0)
     assert metrics["self_distillation/turn_supervision_mode_current_turn"] == pytest.approx(0.0)
+    assert "self_distillation/teacher_attention_valid_token_ratio" in metrics
+    assert "self_distillation/supervised_token_ratio" in metrics
+    assert "self_distillation/invalid_supervised_overlap_count" in metrics
 
 
 def test_turn_level_actor_expansion_builds_per_turn_rows() -> None:

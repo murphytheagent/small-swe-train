@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping, Sequence
 
 from data.feedback_canonicalizer import build_feedback_packet
@@ -31,6 +32,7 @@ _LEGACY_GATING_POLICIES = {
     _LEGACY_GATING_FEEDBACK_PRESENT,
     _LEGACY_GATING_ALWAYS,
 }
+LOGGER = logging.getLogger(__name__)
 
 
 def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str, bool]:
@@ -280,6 +282,7 @@ def _build_assistant_turn_spans(
     generated_positions = [index for index, flag in enumerate(response_mask) if int(flag) != 0]
     if len(turn_token_lengths) >= turn_count and generated_positions:
         spans: list[tuple[int, int] | None] = []
+        had_non_contiguous = False
         cursor = 0
         for turn_index in range(turn_count):
             token_length = max(int(turn_token_lengths[turn_index]), 0)
@@ -290,9 +293,18 @@ def _build_assistant_turn_spans(
             if not selected:
                 spans.append(None)
                 continue
+            if any((left + 1) != right for left, right in zip(selected, selected[1:])):
+                LOGGER.warning(
+                    "Detected non-contiguous generated token positions for turn %s; disabling supervision for that turn.",
+                    turn_index,
+                )
+                had_non_contiguous = True
+                spans.append(None)
+                cursor += len(selected)
+                continue
             spans.append((selected[0], selected[-1] + 1))
             cursor += len(selected)
-        if any(span is not None for span in spans):
+        if any(span is not None for span in spans) or had_non_contiguous:
             return spans
 
     spans = []

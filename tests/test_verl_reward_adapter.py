@@ -177,3 +177,65 @@ def test_dataproto_to_rows_uses_final_assistant_turn_tokens_when_multiturn() -> 
 
     assert len(rows) == 1
     assert rows[0]["response_text"] == "21 22 23"
+
+
+def test_dataproto_to_rows_raises_when_swe_mask_is_missing() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 12]],
+        },
+        non_tensor_batch={
+            "raw_prompt": [[{"role": "user", "content": "Fix task"}]],
+            "task_id": ["task-1"],
+            "image_name": ["img-1"],
+            "trajectory_steps": [[{"tool": "bash", "stdout": "", "stderr": "", "exit_code": 0}]],
+            "trajectory_assistant_turns": [["turn-0"]],
+        },
+    )
+
+    with pytest.raises(ValueError, match="_response_mask"):
+        reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+
+def test_dataproto_to_rows_keeps_non_swe_mask_fallback() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[31, 32, 33]],
+        },
+        non_tensor_batch={
+            "raw_prompt": [[{"role": "user", "content": "Fix task"}]],
+            "task_id": ["task-1"],
+            "image_name": ["img-1"],
+        },
+    )
+
+    rows = reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+    assert rows[0]["_response_mask"] == [1, 1, 1]
+
+
+def test_dataproto_to_rows_requires_explicit_mask_only_for_swe_rows_in_mixed_batch() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 12], [21, 22]],
+            "response_mask": [[1, 1], []],
+        },
+        non_tensor_batch={
+            "raw_prompt": [
+                [{"role": "user", "content": "Fix swe task"}],
+                [{"role": "user", "content": "General task"}],
+            ],
+            "task_id": ["task-1", "task-2"],
+            "image_name": ["img-1", "img-2"],
+            "trajectory_steps": [
+                [{"tool": "bash", "stdout": "", "stderr": "", "exit_code": 0}],
+                [],
+            ],
+            "trajectory_assistant_turns": [["turn-0"], []],
+        },
+    )
+
+    rows = reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+    assert rows[0]["_response_mask"] == [1, 1]
+    # Second row is non-SWE despite mixed batch keys, so fallback mask remains available.
+    assert rows[1]["_response_mask"] == [1, 1]

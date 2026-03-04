@@ -318,6 +318,43 @@ def test_current_turn_handles_zero_length_and_span_mismatch() -> None:
     assert batch["turn_response_masks"][0][3] == [0, 0, 0, 0]
 
 
+def test_current_turn_falls_back_to_contiguous_spans_when_lengths_non_informative() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1"],
+            "trajectory_assistant_turn_token_lengths": [0, 0],
+            "trajectory_turn_tool_response_blocks": [["r0"], ["r1"]],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, turn_supervision_mode="current_turn")
+
+    assert batch["turn_distillation_mask"][0] == [True, True]
+    assert batch["turn_response_masks"][0] == [
+        [1, 1, 0, 0, 0],
+        [0, 0, 0, 1, 1],
+    ]
+
+
+def test_current_turn_non_contiguous_token_selection_disables_turn_supervision() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 0, 1, 0],
+            "trajectory_assistant_turns": ["turn-0"],
+            "trajectory_assistant_turn_token_lengths": [2],
+            "trajectory_turn_tool_response_blocks": [["<tool_response>r0</tool_response>"]],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, turn_supervision_mode="current_turn")
+
+    assert batch["turn_distillation_mask"][0] == [False]
+    assert batch["turn_response_masks"][0][0] == [0, 0, 0, 0]
+
+
 def test_invalid_turn_supervision_mode_raises() -> None:
     with pytest.raises(ValueError, match="turn_supervision_mode"):
         build_self_distillation_batch([], turn_supervision_mode="bad_mode")
