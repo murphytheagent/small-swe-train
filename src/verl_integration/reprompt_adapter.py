@@ -488,7 +488,13 @@ def _build_assistant_turn_spans(
             spans.append((selected[0], selected[-1] + 1))
             cursor += len(selected)
         if any(span is not None for span in spans) or had_non_contiguous:
-            return spans
+            if cursor >= len(generated_positions):
+                return spans
+            LOGGER.warning(
+                "Turn token-length metadata covered %s/%s generated tokens; falling back to contiguous spans.",
+                cursor,
+                len(generated_positions),
+            )
 
     spans = []
     current_start: int | None = None

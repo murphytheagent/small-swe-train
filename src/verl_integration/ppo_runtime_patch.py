@@ -57,6 +57,9 @@ _TURN_LEVEL_REQUIRED_KEYS = {
     "turn_response_mask",
     "turn_self_distillation_mask",
 }
+_NON_RECOVERABLE_REWARD_ERROR_FRAGMENTS = {
+    "SWE rows require non-empty _response_mask",
+}
 
 try:  # pragma: no cover - exercised in train runtime
     import torch
@@ -69,6 +72,11 @@ def _env_flag_enabled(name: str, *, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _is_non_recoverable_reward_adapter_error(exc: Exception) -> bool:
+    message = str(exc)
+    return any(fragment in message for fragment in _NON_RECOVERABLE_REWARD_ERROR_FRAGMENTS)
 
 
 def _should_skip_turn_level_expansion_for_distributed() -> bool:
@@ -210,6 +218,8 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
                 expected_len=expected_len,
             )
         except Exception as exc:  # pragma: no cover - fallback path
+            if _is_non_recoverable_reward_adapter_error(exc):
+                raise
             LOGGER.warning(
                 "SWE reward-adapter path failed; falling back to upstream reward computation: %s",
                 exc,

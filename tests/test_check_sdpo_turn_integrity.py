@@ -171,6 +171,14 @@ def test_recent_raw_leakage_detector_flags_target_turn_marker() -> None:
     assert module._recent_raw_block_contains_target_turn(prompt, turn_index=1) is False
 
 
+def test_coerce_binary_mask_parses_string_values() -> None:
+    module = _load_script_module()
+
+    parsed = module._coerce_binary_mask(["1", "0", "true", "false", "", "2", "0.0", "0.5"])
+
+    assert parsed == [1, 0, 1, 0, 0, 1, 0, 1]
+
+
 def test_integrity_script_forwards_verifier_feedback_mode_to_adapter(tmp_path: Path) -> None:
     rows = [{"prompt": "Fix issue", "_response_mask": [1]}]
     input_path = tmp_path / "verifier_feedback_mode.jsonl"

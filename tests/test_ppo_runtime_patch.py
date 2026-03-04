@@ -282,6 +282,39 @@ def test_patched_reward_hook_uses_local_adapter_for_swe_batches(
     assert list(summed.tolist()) == [1.0, 1.0]
 
 
+def test_patched_reward_hook_raises_on_missing_swe_response_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+    trainer_cls = _build_swe_trainer_class()
+    fake_module = SimpleNamespace(
+        RayPPOTrainer=trainer_cls,
+        DataProto=object,
+        compute_position_id_with_mask=lambda mask: mask,
+    )
+    assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
+
+    def _fake_rows(*, batch, tokenizer):
+        _ = batch, tokenizer
+        return [{"_response_mask": []}]
+
+    def _raise_missing_mask(rows, *, response_width, device=None):
+        _ = rows, response_width, device
+        raise ValueError("SWE rows require non-empty _response_mask; refusing all-ones fallback.")
+
+    monkeypatch.setattr(runtime_patch, "dataproto_to_rows", _fake_rows)
+    monkeypatch.setattr(runtime_patch, "rows_to_reward_tensor", _raise_missing_mask)
+
+    trainer = trainer_cls()
+    batch = SimpleNamespace(
+        batch={"responses": torch.tensor([[1, 2]], dtype=torch.long)},
+        non_tensor_batch={"trajectory_steps": [[]]},
+    )
+
+    with pytest.raises(ValueError, match="SWE rows require non-empty _response_mask"):
+        trainer._compute_or_extract_reward(batch=batch, return_dict=False, sum_reward=False)
+
+
 def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

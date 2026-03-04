@@ -17,6 +17,9 @@ if str(SRC_ROOT) not in sys.path:
 
 from verl_integration.reprompt_adapter import build_self_distillation_batch
 
+_TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
+_FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
+
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -72,7 +75,7 @@ def _coerce_binary_mask(value: Any, *, width: int | None = None) -> list[int]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         data: list[int] = []
     else:
-        data = [1 if bool(item) else 0 for item in value]
+        data = [_coerce_mask_flag(item) for item in value]
 
     if width is not None:
         if len(data) < width:
@@ -80,6 +83,27 @@ def _coerce_binary_mask(value: Any, *, width: int | None = None) -> list[int]:
         elif len(data) > width:
             data = data[:width]
     return data
+
+
+def _coerce_mask_flag(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return 1 if float(value) != 0.0 else 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return 1
+        if normalized in _FALSE_STRINGS:
+            return 0
+        try:
+            return 1 if int(normalized) != 0 else 0
+        except ValueError:
+            try:
+                return 1 if float(normalized) != 0.0 else 0
+            except ValueError:
+                return 1 if normalized else 0
+    return 1 if bool(value) else 0
 
 
 def _coerce_text_list(value: Any) -> list[str]:
