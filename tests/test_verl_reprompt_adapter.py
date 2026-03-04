@@ -429,3 +429,49 @@ def test_legacy_gating_policy_activation_matrix() -> None:
     assert resolved_only["self_distillation_mask"] == [False]
     assert feedback_present["self_distillation_mask"] == [True]
     assert always["self_distillation_mask"] == [True]
+
+
+def test_legacy_prompt_does_not_inject_status_only_verifier_block() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "assistant_response": "attempt",
+            "resolved": True,
+            "verification_missing": False,
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        verifier_feedback_mode="all_turns",
+        legacy_distillation_gating_policy="feedback_present",
+    )
+
+    assert "[VERIFIER_FEEDBACK]" not in batch["teacher_prompts"][0]
+
+
+def test_feedback_present_gating_respects_verifier_mode_and_payload_presence() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "assistant_response": "attempt",
+            "resolved": False,
+            "verification_feedback": "Verifier: failing tests",
+        }
+    ]
+
+    verifier_disabled = build_self_distillation_batch(
+        samples,
+        verifier_feedback_mode="none",
+        legacy_distillation_gating_policy="feedback_present",
+    )
+    verifier_enabled = build_self_distillation_batch(
+        samples,
+        verifier_feedback_mode="all_turns",
+        legacy_distillation_gating_policy="feedback_present",
+    )
+
+    assert verifier_disabled["self_distillation_mask"] == [False]
+    assert verifier_enabled["self_distillation_mask"] == [True]
+    assert "[VERIFIER_FEEDBACK]" not in verifier_disabled["teacher_prompts"][0]
+    assert "[VERIFIER_FEEDBACK]" in verifier_enabled["teacher_prompts"][0]

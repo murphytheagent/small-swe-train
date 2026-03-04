@@ -356,8 +356,10 @@ def _build_feedback_for_turn(
 def _extract_verifier_feedback_block(sample: Mapping[str, Any]) -> str:
     verification_feedback = str(sample.get("verification_feedback", "")).strip()
     verification_error = str(sample.get("verification_error", "")).strip()
-    status_lines: list[str] = []
+    if not verification_feedback and not verification_error:
+        return ""
 
+    status_lines: list[str] = []
     if sample.get("resolved") is not None:
         status_lines.append(f"resolved={_coerce_bool_flag(sample.get('resolved'), fallback=False)}")
     if sample.get("verification_missing") is not None:
@@ -398,13 +400,19 @@ def _should_include_verifier_feedback(
     return final_prompt_turn_index >= 0 and current_turn_index == final_prompt_turn_index
 
 
-def _has_feedback_signal(sample: Mapping[str, Any], *, has_teacher_signal: bool) -> bool:
+def _has_feedback_signal(
+    sample: Mapping[str, Any],
+    *,
+    has_teacher_signal: bool,
+    verifier_feedback_mode: str,
+) -> bool:
     if has_teacher_signal:
         return True
-    if str(sample.get("verification_feedback", "")).strip():
-        return True
-    if str(sample.get("verification_error", "")).strip():
-        return True
+    if verifier_feedback_mode != _VERIFIER_FEEDBACK_NONE:
+        if str(sample.get("verification_feedback", "")).strip():
+            return True
+        if str(sample.get("verification_error", "")).strip():
+            return True
     tool_output = sample.get("tool_output")
     if isinstance(tool_output, Mapping):
         if str(tool_output.get("stdout", "")).strip() or str(tool_output.get("stderr", "")).strip():
@@ -549,10 +557,7 @@ def _build_legacy_prompt_for_sample(
         )
     )
     truncated_prompt, was_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
-    has_teacher_signal = (
-        feedback_packet.self_containment_checks.has_actionable_error_text
-        or bool(verifier_feedback_block)
-    )
+    has_teacher_signal = feedback_packet.self_containment_checks.has_actionable_error_text
     return truncated_prompt, has_teacher_signal, {
         "feedback_packet": feedback_packet.to_dict(),
         "prompt_truncated": was_truncated,
@@ -685,7 +690,11 @@ def build_self_distillation_batch(
 
         # Keep alignment with SDPO batch semantics for non-turn trajectories.
         sample_resolved = _coerce_bool_flag(sample.get("resolved"), fallback=False)
-        has_feedback_signal = _has_feedback_signal(sample, has_teacher_signal=has_teacher_signal)
+        has_feedback_signal = _has_feedback_signal(
+            sample,
+            has_teacher_signal=has_teacher_signal,
+            verifier_feedback_mode=normalized_verifier_feedback_mode,
+        )
         self_distillation_mask.append(
             _resolve_legacy_distillation_active(
                 policy=normalized_legacy_gating_policy,
