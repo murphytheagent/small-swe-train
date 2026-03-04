@@ -191,6 +191,8 @@ small-swe-train/
       rft_handoff.py
       rft_multiturn_dataset.py
       rft_rejection.py
+      rft_trainer.py
+      sdpo_trainer.py
       vllm_api_server_entry.py
     losses/
       action_masking.py
@@ -221,6 +223,7 @@ small-swe-train/
     run_rft.sh
     run_sdft.sh
     run_sdpo.sh
+    run_step_sdpo_scaffold.py
     run_rft_onpolicy_rollout_proof.sh
     eval_swebench_lite.sh
     eval_swebench_lite.py
@@ -277,9 +280,11 @@ for Ray/tmpdir and cleanup guidance. The launcher defaults
 |--------|------------|-------|
 | `trainer/rft_runtime_loop.py` | `run_rft_runtime_loop` orchestration | `test_rft_runtime_loop.py` |
 | `trainer/rft_runtime.py` | on-policy runtime batch collection | `test_rft_runtime.py` |
-| `trainer/rft_trainer.py` | `RFTTrainer` scaffold | `test_rft_trainer.py` |
+| `trainer/rft_trainer.py` | `RFTTrainer` scaffold | — |
 | `trainer/rft_handoff.py` | rollout → parquet handoff + selection | `test_onpolicy_rollout_adapter.py` |
+| `trainer/rft_multiturn_dataset.py` | multiturn dataset assembly | `test_rft_multiturn_dataset.py` |
 | `trainer/vllm_api_server_entry.py` | vLLM server entrypoint | `test_vllm_api_server_entry.py` |
+| `verl_integration/onpolicy_rollout_adapter.py` | compatibility wrapper for RFT handoff utilities | `test_onpolicy_rollout_adapter.py` |
 | `verl_integration/onpolicy_rft_dataset.py` | `OnPolicyRFTDataset` | `test_onpolicy_rft_dataset.py` |
 | `verl_integration/data_preprocessor.py` | `preprocess_trajectories` | `test_verl_data_preprocessor.py` |
 | `verl_integration/reward_adapter.py` | DataProto ↔ row reward bridge | `test_verl_reward_adapter.py` |
