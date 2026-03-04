@@ -100,6 +100,24 @@ def test_build_self_distillation_batch_empty_tool_output_does_not_set_teacher_si
     assert batch["self_distillation_mask"] == [False]
 
 
+def test_feedback_present_gating_treats_metadata_only_tool_output_as_signal() -> None:
+    samples = [
+        {
+            "prompt": "Fix the thing",
+            "assistant_response": "<tool_call>{\"tool\":\"bash\",\"args\":{\"command\":\"true\"}}</tool_call>",
+            "tool_output": {"exit_code": 0},
+            "resolved": False,
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        legacy_distillation_gating_policy="feedback_present",
+    )
+
+    assert batch["self_distillation_mask"] == [True]
+
+
 def test_build_self_distillation_batch_truncation_preserves_newlines() -> None:
     samples = [
         {

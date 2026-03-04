@@ -417,6 +417,18 @@ def _has_feedback_signal(
     if isinstance(tool_output, Mapping):
         if str(tool_output.get("stdout", "")).strip() or str(tool_output.get("stderr", "")).strip():
             return True
+        for key, value in tool_output.items():
+            if key in {"stdout", "stderr"}:
+                continue
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, Mapping) and not value:
+                continue
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and not value:
+                continue
+            return True
     tool_blocks = _coerce_text_list(sample.get("tool_response_blocks"))
     if tool_blocks:
         return True
