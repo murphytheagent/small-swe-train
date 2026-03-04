@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -79,6 +80,42 @@ def _coerce_text_list(value: Any) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return []
     return [str(item) for item in value]
+
+
+def _extract_tagged_block(
+    *,
+    text: str,
+    start_tag: str,
+    end_tag: str | None,
+) -> str:
+    start_marker = f"{start_tag}\n"
+    start_index = text.find(start_marker)
+    if start_index < 0:
+        return ""
+    content_start = start_index + len(start_marker)
+    if end_tag is None:
+        return text[content_start:]
+    end_marker = f"\n{end_tag}"
+    end_index = text.find(end_marker, content_start)
+    if end_index < 0:
+        return text[content_start:]
+    return text[content_start:end_index]
+
+
+def _recent_raw_block_contains_target_turn(prompt: Any, *, turn_index: int) -> bool:
+    prompt_text = str(prompt)
+    recent_raw_block = _extract_tagged_block(
+        text=prompt_text,
+        start_tag="[RECENT_RAW_BLOCK]",
+        end_tag="[COMPRESSED_MEMORY_BLOCK]",
+    )
+    if not recent_raw_block:
+        return False
+
+    for match in re.finditer(r"(?m)^\[TURN_(\d+)\]\s*$", recent_raw_block):
+        if int(match.group(1)) == turn_index:
+            return True
+    return False
 
 
 def _validate_mask_subset(
@@ -260,14 +297,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         if args.turn_supervision_mode == "current_turn":
-            assistant_turns = _coerce_text_list(row.get("trajectory_assistant_turns"))
             for turn_index, prompt in enumerate(prompts):
-                if turn_index >= len(assistant_turns) or turn_index >= len(active):
+                if turn_index >= len(active):
                     continue
                 if not bool(active[turn_index]):
                     continue
-                target_turn_text = assistant_turns[turn_index].strip()
-                if target_turn_text and target_turn_text in str(prompt):
+                # Guard against same-turn leakage by checking for the structured turn block
+                # marker in RECENT_RAW_BLOCK, not arbitrary text matches across the prompt.
+                if _recent_raw_block_contains_target_turn(prompt, turn_index=turn_index):
                     violations.append(
                         f"row={row_index} turn={turn_index}: target-turn leakage detected in teacher prompt."
                     )

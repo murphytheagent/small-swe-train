@@ -692,8 +692,9 @@ def test_sitecustomize_patches_reward_loop_valid_response_length_indexing(monkey
     manager = _FakeNaiveRewardManager()
     item = types.SimpleNamespace(
         batch={
-            "responses": torch.tensor([11, 22, 33, 44], dtype=torch.long),
-            "attention_mask": torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=torch.float32),
+            # Keep a batch axis to ensure fallback slices the token axis (last dim).
+            "responses": torch.tensor([[11, 22]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
         },
         non_tensor_batch={
             "data_source": "swe-smith",
@@ -705,4 +706,4 @@ def test_sitecustomize_patches_reward_loop_valid_response_length_indexing(monkey
     assert result["reward_score"] == 0.25
     assert result["reward_extra_info"]["score"] == 0.25
     assert result["reward_extra_info"]["solution"] == "decoded"
-    assert manager.decoded_ids == [11, 22, 33, 44]
+    assert manager.decoded_ids == [11]

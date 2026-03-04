@@ -608,6 +608,22 @@ def _coerce_non_negative_index(value: Any, *, fallback: int, upper_bound: int | 
     return parsed
 
 
+def _slice_attention_tail_for_valid_response_length(attention_mask: Any, response_length: int) -> Any:
+    if response_length <= 0:
+        return attention_mask
+
+    if torch is not None and isinstance(attention_mask, torch.Tensor):
+        try:
+            return attention_mask[..., -response_length:]
+        except Exception:
+            return attention_mask
+
+    try:
+        return attention_mask[-response_length:]
+    except Exception:
+        return attention_mask
+
+
 def _slice_response_ids_for_decode(response_ids: Any, valid_response_length: int) -> Any:
     if valid_response_length <= 0:
         return response_ids[:0] if hasattr(response_ids, "__getitem__") else []
@@ -658,7 +674,7 @@ def _install_reward_loop_valid_response_length_guard() -> None:
         response_ids = data_item.batch["responses"]
         response_length = _resolve_sequence_length(response_ids)
         attention_mask = data_item.batch["attention_mask"]
-        attention_tail = attention_mask[-response_length:] if response_length > 0 else attention_mask
+        attention_tail = _slice_attention_tail_for_valid_response_length(attention_mask, response_length)
         try:
             raw_valid_response_length = attention_tail.sum()
         except Exception:

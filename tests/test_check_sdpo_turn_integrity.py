@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -7,6 +8,14 @@ from pathlib import Path
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "check_sdpo_turn_integrity.py"
+
+
+def _load_script_module():
+    spec = importlib.util.spec_from_file_location("check_sdpo_turn_integrity_module", SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -112,17 +121,17 @@ def test_integrity_script_fails_on_missing_response_mask(tmp_path: Path) -> None
     assert "missing or empty _response_mask" in result.stdout
 
 
-def test_integrity_script_fails_on_target_turn_leakage(tmp_path: Path) -> None:
+def test_integrity_script_allows_repeated_turn_text_without_leakage_false_positive(tmp_path: Path) -> None:
     rows = [
         {
             "prompt": "Fix issue",
             "_response_mask": [1, 1, 0, 1],
-            "trajectory_assistant_turns": ["LEAKY_TURN_TEXT", "turn-1"],
+            "trajectory_assistant_turns": ["repeated output", "repeated output"],
             "trajectory_assistant_turn_token_lengths": [2, 1],
             "trajectory_turn_tool_response_blocks": [["r0"], ["r1"]],
         }
     ]
-    input_path = tmp_path / "leakage_violation.jsonl"
+    input_path = tmp_path / "repeated_turn_text.jsonl"
     _write_jsonl(input_path, rows)
 
     result = subprocess.run(
@@ -139,8 +148,27 @@ def test_integrity_script_fails_on_target_turn_leakage(tmp_path: Path) -> None:
         check=False,
     )
 
-    assert result.returncode != 0
-    assert "target-turn leakage detected" in result.stdout
+    assert result.returncode == 0
+    assert "Integrity check passed." in result.stdout
+
+
+def test_recent_raw_leakage_detector_flags_target_turn_marker() -> None:
+    module = _load_script_module()
+    prompt = (
+        "[TRAJECTORY_BLOCK]\n"
+        "[RECENT_RAW_BLOCK]\n"
+        "[TURN_0]\n"
+        "[ASSISTANT]\n"
+        "safe\n\n"
+        "[TURN_2]\n"
+        "[ASSISTANT]\n"
+        "leak\n"
+        "[COMPRESSED_MEMORY_BLOCK]\n"
+        "memo\n"
+    )
+
+    assert module._recent_raw_block_contains_target_turn(prompt, turn_index=2) is True
+    assert module._recent_raw_block_contains_target_turn(prompt, turn_index=1) is False
 
 
 def test_integrity_script_allows_explicit_no_student_attempt(tmp_path: Path) -> None:
