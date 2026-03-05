@@ -47,6 +47,12 @@ except ModuleNotFoundError:
 _TOOL_RESPONSE_START = "<tool_response>"
 _TOOL_RESPONSE_END = "</tool_response>"
 _TURN_SUPERVISION_CURRENT = "current_turn"
+_TURN_INDEX_MODE_FIXED = "fixed"
+_TURN_INDEX_MODE_DYNAMIC_MIDDLE = "dynamic_middle"
+_TEACHER_REPROMPT_TURN_INDEX_MODES = (
+    _TURN_INDEX_MODE_FIXED,
+    _TURN_INDEX_MODE_DYNAMIC_MIDDLE,
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-in-flight-tasks", type=int, default=32)
     parser.add_argument("--data-config-name", default=DEFAULT_ON_POLICY_DATA_CONFIG_NAME)
     parser.add_argument("--teacher-reprompt-turn-index", type=int, default=1)
+    parser.add_argument(
+        "--teacher-reprompt-turn-index-mode",
+        default=_TURN_INDEX_MODE_FIXED,
+        choices=sorted(_TEACHER_REPROMPT_TURN_INDEX_MODES),
+    )
     parser.add_argument(
         "--max-reprompt-len",
         type=int,
@@ -183,12 +194,28 @@ def _build_baseline_trace_map(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[s
     return trace_map
 
 
+def _resolve_teacher_reprompt_turn_index(
+    *,
+    trace: BaselineTrace,
+    teacher_reprompt_turn_index: int,
+    teacher_reprompt_turn_index_mode: str,
+) -> int:
+    mode = str(teacher_reprompt_turn_index_mode).strip().lower()
+    if mode == _TURN_INDEX_MODE_DYNAMIC_MIDDLE:
+        turn_count = len(trace.assistant_turns)
+        if turn_count <= 0:
+            return max(0, int(teacher_reprompt_turn_index))
+        return turn_count // 2
+    return max(0, int(teacher_reprompt_turn_index))
+
+
 def _build_teacher_turn_generator(
     *,
     baseline_trace_map: Mapping[tuple[str, int], BaselineTrace],
     fallback_turn_generator: Any,
     vllm_config: VLLMTurnGeneratorConfig,
     teacher_reprompt_turn_index: int,
+    teacher_reprompt_turn_index_mode: str,
     max_reprompt_len: int,
     num_recent_raw_blocks: int,
     turn_supervision_mode: str,
@@ -212,7 +239,12 @@ def _build_teacher_turn_generator(
                 history=history,
             )
 
-        if turn_index < teacher_reprompt_turn_index:
+        resolved_turn_index = _resolve_teacher_reprompt_turn_index(
+            trace=trace,
+            teacher_reprompt_turn_index=teacher_reprompt_turn_index,
+            teacher_reprompt_turn_index_mode=teacher_reprompt_turn_index_mode,
+        )
+        if turn_index < resolved_turn_index:
             if turn_index < len(trace.assistant_turns):
                 return trace.assistant_turns[turn_index]
             return fallback_turn_generator(
@@ -225,7 +257,7 @@ def _build_teacher_turn_generator(
 
         # Inject the teacher reprompt once at the configured turn, then let the
         # rollout proceed with the normal turn generator on the updated history.
-        if turn_index > teacher_reprompt_turn_index:
+        if turn_index > resolved_turn_index:
             return fallback_turn_generator(
                 task=task,
                 attempt_index=attempt_index,
@@ -357,8 +389,11 @@ def main() -> None:
     args = _build_parser().parse_args()
     if args.step_index < 0:
         raise ValueError("--step-index must be >= 0.")
-    if args.teacher_reprompt_turn_index < 0:
+    turn_index_mode = str(args.teacher_reprompt_turn_index_mode).strip().lower()
+    if args.teacher_reprompt_turn_index < 0 and turn_index_mode != _TURN_INDEX_MODE_DYNAMIC_MIDDLE:
         raise ValueError("--teacher-reprompt-turn-index must be >= 0.")
+    if args.teacher_reprompt_turn_index < 0 and int(args.teacher_reprompt_turn_index) != -1:
+        raise ValueError("--teacher-reprompt-turn-index must be -1 when using dynamic_middle mode.")
 
     runtime_overrides = {
         "task_batch_size": int(args.task_batch_size),
@@ -386,6 +421,7 @@ def main() -> None:
         fallback_turn_generator=student_turn_generator,
         vllm_config=vllm_config,
         teacher_reprompt_turn_index=int(args.teacher_reprompt_turn_index),
+        teacher_reprompt_turn_index_mode=turn_index_mode,
         max_reprompt_len=int(args.max_reprompt_len),
         num_recent_raw_blocks=int(args.num_recent_raw_blocks),
         turn_supervision_mode=str(args.turn_supervision_mode),
@@ -432,6 +468,7 @@ def main() -> None:
         "task_batch_size": int(args.task_batch_size),
         "attempts_per_task": int(args.attempts_per_task),
         "teacher_reprompt_turn_index": int(args.teacher_reprompt_turn_index),
+        "teacher_reprompt_turn_index_mode": turn_index_mode,
         "turn_supervision_mode": str(args.turn_supervision_mode),
         "verifier_feedback_mode": str(args.verifier_feedback_mode),
         "max_reprompt_len": int(args.max_reprompt_len),

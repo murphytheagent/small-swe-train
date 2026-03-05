@@ -65,6 +65,57 @@ def test_summarize_pair_rewards_computes_delta_statistics() -> None:
     assert summary["tied_count"] == 1
 
 
+def test_resolve_teacher_reprompt_turn_index_supports_dynamic_middle() -> None:
+    pilot = _load_pilot_module()
+    trace = pilot.BaselineTrace(
+        task_id="task-1",
+        attempt_index=0,
+        problem_statement="Fix issue",
+        raw_prompt_messages=(),
+        assistant_turns=("turn-0", "turn-1", "turn-2", "turn-3"),
+        turn_tool_response_blocks=((), (), (), ()),
+        verification_feedback="",
+        verification_error="",
+        resolved=False,
+    )
+    empty_trace = pilot.BaselineTrace(
+        task_id="task-2",
+        attempt_index=0,
+        problem_statement="Fix issue",
+        raw_prompt_messages=(),
+        assistant_turns=(),
+        turn_tool_response_blocks=(),
+        verification_feedback="",
+        verification_error="",
+        resolved=False,
+    )
+
+    assert (
+        pilot._resolve_teacher_reprompt_turn_index(
+            trace=trace,
+            teacher_reprompt_turn_index=1,
+            teacher_reprompt_turn_index_mode="fixed",
+        )
+        == 1
+    )
+    assert (
+        pilot._resolve_teacher_reprompt_turn_index(
+            trace=trace,
+            teacher_reprompt_turn_index=-1,
+            teacher_reprompt_turn_index_mode="dynamic_middle",
+        )
+        == 2
+    )
+    assert (
+        pilot._resolve_teacher_reprompt_turn_index(
+            trace=empty_trace,
+            teacher_reprompt_turn_index=-1,
+            teacher_reprompt_turn_index_mode="dynamic_middle",
+        )
+        == 0
+    )
+
+
 def test_teacher_generator_injects_reprompt_once_then_uses_fallback(monkeypatch) -> None:
     pilot = _load_pilot_module()
     trace = pilot.BaselineTrace(
@@ -118,6 +169,7 @@ def test_teacher_generator_injects_reprompt_once_then_uses_fallback(monkeypatch)
             system_prompt="ignored",
         ),
         teacher_reprompt_turn_index=1,
+        teacher_reprompt_turn_index_mode="fixed",
         max_reprompt_len=1024,
         num_recent_raw_blocks=3,
         turn_supervision_mode="current_turn",
@@ -193,6 +245,7 @@ def test_teacher_generator_falls_back_when_teacher_completion_fails(monkeypatch)
             system_prompt="ignored",
         ),
         teacher_reprompt_turn_index=1,
+        teacher_reprompt_turn_index_mode="fixed",
         max_reprompt_len=1024,
         num_recent_raw_blocks=3,
         turn_supervision_mode="current_turn",
@@ -255,6 +308,7 @@ def test_teacher_generator_next_turn_mode_uses_previous_prompt_index(monkeypatch
             system_prompt="pilot-system",
         ),
         teacher_reprompt_turn_index=1,
+        teacher_reprompt_turn_index_mode="fixed",
         max_reprompt_len=1024,
         num_recent_raw_blocks=3,
         turn_supervision_mode="next_turn",
@@ -272,3 +326,68 @@ def test_teacher_generator_next_turn_mode_uses_previous_prompt_index(monkeypatch
     assert injected_turn == "teacher-turn-1"
     assert len(posted_payloads) == 1
     assert posted_payloads[0]["messages"][-1] == {"role": "user", "content": "prompt-turn-0"}
+
+
+def test_teacher_generator_dynamic_middle_mode_injects_at_middle_turn(monkeypatch) -> None:
+    pilot = _load_pilot_module()
+    trace = pilot.BaselineTrace(
+        task_id="task-1",
+        attempt_index=0,
+        problem_statement="Fix issue",
+        raw_prompt_messages=(),
+        assistant_turns=("turn-0", "turn-1", "turn-2", "turn-3"),
+        turn_tool_response_blocks=((), (), (), ()),
+        verification_feedback="",
+        verification_error="",
+        resolved=False,
+    )
+    posted_payloads: list[dict[str, object]] = []
+
+    def _fallback_turn_generator(*, task, attempt_index, turn_index, step_index, history):
+        _ = task, attempt_index, step_index, history
+        return f"fallback-{turn_index}"
+
+    def _fake_build_self_distillation_batch(*args, **kwargs):
+        _ = args, kwargs
+        return {"turn_teacher_prompts": [["prompt-turn-0", "prompt-turn-1", "prompt-turn-2", "prompt-turn-3"]]}
+
+    def _fake_post_chat_completion(*, base_url, payload, timeout_sec):
+        _ = base_url, timeout_sec
+        posted_payloads.append(dict(payload))
+        return {"choices": [{"message": {"content": "teacher-turn-2"}}]}
+
+    monkeypatch.setattr(pilot, "build_self_distillation_batch", _fake_build_self_distillation_batch)
+    monkeypatch.setattr(pilot, "_post_chat_completion", _fake_post_chat_completion)
+    monkeypatch.setattr(pilot, "_extract_assistant_content", lambda payload: payload["choices"][0]["message"]["content"])
+
+    generator = pilot._build_teacher_turn_generator(
+        baseline_trace_map={("task-1", 0): trace},
+        fallback_turn_generator=_fallback_turn_generator,
+        vllm_config=pilot.VLLMTurnGeneratorConfig(
+            base_url="http://127.0.0.1:8000/v1",
+            model_name="local-model",
+            request_timeout_sec=10,
+            max_tokens=128,
+            temperature=0.0,
+            top_p=1.0,
+            system_prompt="pilot-system",
+        ),
+        teacher_reprompt_turn_index=-1,
+        teacher_reprompt_turn_index_mode="dynamic_middle",
+        max_reprompt_len=1024,
+        num_recent_raw_blocks=3,
+        turn_supervision_mode="current_turn",
+        verifier_feedback_mode="all_turns",
+    )
+    task = SimpleNamespace(task_id="task-1")
+    turn_0 = generator(task=task, attempt_index=0, turn_index=0, step_index=0, history=[])
+    turn_1 = generator(task=task, attempt_index=0, turn_index=1, step_index=0, history=["turn-0"])
+    turn_2 = generator(task=task, attempt_index=0, turn_index=2, step_index=0, history=["turn-0", "turn-1"])
+    turn_3 = generator(task=task, attempt_index=0, turn_index=3, step_index=0, history=["turn-0", "turn-1", "teacher-turn-2"])
+
+    assert turn_0 == "turn-0"
+    assert turn_1 == "turn-1"
+    assert turn_2 == "teacher-turn-2"
+    assert turn_3 == "fallback-3"
+    assert len(posted_payloads) == 1
+    assert posted_payloads[0]["messages"][-1] == {"role": "user", "content": "prompt-turn-2"}
