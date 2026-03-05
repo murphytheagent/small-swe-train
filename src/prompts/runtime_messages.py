@@ -104,7 +104,7 @@ def _tool_schema_line(tool_name: str, schema: Mapping[str, Any]) -> str:
 
 
 def _build_tool_schema_prompt() -> str:
-    lines = ["8) Tool arg schema (from TOOL_SCHEMAS):"]
+    lines = ["Tool arg schema (from TOOL_SCHEMAS):"]
     for tool_name in ALLOWED_TOOLS:
         schema = TOOL_SCHEMAS.get(tool_name)
         if isinstance(schema, Mapping):
@@ -125,7 +125,7 @@ def _build_required_args_prompt() -> str:
             if isinstance(field_name, str):
                 required_fields.append(f"{tool_name}.{field_name}")
     rendered = ", ".join(required_fields) if required_fields else "-"
-    return f"5) Required args by tool: {rendered}.\n"
+    return f"Required args by tool: {rendered}."
 
 
 def _build_tool_examples_prompt() -> str:
@@ -141,7 +141,7 @@ def _build_tool_examples_prompt() -> str:
         examples.append(f"   - {tool_name}: {serialized}")
     if not examples:
         return ""
-    return "9) Realistic examples (one tool call each):\n" + "\n".join(examples)
+    return "Realistic examples (one tool call each):\n" + "\n".join(examples)
 
 
 def build_assistant_contract_prompt(
@@ -149,31 +149,51 @@ def build_assistant_contract_prompt(
     delimiters: ModelDelimiters | None = None,
     max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
     terminal_tool: str = TERMINAL_TOOL_NAME,
+    include_tool_schema: bool = True,
+    include_examples: bool = True,
+    include_repeat_warning: bool = True,
 ) -> str:
     """Return an instruction block that matches the v1.6 action contract."""
     d = delimiters or default_delimiters()
     allowed_tools_text = ", ".join(ALLOWED_TOOLS)
-    tool_schema_block = _build_tool_schema_prompt()
-    tool_examples_block = _build_tool_examples_prompt()
-    suffix = (
-        f"{tool_schema_block}\n{tool_examples_block}"
-        if tool_examples_block
-        else tool_schema_block
+    tool_schema_block = _build_tool_schema_prompt() if include_tool_schema else ""
+    tool_examples_block = _build_tool_examples_prompt() if include_examples else ""
+
+    lines: list[str] = []
+    lines.append("Surround each tool action with a tool-call delimiter block.")
+    lines.append(
+        f"Emit 1..{max_tool_calls} ordered tool calls: "
+        f"{d.tool_call_start}{{\"tool\":\"...\",\"args\":{{...}}}}{d.tool_call_end}"
     )
-    return (
-        "Assistant output contract:\n"
-        "1) Surround each tool action with a tool-call delimiter block.\n"
-        f"2) Emit 1..{max_tool_calls} ordered tool calls: "
-        f"{d.tool_call_start}{{\"tool\":\"...\",\"args\":{{...}}}}{d.tool_call_end}\n"
-        "3) Every tool-call JSON object MUST include both keys: 'tool' and 'args'.\n"
-        "   'args' MUST be a JSON object (never put command/query/path at top level).\n"
-        f"4) Allowed tools: {allowed_tools_text}.\n"
-        f"{_build_required_args_prompt()}"
-        "6) Do not invent tool names or wrapper labels.\n"
-        f"7) Terminal tool is '{terminal_tool}', you must end conversation with this tool, and if present it must be the only tool call.\n"
-        "Do not repeat an identical previously-failed command without a new hypothesis.\n"
-        f"{suffix}"
+    lines.append(
+        "Every tool-call JSON object MUST include both keys: 'tool' and 'args'. "
+        "'args' MUST be a JSON object (never put command/query/path at top level)."
     )
+    lines.append(f"Allowed tools: {allowed_tools_text}.")
+    lines.append(_build_required_args_prompt())
+    lines.append("Do not invent tool names or wrapper labels.")
+    lines.append(
+        f"Terminal tool is '{terminal_tool}', you must end conversation with this tool, "
+        "and if present it must be the only tool call."
+    )
+    if include_repeat_warning:
+        lines.append("Do not repeat an identical previously-failed command without a new hypothesis.")
+
+    if tool_schema_block:
+        lines.append(tool_schema_block)
+    if tool_examples_block:
+        lines.append(tool_examples_block)
+
+    numbered_lines: list[str] = []
+    step_index = 1
+    for line in lines:
+        if not line:
+            continue
+        prefix = f"{step_index}) "
+        numbered_lines.append(prefix + line)
+        step_index += 1
+
+    return "Assistant output contract:\n" + "\n".join(numbered_lines)
 
 
 def build_onpolicy_system_prompt() -> str:
@@ -189,21 +209,12 @@ def build_sdpo_rollout_followup_user_message() -> str:
 def build_onpolicy_initial_user_message(
     *,
     problem_statement: str,
-    fail_to_pass: Any,
-    pass_to_pass: Any,
 ) -> str:
     """Build the initial user message for one on-policy task attempt."""
-    fail_to_pass_text = _stable_json(fail_to_pass)
-    pass_to_pass_text = _stable_json(pass_to_pass)
     return (
         "You are solving one software engineering task.\n"
         "Task objective:\n"
         f"{problem_statement}\n\n"
-        "Test targets:\n"
-        "- FAIL_TO_PASS: tests currently failing that should pass after your fix.\n"
-        f"{fail_to_pass_text}\n\n"
-        "- PASS_TO_PASS: tests currently passing that must keep passing (regression guard).\n"
-        f"{pass_to_pass_text}\n\n"
         "Execution guidance:\n"
         "- Use tool calls to inspect code, apply patches, and run validation commands.\n"
         "- Submit only when you are ready to end the attempt."

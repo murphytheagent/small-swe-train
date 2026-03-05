@@ -23,12 +23,22 @@ def build_trajectory_block(
     critical_facts_block: str,
 ) -> str:
     """Build trajectory block from raw+compressed+critical context slices."""
-    return (
-        "[TRAJECTORY_BLOCK]\n"
-        f"[RECENT_RAW_BLOCK]\n{recent_raw_block}\n"
-        f"[COMPRESSED_MEMORY_BLOCK]\n{compressed_memory_block}\n"
-        f"[CRITICAL_FACTS_BLOCK]\n{critical_facts_block}\n"
-    )
+    sections: list[str] = []
+    recent = str(recent_raw_block).strip()
+    if recent:
+        sections.append(
+            "Below is a student's attempt in solving the task above, showing only recent few turns with tool response:"
+        )
+        sections.append(recent)
+    compressed = str(compressed_memory_block).strip()
+    if compressed:
+        sections.append("Earlier attempt summary:")
+        sections.append(compressed)
+    critical = str(critical_facts_block).strip()
+    if critical:
+        sections.append("Key facts to keep in mind:")
+        sections.append(critical)
+    return "\n\n".join(sections).strip()
 
 
 def build_teacher_prompt(inputs: TeacherPromptInputs) -> str:
@@ -38,15 +48,21 @@ def build_teacher_prompt(inputs: TeacherPromptInputs) -> str:
         compressed_memory_block=inputs.compressed_memory_block,
         critical_facts_block=inputs.critical_facts_block,
     )
-
-    return (
-        "[INITIAL_PROMPT_BLOCK]\n"
-        f"{inputs.initial_prompt_block}\n\n"
-        f"{trajectory_block}\n"
-        "[CURRENT_ATTEMPT_BLOCK]\n"
-        f"{inputs.current_attempt_block}\n\n"
-        "[FEEDBACK_BLOCK]\n"
-        f"{inputs.feedback_block}\n\n"
-        "[OUTPUT_CONTRACT_BLOCK]\n"
-        f"{inputs.output_contract_block}"
-    )
+    sections: list[str] = []
+    initial_prompt = str(inputs.initial_prompt_block).strip()
+    if initial_prompt:
+        sections.append(initial_prompt)
+    if trajectory_block:
+        sections.append(trajectory_block)
+    current_attempt = str(inputs.current_attempt_block).strip()
+    if current_attempt:
+        sections.append("Below is the current turn in the student's attempt:")
+        sections.append(current_attempt)
+    feedback_block = str(inputs.feedback_block).strip()
+    if feedback_block:
+        sections.append("Additional feedback:")
+        sections.append(feedback_block)
+    output_contract = str(inputs.output_contract_block).strip()
+    if output_contract:
+        sections.append(output_contract)
+    return "\n\n".join(sections).strip()

@@ -6,6 +6,7 @@ import pytest
 
 import config
 from verl_integration import reward_adapter
+from prompts.runtime_messages import build_onpolicy_system_prompt
 
 
 @dataclass
@@ -157,6 +158,28 @@ def test_dataproto_to_rows_decodes_generated_tokens_only_from_response_mask() ->
     assert rows[0]["response_text"] == "11 12"
     assert rows[0]["assistant_response"] == "11 12"
     assert rows[0]["_response_mask"] == [1, 0, 1, 0]
+
+
+def test_dataproto_to_rows_injects_system_prompt_into_raw_prompt_messages() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 12]],
+            "response_mask": [[1, 1]],
+        },
+        non_tensor_batch={
+            "raw_prompt": [[{"role": "user", "content": "Fix task"}]],
+            "task_id": ["task-1"],
+            "image_name": ["img-1"],
+        },
+    )
+
+    rows = reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+    messages = rows[0]["_raw_prompt_messages"]
+    assert messages[0]["role"] == "system"
+    assert build_onpolicy_system_prompt().splitlines()[0] in messages[0]["content"]
+    assert messages[1]["role"] == "user"
+    assert "Fix task" in messages[1]["content"]
 
 
 def test_dataproto_to_rows_uses_final_assistant_turn_tokens_when_multiturn() -> None:

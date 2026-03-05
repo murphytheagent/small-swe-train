@@ -33,23 +33,18 @@ def build_teacher_output_contract_block(
         delimiters=delimiters,
         max_tool_calls=max_tool_calls,
         terminal_tool=terminal_tool,
+        include_tool_schema=False,
+        include_examples=False,
+        include_repeat_warning=False,
     )
     if normalized_mode == _TURN_SUPERVISION_CURRENT:
         return (
-            "Teacher objective (turn-level SDPO, current-turn reflection):\n"
-            "1) The conversation above is a previous attempt at fixing the task.\n"
-            "2) Use the compacted trajectory evidence (including tool/verifier feedback) to reflect on what the teacher should have done differently for this current turn.\n"
-            "3) Keep the revision grounded in observed failures and improve only the current turn decision quality.\n"
-            "4) All tools in this attempt have already executed, so assume a potentially modified repository state.\n"
+            "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:\n"
             f"{base_contract}\n"
-            "Now produce the best corrected action for the current turn.\n"
+            "Produce the best corrected action for the current turn.\n"
         )
     return (
-        "Teacher objective (turn-level SDPO):\n"
-        "1) The multi-turn conversation above is a previous attempt at fixing the issue stated in the task statement.\n"
-        "2) This attempt is not complete, it can be on the right track or completely wrong.\n"
-        "3) Learn from the interactions from this attempt, correct mistakes, and take correct actions in the next turn.\n"
-        "4) All tools in this attempt have been executed already, so assume you are working potentially modified repo.\n"
+        "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:\n"
         f"{base_contract}\n"
         "Now correctly solve the original issue, focus only on what to do best in the next turn.\n"
     )

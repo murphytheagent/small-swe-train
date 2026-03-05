@@ -135,13 +135,32 @@ class DockerToolExecutor:
         if errors:
             return self._validation_error(errors)
 
-        resolved_path = path_hint if path_hint else "."
+        resolved_path = path_hint if path_hint else ""
         search_cmd = (
             'SEARCH_PATH="$PATH_HINT"; '
-            'if [ -z "$SEARCH_PATH" ]; then SEARCH_PATH="."; fi; '
-            'if [ ! -e "$SEARCH_PATH" ]; then '
-            'printf "search path_hint not found: %s; falling back to .\\n" "$SEARCH_PATH" >&2; '
-            'SEARCH_PATH="."; '
+            'if [ -z "$SEARCH_PATH" ]; then SEARCH_PATH=""; fi; '
+            'repo_root="${TASK_REPO_ROOT:-${SMALL_SWE_REPO_ROOT:-}}"; '
+            'if [ -n "$repo_root" ] && [ ! -e "$repo_root" ]; then repo_root=""; fi; '
+            'if [ -z "$repo_root" ]; then '
+            'for candidate in /testbed /workspace /repo /app; do '
+            'if [ -d "${candidate}/.git" ]; then repo_root="${candidate}"; break; fi; '
+            "done; "
+            'if [ -z "${repo_root}" ]; then '
+            'for candidate in /testbed /workspace /repo /app; do '
+            'if [ -d "${candidate}" ]; then repo_root="${candidate}"; break; fi; '
+            "done; "
+            "fi; "
+            "fi; "
+            'if [ -z "$SEARCH_PATH" ]; then '
+            'if [ -n "$repo_root" ]; then SEARCH_PATH="$repo_root"; else SEARCH_PATH="."; fi; '
+            'elif [ ! -e "$SEARCH_PATH" ]; then '
+            'if [ -n "$repo_root" ] && [ -e "$repo_root/$PATH_HINT" ]; then '
+            'SEARCH_PATH="$repo_root/$PATH_HINT"; '
+            "else "
+            'fallback="${repo_root:-.}"; '
+            'printf "search path_hint not found: %s; falling back to %s\\n" "$PATH_HINT" "$fallback" >&2; '
+            'SEARCH_PATH="$fallback"; '
+            "fi; "
             "fi; "
             'status=0; grep -R -n -F -m "$TOP_K" -- "$QUERY" "$SEARCH_PATH" || status=$?; '
             'if [ "$status" -eq 0 ] || [ "$status" -eq 1 ]; then exit 0; fi; exit "$status"'

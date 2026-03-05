@@ -318,7 +318,7 @@ def test_onpolicy_collector_tracks_invalid_submit_metadata_without_forcing_termi
     assert len(rows) == 1
     row = rows[0]
     assert row["is_terminal"] is False
-    assert row["final_turn_has_submit"] is False
+    assert row["final_turn_has_submit"] is True
     assert row["final_submit_format_valid"] is False
     assert row["trajectory_format_valid"] is False
     assert row["trajectory_tool_validation_errors"]

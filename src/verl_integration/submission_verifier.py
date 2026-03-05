@@ -18,7 +18,7 @@ import os
 import subprocess
 
 tests = json.loads(os.environ.get("SMALL_SWE_TESTS_JSON", "[]"))
-repo_root = os.environ.get("SMALL_SWE_REPO_ROOT", ".")
+repo_root = os.environ.get("TASK_REPO_ROOT") or os.environ.get("SMALL_SWE_REPO_ROOT", ".")
 pybin = os.environ.get("SMALL_SWE_PYBIN", "python3")
 per_test_timeout = int(os.environ.get("SMALL_SWE_PER_TEST_TIMEOUT_SEC", "120"))
 
@@ -234,7 +234,9 @@ def _verify_test_group(
 def _build_verifier_shell_command(*, tests_json: str, per_test_timeout_sec: int) -> str:
     return (
         "set -eu; "
-        'repo_root=""; '
+        'repo_root="${TASK_REPO_ROOT:-${SMALL_SWE_REPO_ROOT:-}}"; '
+        'if [ -n "$repo_root" ] && [ ! -e "$repo_root" ]; then repo_root=""; fi; '
+        'if [ -z "$repo_root" ]; then '
         'for candidate in /testbed /workspace /repo /app; do '
         'if [ -d "${candidate}/.git" ]; then repo_root="${candidate}"; break; fi; '
         "done; "
@@ -242,6 +244,7 @@ def _build_verifier_shell_command(*, tests_json: str, per_test_timeout_sec: int)
         'for candidate in /testbed /workspace /repo /app; do '
         'if [ -d "${candidate}" ]; then repo_root="${candidate}"; break; fi; '
         "done; "
+        "fi; "
         "fi; "
         'if [ -z "${repo_root}" ]; then '
         'echo "Unable to locate task repository root." >&2; '
@@ -257,7 +260,7 @@ def _build_verifier_shell_command(*, tests_json: str, per_test_timeout_sec: int)
         "fi; "
         f"SMALL_SWE_TESTS_JSON={shlex.quote(tests_json)} "
         f"SMALL_SWE_PER_TEST_TIMEOUT_SEC={int(max(per_test_timeout_sec, 1))} "
-        'SMALL_SWE_REPO_ROOT="${repo_root}" '
+        'TASK_REPO_ROOT="${repo_root}" '
         'SMALL_SWE_PYBIN="${pybin}" '
         '"${pybin}" -'
     )

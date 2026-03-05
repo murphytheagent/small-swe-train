@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-from typing import Callable, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 from config import OnPolicyRuntimeConfig, OnPolicySettings
 from env.container_pool import BatchContainerPool, ContainerHandle
 from env.docker_executor import DockerToolExecutor
 from env.runtime_protocol import EnvironmentStep, ToolRequest, ToolResponse
 from env.task_dataset import DatasetLoader, TaskSample, load_task_batch
+from prompts.runtime_messages import (
+    build_onpolicy_initial_user_message,
+    build_onpolicy_system_prompt,
+)
 from schemas import RolloutRow
 from verl_integration.env_bridge import build_tool_response_payload, run_env_bridge_step
+from verl_integration.submission_verifier import run_submission_verifier
 
 
 class ToolExecutorLike(Protocol):
@@ -81,6 +86,56 @@ def _default_attempt_resolver(
     if not steps:
         return False
     return all(step.response.exit_code == 0 for step in steps)
+
+
+def _extract_submit_final_response(envelope: Any) -> str:
+    tool_calls = getattr(envelope, "tool_calls", ()) or ()
+    if not tool_calls:
+        return ""
+    for call in tool_calls:
+        if getattr(call, "tool", "") != "submit":
+            continue
+        args = getattr(call, "args", {}) or {}
+        value = args.get("final_response")
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)
+    return ""
+
+
+def _verify_terminal_submission(
+    *,
+    executor: ToolExecutorLike,
+    task: TaskSample,
+    verifier_timeout_sec: int,
+    final_submit_format_valid: bool,
+    final_response: str,
+) -> dict[str, Any]:
+    del final_submit_format_valid
+    try:
+        return run_submission_verifier(
+            executor=executor,
+            fail_to_pass=task.fail_to_pass,
+            pass_to_pass=task.pass_to_pass,
+            verifier_timeout_sec=verifier_timeout_sec,
+            final_response=final_response,
+        )
+    except Exception as exc:  # pragma: no cover - defensive runtime fallback
+        return {
+            "submission_final_response": str(final_response),
+            "fail_to_pass": list(task.fail_to_pass),
+            "pass_to_pass": list(task.pass_to_pass),
+            "fail_to_pass_results": {},
+            "pass_to_pass_results": {},
+            "fail_to_pass_verified": False,
+            "pass_to_pass_verified": False,
+            "verification_missing": False,
+            "verification_error": f"terminal verifier execution failed: {exc}",
+            "verification_feedback": "",
+            "resolved": False,
+        }
 
 
 class OnPolicyRolloutCollector:
@@ -228,6 +283,8 @@ class OnPolicyRolloutCollector:
         trajectory_tool_validation_errors: list[str] = []
         final_turn_has_submit = False
         final_submit_format_valid = False
+        verification_metadata: dict[str, Any] | None = None
+        last_submit_response = ""
 
         init_failure = self._initialize_task_environment(
             task=task,
@@ -285,9 +342,13 @@ class OnPolicyRolloutCollector:
             turn_validation_errors = _collect_validation_errors(bridge_result.steps)
             if turn_validation_errors:
                 trajectory_tool_validation_errors.extend(turn_validation_errors)
-            if bridge_result.is_terminal:
-                final_turn_has_submit = True
-                final_submit_format_valid = not bool(turn_validation_errors)
+            turn_has_submit = any(
+                getattr(call, "tool", "") == "submit" for call in bridge_result.envelope.tool_calls
+            )
+            final_turn_has_submit = bool(turn_has_submit)
+            final_submit_format_valid = bool(turn_has_submit and not turn_validation_errors)
+            if turn_has_submit:
+                last_submit_response = _extract_submit_final_response(bridge_result.envelope)
 
             history.append(assistant_response)
             history.extend(bridge_result.tool_response_blocks)
@@ -313,17 +374,41 @@ class OnPolicyRolloutCollector:
 
             if bridge_result.is_terminal:
                 is_terminal = True
-                resolved = self._attempt_resolver(
-                    task,
-                    attempt_index,
-                    bridge_result.is_terminal,
-                    tuple(attempt_steps),
-                )
+                if runtime.verify_submissions:
+                    verification_metadata = _verify_terminal_submission(
+                        executor=executor,
+                        task=task,
+                        verifier_timeout_sec=runtime.verifier_timeout_sec,
+                        final_submit_format_valid=final_submit_format_valid,
+                        final_response=last_submit_response,
+                    )
+                    resolved = bool(verification_metadata.get("resolved", False))
+                else:
+                    resolved = self._attempt_resolver(
+                        task,
+                        attempt_index,
+                        bridge_result.is_terminal,
+                        tuple(attempt_steps),
+                    )
                 break
         else:
             timeout_error = (
                 f"Attempt reached max_turns_per_attempt={runtime.max_turns_per_attempt} without terminal submit."
             )
+
+        if (
+            runtime.verify_submissions
+            and verification_metadata is None
+            and container_init_succeeded
+        ):
+            verification_metadata = _verify_terminal_submission(
+                executor=executor,
+                task=task,
+                verifier_timeout_sec=runtime.verifier_timeout_sec,
+                final_submit_format_valid=final_submit_format_valid,
+                final_response=last_submit_response,
+            )
+            resolved = bool(verification_metadata.get("resolved", False))
 
         trajectory_format_valid = not trajectory_tool_validation_errors and not bool(bridge_error)
         elapsed_ms = (self._monotonic_clock() - attempt_start) * 1000.0
@@ -337,6 +422,15 @@ class OnPolicyRolloutCollector:
             row_turn_index = turn_index_for_feedback
         else:
             row_turn_index = max(turn_index, 0)
+        initial_user_message = build_onpolicy_initial_user_message(
+            problem_statement=task.problem_statement,
+        )
+        initial_prompt_block = f"[USER]\n{initial_user_message}" if initial_user_message else ""
+        raw_prompt_messages = [
+            {"role": "system", "content": build_onpolicy_system_prompt()},
+        ]
+        if initial_user_message:
+            raw_prompt_messages.append({"role": "user", "content": initial_user_message})
 
         row: RolloutRow = {
             "prompt": task.problem_statement,
@@ -364,6 +458,8 @@ class OnPolicyRolloutCollector:
             "final_turn_has_submit": final_turn_has_submit,
             "final_submit_format_valid": final_submit_format_valid,
             "container_init_succeeded": container_init_succeeded,
+            "initial_prompt_block": initial_prompt_block,
+            "_raw_prompt_messages": raw_prompt_messages,
         }
         if collector_error:
             row["collector_error"] = collector_error
@@ -378,6 +474,8 @@ class OnPolicyRolloutCollector:
             row["exit_code"] = exit_code
         if task_patch_applied:
             row["task_patch_applied"] = True
+        if isinstance(verification_metadata, dict):
+            row.update(dict(verification_metadata))
 
         return row
 
@@ -495,7 +593,9 @@ def _task_patch(task: TaskSample) -> str | None:
 def _build_patch_apply_command() -> str:
     return (
         "set -eu; "
-        'repo_root=""; '
+        'repo_root="${TASK_REPO_ROOT:-${SMALL_SWE_REPO_ROOT:-}}"; '
+        'if [ -n "$repo_root" ] && [ ! -e "$repo_root" ]; then repo_root=""; fi; '
+        'if [ -z "${repo_root}" ]; then '
         'for candidate in /testbed /workspace /repo /app; do '
         'if [ -d "${candidate}/.git" ]; then repo_root="${candidate}"; break; fi; '
         "done; "
@@ -503,6 +603,7 @@ def _build_patch_apply_command() -> str:
         'for candidate in /testbed /workspace /repo /app; do '
         'if [ -d "${candidate}" ]; then repo_root="${candidate}"; break; fi; '
         "done; "
+        "fi; "
         "fi; "
         'if [ -z "${repo_root}" ]; then '
         'echo "Unable to locate task repository root for patch apply." >&2; '

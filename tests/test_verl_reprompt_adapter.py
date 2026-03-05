@@ -22,9 +22,9 @@ def test_build_self_distillation_batch_contains_contract_blocks() -> None:
     batch = build_self_distillation_batch(samples)
 
     prompt = batch["teacher_prompts"][0]
-    assert "[INITIAL_PROMPT_BLOCK]" in prompt
-    assert "[FEEDBACK_BLOCK]" in prompt
-    assert "current turn" in prompt.lower()
+    assert "Fix failing test" in prompt
+    assert "Below is the current turn in the student's attempt:" in prompt
+    assert "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:" in prompt
     assert "Assistant output contract:" in prompt
     assert batch["self_distillation_mask"] == [False]
 
@@ -45,7 +45,8 @@ def test_build_self_distillation_batch_allows_output_contract_override() -> None
 
     batch = build_self_distillation_batch(samples)
     prompt = batch["teacher_prompts"][0]
-    assert "[OUTPUT_CONTRACT_BLOCK]\nCUSTOM CONTRACT BLOCK" in prompt
+    assert "CUSTOM CONTRACT BLOCK" in prompt
+    assert "Now that you have seen the student's attempt" not in prompt
 
 
 def test_build_self_distillation_batch_honors_token_limit() -> None:
@@ -185,7 +186,7 @@ def test_turn_prompt_compaction_retains_protected_sections() -> None:
     assert "CURRENT_STUDENT_ATTEMPT_MUST_KEEP" in prompt
     assert "[VERIFIER_FEEDBACK]" in prompt
     assert "VERIFIER_RESPONSE_MUST_KEEP" in prompt
-    assert "[OUTPUT_CONTRACT_BLOCK]" in prompt
+    assert "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:" in prompt
     assert len(prompt.split()) <= 120
     assert batch["turn_prompt_truncated"][0][1] is True
 
@@ -217,7 +218,7 @@ def test_legacy_prompt_compaction_retains_protected_sections() -> None:
     assert "CURRENT_ATTEMPT_MUST_KEEP" in prompt
     assert "[VERIFIER_FEEDBACK]" in prompt
     assert "VERIFIER_FEEDBACK_MUST_KEEP" in prompt
-    assert "[OUTPUT_CONTRACT_BLOCK]" in prompt
+    assert "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:" in prompt
     assert len(prompt.split()) <= 120
     assert batch["prompt_truncated"] == [True]
 
@@ -285,9 +286,12 @@ def test_build_self_distillation_batch_emits_turn_level_pairs() -> None:
     assert batch["turn_response_masks"][0][1] == [0, 0, 0, 0, 0, 0, 0, 1, 1]
 
     second_turn_prompt = batch["turn_teacher_prompts"][0][1]
-    assert "[RECENT_RAW_BLOCK]" in second_turn_prompt
+    assert (
+        "Below is a student's attempt in solving the task above, showing only recent few turns with tool response:"
+        in second_turn_prompt
+    )
     assert "[TURN_0]" in second_turn_prompt
-    assert "[CURRENT_ATTEMPT_BLOCK]" in second_turn_prompt
+    assert "Below is the current turn in the student's attempt:" in second_turn_prompt
     assert "[TURN_1]" in second_turn_prompt
 
 
@@ -561,7 +565,7 @@ def test_current_turn_mode_omits_target_turn_attempt_text_when_enabled() -> None
     assert "TURN1_SECRET_STUDENT_ATTEMPT" not in prompt_turn_1
     assert "<omitted_current_turn_target_text>" in prompt_turn_0
     assert "<omitted_current_turn_target_text>" in prompt_turn_1
-    assert "current-turn reflection" in prompt_turn_0
+    assert "Produce the best corrected action for the current turn." in prompt_turn_0
 
 
 def test_next_turn_mode_keeps_current_attempt_block_behavior() -> None:

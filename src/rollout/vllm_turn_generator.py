@@ -166,8 +166,6 @@ def _build_messages(
 ) -> list[dict[str, str]]:
     initial_user_message = build_onpolicy_initial_user_message(
         problem_statement=task.problem_statement,
-        fail_to_pass=task.fail_to_pass,
-        pass_to_pass=task.pass_to_pass,
     )
 
     messages: list[dict[str, str]] = [

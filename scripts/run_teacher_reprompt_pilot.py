@@ -25,6 +25,7 @@ try:
         DEFAULT_NUM_RECENT_RAW_BLOCKS,
         build_self_distillation_batch,
     )
+    from verl_integration.reward_function import reward_fn
 except ModuleNotFoundError:
     import sys
 
@@ -43,6 +44,7 @@ except ModuleNotFoundError:
         DEFAULT_NUM_RECENT_RAW_BLOCKS,
         build_self_distillation_batch,
     )
+    from verl_integration.reward_function import reward_fn
 
 _TOOL_RESPONSE_START = "<tool_response>"
 _TOOL_RESPONSE_END = "</tool_response>"
@@ -100,6 +102,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--turn-supervision-mode", default=_TURN_SUPERVISION_CURRENT)
     parser.add_argument("--verifier-feedback-mode", default="all_turns")
+    parser.add_argument(
+        "--no-verify-submissions",
+        dest="verify_submissions",
+        action="store_false",
+        help="Disable submission verification in pilot rollouts.",
+    )
+    parser.add_argument(
+        "--verifier-timeout-sec",
+        type=int,
+        default=600,
+        help="Timeout (sec) for submission verification.",
+    )
     parser.add_argument(
         "--rft-checkpoint",
         default="",
@@ -577,6 +591,8 @@ def main() -> None:
         "attempts_per_task": int(args.attempts_per_task),
         "max_turns_per_attempt": int(args.max_turns_per_attempt),
         "max_in_flight_tasks": int(args.max_in_flight_tasks),
+        "verify_submissions": bool(args.verify_submissions),
+        "verifier_timeout_sec": int(args.verifier_timeout_sec),
     }
     settings = resolve_on_policy_settings(
         data_config_name=str(args.data_config_name),
@@ -620,6 +636,27 @@ def main() -> None:
         attempt_index = int(row.get("attempt_index", 0) or 0)
         teacher_map[(task_id, attempt_index)] = row
 
+    baseline_rewards, _baseline_info = reward_fn(
+        baseline_rows,
+        max_tool_calls=settings.runtime.max_tool_calls_per_turn,
+    )
+    teacher_rewards, _teacher_info = reward_fn(
+        teacher_rows,
+        max_tool_calls=settings.runtime.max_tool_calls_per_turn,
+    )
+    baseline_reward_map = {
+        (str(row.get("task_id", "")).strip(), int(row.get("attempt_index", 0) or 0)): float(
+            baseline_rewards[index]
+        )
+        for index, row in enumerate(baseline_rows)
+    }
+    teacher_reward_map = {
+        (str(row.get("task_id", "")).strip(), int(row.get("attempt_index", 0) or 0)): float(
+            teacher_rewards[index]
+        )
+        for index, row in enumerate(teacher_rows)
+    }
+
     pairs: list[dict[str, Any]] = []
     for baseline_row in baseline_rows:
         task_id = str(baseline_row.get("task_id", "")).strip()
@@ -628,8 +665,8 @@ def main() -> None:
         attempt_index = int(baseline_row.get("attempt_index", 0) or 0)
         key = (task_id, attempt_index)
         teacher_row = teacher_map.get(key)
-        student_reward = 1.0 if bool(baseline_row.get("resolved", False)) else 0.0
-        teacher_reward = 1.0 if bool(teacher_row and teacher_row.get("resolved", False)) else 0.0
+        student_reward = float(baseline_reward_map.get(key, 0.0))
+        teacher_reward = float(teacher_reward_map.get(key, 0.0))
         pairs.append(
             {
                 "task_id": task_id,
@@ -650,6 +687,8 @@ def main() -> None:
         "teacher_reprompt_turn_index_mode": turn_index_mode,
         "turn_supervision_mode": str(args.turn_supervision_mode),
         "verifier_feedback_mode": str(args.verifier_feedback_mode),
+        "verify_submissions": bool(args.verify_submissions),
+        "verifier_timeout_sec": int(args.verifier_timeout_sec),
         "max_reprompt_len": int(args.max_reprompt_len),
         "num_recent_raw_blocks": int(args.num_recent_raw_blocks),
         "vllm_model_name": str(vllm_config.model_name),

@@ -166,6 +166,31 @@ def test_batch_container_pool_adds_management_labels(
     assert "small_swe.run_label=20260228T020803Z_job606" in run_cmd
 
 
+def test_batch_container_pool_sets_repo_root_env_for_swesmith_images() -> None:
+    commands: list[list[str]] = []
+
+    def runner(command: list[str], *, timeout_sec: int) -> CommandResult:
+        del timeout_sec
+        commands.append(list(command))
+        if command[:2] == ["docker", "run"]:
+            return CommandResult(returncode=0, stdout="container-1\n")
+        return CommandResult(returncode=0)
+
+    pool = BatchContainerPool(
+        env_pool_size=1,
+        container_start_timeout_sec=10,
+        runner=runner,
+    )
+    pool.acquire([_task("t1", "swebench/swesmith.x86_64.repo.commit")])
+    pool.release_all()
+
+    run_commands = [cmd for cmd in commands if cmd[:2] == ["docker", "run"]]
+    assert len(run_commands) == 1
+    run_cmd = run_commands[0]
+    assert "-e" in run_cmd
+    assert "TASK_REPO_ROOT=/testbed" in run_cmd
+
+
 def test_batch_container_pool_uses_slurm_jobid_alias_for_labels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

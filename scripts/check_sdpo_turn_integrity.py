@@ -19,6 +19,16 @@ from verl_integration.reprompt_adapter import build_self_distillation_batch
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
+_RECENT_RAW_HEADER = (
+    "Below is a student's attempt in solving the task above, showing only recent few turns with tool response:"
+)
+_RECENT_RAW_TERMINATORS = (
+    "Earlier attempt summary:",
+    "Key facts to keep in mind:",
+    "Below is the current turn in the student's attempt:",
+    "Additional feedback:",
+    "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:",
+)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -132,13 +142,35 @@ def _extract_tagged_block(
     return text[content_start:end_index]
 
 
+def _extract_recent_raw_block(text: str) -> str:
+    if "[RECENT_RAW_BLOCK]" in text:
+        return _extract_tagged_block(
+            text=text,
+            start_tag="[RECENT_RAW_BLOCK]",
+            end_tag="[COMPRESSED_MEMORY_BLOCK]",
+        )
+
+    start_marker = f"{_RECENT_RAW_HEADER}\n"
+    start_index = text.find(start_marker)
+    if start_index < 0:
+        return ""
+    content_start = start_index + len(start_marker)
+
+    end_index = None
+    for marker in _RECENT_RAW_TERMINATORS:
+        candidate = text.find(f"\n\n{marker}", content_start)
+        if candidate < 0:
+            continue
+        end_index = candidate if end_index is None else min(end_index, candidate)
+
+    if end_index is None:
+        return ""
+    return text[content_start:end_index]
+
+
 def _recent_raw_block_contains_target_turn(prompt: Any, *, turn_index: int) -> bool:
     prompt_text = str(prompt)
-    recent_raw_block = _extract_tagged_block(
-        text=prompt_text,
-        start_tag="[RECENT_RAW_BLOCK]",
-        end_tag="[COMPRESSED_MEMORY_BLOCK]",
-    )
+    recent_raw_block = _extract_recent_raw_block(prompt_text)
     if not recent_raw_block:
         return False
 
@@ -334,7 +366,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not bool(active[turn_index]):
                     continue
                 # Guard against same-turn leakage by checking for the structured turn block
-                # marker in RECENT_RAW_BLOCK, not arbitrary text matches across the prompt.
+                # marker in the recent-raw section, not arbitrary text matches across the prompt.
                 if _recent_raw_block_contains_target_turn(prompt, turn_index=turn_index):
                     violations.append(
                         f"row={row_index} turn={turn_index}: target-turn leakage detected in teacher prompt."

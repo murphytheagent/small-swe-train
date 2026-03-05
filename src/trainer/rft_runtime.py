@@ -34,9 +34,10 @@ def collect_onpolicy_rft_runtime_batch(
     tokenizer: SupportsOffsetsTokenizer,
 ) -> dict[str, Any]:
     """Collect rollouts and build one RFT SFT batch via the live runtime path."""
+    runtime_overrides = _resolve_rft_runtime_overrides(request.runtime_overrides)
     collector = build_onpolicy_collector(
         data_config_name=request.data_config_name,
-        runtime_overrides=request.runtime_overrides,
+        runtime_overrides=runtime_overrides,
         data_overrides=request.data_overrides,
         turn_generator=_resolve_turn_generator(request.turn_generator_mode),
     )
@@ -66,6 +67,15 @@ def collect_onpolicy_rft_runtime_batch(
             ),
         )
     return result
+
+
+def _resolve_rft_runtime_overrides(
+    runtime_overrides: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    resolved = dict(runtime_overrides or {})
+    # Keep RFT runtime rollouts lightweight: verifier runs are reserved for the pilot.
+    resolved["verify_submissions"] = False
+    return resolved
 
 
 def _normalized_output_dir(value: str | None) -> str | None:

@@ -155,16 +155,18 @@ def test_integrity_script_allows_repeated_turn_text_without_leakage_false_positi
 def test_recent_raw_leakage_detector_flags_target_turn_marker() -> None:
     module = _load_script_module()
     prompt = (
-        "[TRAJECTORY_BLOCK]\n"
-        "[RECENT_RAW_BLOCK]\n"
+        "Header\n\n"
+        "Below is a student's attempt in solving the task above, showing only recent few turns with tool response:\n"
         "[TURN_0]\n"
         "[ASSISTANT]\n"
         "safe\n\n"
         "[TURN_2]\n"
         "[ASSISTANT]\n"
         "leak\n"
-        "[COMPRESSED_MEMORY_BLOCK]\n"
-        "memo\n"
+        "\n\nBelow is the current turn in the student's attempt:\n"
+        "[TURN_3]\n"
+        "[ASSISTANT]\n"
+        "current\n"
     )
 
     assert module._recent_raw_block_contains_target_turn(prompt, turn_index=2) is True
@@ -174,12 +176,10 @@ def test_recent_raw_leakage_detector_flags_target_turn_marker() -> None:
 def test_recent_raw_leakage_detector_ignores_prompt_when_end_tag_missing() -> None:
     module = _load_script_module()
     prompt = (
-        "[TRAJECTORY_BLOCK]\n"
-        "[RECENT_RAW_BLOCK]\n"
+        "Below is a student's attempt in solving the task above, showing only recent few turns with tool response:\n"
         "[TURN_0]\n"
         "[ASSISTANT]\n"
         "safe\n\n"
-        "[CURRENT_ATTEMPT_BLOCK]\n"
         "[TURN_2]\n"
         "[ASSISTANT]\n"
         "target-turn appears outside RECENT_RAW\n"

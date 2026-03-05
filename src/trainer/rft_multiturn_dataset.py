@@ -110,12 +110,8 @@ def _build_canonical_initial_user_message(row: Mapping[str, Any]) -> str:
     problem_statement = _as_text(row.get("prompt")).strip()
     if not problem_statement:
         return ""
-    fail_to_pass = _resolve_test_targets_from_row(row, key="fail_to_pass")
-    pass_to_pass = _resolve_test_targets_from_row(row, key="pass_to_pass")
     return build_onpolicy_initial_user_message(
         problem_statement=problem_statement,
-        fail_to_pass=fail_to_pass,
-        pass_to_pass=pass_to_pass,
     )
 
 

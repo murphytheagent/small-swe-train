@@ -6,6 +6,7 @@ import numbers
 from typing import Any, Mapping, Sequence
 
 from config import MAX_TOOL_CALLS_PER_TURN
+from prompts.runtime_messages import build_onpolicy_system_prompt
 from verl_integration.reward_function import reward_fn
 
 try:  # pragma: no cover - exercised in train runtime
@@ -45,6 +46,10 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
         prompt_text = _extract_prompt_text(
             messages=raw_prompt_messages,
             fallback=_as_text(_select_non_tensor(non_tensor_batch, "prompt", index)),
+        )
+        teacher_prompt_messages = _ensure_system_prompt_messages(
+            raw_prompt_messages,
+            prompt_text=prompt_text,
         )
 
         trajectory_steps = _coerce_mapping_list(
@@ -126,7 +131,7 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
                 _select_non_tensor(non_tensor_batch, "include_student_attempt_for_teacher", index),
                 fallback=True,
             ),
-            "_raw_prompt_messages": raw_prompt_messages,
+            "_raw_prompt_messages": teacher_prompt_messages,
             "_response_mask": response_mask_row,
         }
 
@@ -352,6 +357,39 @@ def _extract_prompt_text(*, messages: Sequence[Mapping[str, Any]], fallback: str
     if fallback_text:
         return fallback_text
     return "SWE task prompt unavailable."
+
+
+def _ensure_system_prompt_messages(
+    raw_messages: Sequence[Mapping[str, Any]],
+    *,
+    prompt_text: str,
+) -> list[dict[str, str]]:
+    system_prompt = build_onpolicy_system_prompt()
+    messages = [
+        {"role": str(item.get("role", "")).strip().lower(), "content": str(item.get("content", "")).strip()}
+        for item in raw_messages
+        if isinstance(item, Mapping)
+    ]
+    messages = [item for item in messages if item.get("role") in {"system", "user", "assistant"} and item.get("content")]
+
+    if messages:
+        if messages[0]["role"] == "system":
+            combined = system_prompt
+            existing = messages[0]["content"].strip()
+            if existing:
+                combined = f"{combined}\n\n{existing}"
+            messages[0] = {"role": "system", "content": combined}
+        else:
+            messages.insert(0, {"role": "system", "content": system_prompt})
+        return messages
+
+    prompt = prompt_text.strip()
+    if prompt:
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+    return [{"role": "system", "content": system_prompt}]
 
 
 def _coerce_mapping_list(value: Any) -> list[dict[str, Any]]:

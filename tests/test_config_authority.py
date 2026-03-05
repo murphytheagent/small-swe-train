@@ -74,15 +74,19 @@ def test_prompt_contract_uses_centralized_terminal_tool_default() -> None:
 
 def test_teacher_output_contract_block_wraps_shared_contract() -> None:
     prompt = build_teacher_output_contract_block()
-    assert "Teacher objective (turn-level SDPO):" in prompt
+    assert (
+        "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:"
+        in prompt
+    )
     assert "Assistant output contract:" in prompt
     assert f"Terminal tool is '{config.TERMINAL_TOOL_NAME}'" in prompt
-    assert "Do not repeat an identical previously-failed command without a new hypothesis." in prompt
+    assert "Now correctly solve the original issue, focus only on what to do best in the next turn." in prompt
+    assert "Do not repeat an identical previously-failed command without a new hypothesis." not in prompt
 
 
 def test_prompt_contract_renders_tool_examples_from_tool_schemas() -> None:
     prompt = build_assistant_contract_prompt()
-    assert "9) Realistic examples (one tool call each):" in prompt
+    assert "10) Realistic examples (one tool call each):" in prompt
     for tool_name in ALLOWED_TOOLS:
         schema = TOOL_SCHEMAS.get(tool_name)
         if not isinstance(schema, Mapping):

@@ -26,8 +26,6 @@ def test_build_multiturn_messages_uses_history_and_maps_tool_responses_to_user()
 
     assert [message["role"] for message in messages] == ["user", "assistant", "user", "assistant"]
     assert "Fix the failing test." in messages[0]["content"]
-    assert "FAIL_TO_PASS" in messages[0]["content"]
-    assert "PASS_TO_PASS" in messages[0]["content"]
     assert "1 failed" in messages[2]["content"]
 
 
@@ -42,8 +40,6 @@ def test_build_multiturn_messages_falls_back_to_assistant_response() -> None:
     assert len(messages) == 2
     assert messages[0]["role"] == "user"
     assert "Write a patch." in messages[0]["content"]
-    assert "FAIL_TO_PASS" in messages[0]["content"]
-    assert "PASS_TO_PASS" in messages[0]["content"]
     assert messages[1] == {
         "role": "assistant",
         "content": '<tool_call>{"tool":"submit","args":{"final_response":"patched"}}</tool_call>',
@@ -104,8 +100,6 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
     prompt_block = records[0]["prompt"][0]
     assert prompt_block["role"] == "user"
     assert "Task prompt" in prompt_block["content"]
-    assert "tests/test_bug.py::test_bugfix" in prompt_block["content"]
-    assert "tests/test_ok.py::test_regression" in prompt_block["content"]
 
 
 def test_build_multiturn_dataset_records_prompt_uses_preceding_context() -> None:

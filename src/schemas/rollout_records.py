@@ -39,3 +39,5 @@ class RolloutRow(RolloutRowRequired, total=False):
     trajectory_format_valid: bool
     final_turn_has_submit: bool
     final_submit_format_valid: bool
+    initial_prompt_block: str
+    _raw_prompt_messages: list[dict[str, Any]]

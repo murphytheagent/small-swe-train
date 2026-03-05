@@ -11,11 +11,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from config import OnPolicyDataConfig
+from prompts.runtime_messages import build_onpolicy_initial_user_message
 
 
 DatasetLoader = Callable[[str, str], Sequence[Mapping[str, Any]]]
 SDPO_DEFAULT_MAX_PROBLEM_STATEMENT_CHARS = 4000
-SDPO_TASK_ROWS_SCHEMA_VERSION = 2
+SDPO_TASK_ROWS_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -253,9 +254,12 @@ def build_sdpo_task_rows(
 
         fail_to_pass = list(task.fail_to_pass)
         pass_to_pass = list(task.pass_to_pass)
+        initial_user_message = build_onpolicy_initial_user_message(
+            problem_statement=task.problem_statement,
+        )
         rows.append(
             {
-                "prompt": [{"role": "user", "content": task.problem_statement}],
+                "prompt": [{"role": "user", "content": initial_user_message}],
                 "task_id": task.task_id,
                 "image_name": task.image_name,
                 "data_source": data_source,

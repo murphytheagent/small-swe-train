@@ -396,6 +396,8 @@ def _format_initial_prompt_block(sample: Mapping[str, Any]) -> str:
             if not isinstance(item, Mapping):
                 continue
             role = str(item.get("role", "")).strip().upper()
+            if role == "SYSTEM":
+                continue
             content = str(item.get("content", "")).strip()
             if not role or not content:
                 continue
@@ -570,10 +572,7 @@ def _build_feedback_for_turn(
         tool_output=tool_output,
         include_student_attempt_for_teacher=include_student_attempt_for_teacher,
     )
-    feedback_block = (
-        feedback_packet.canonical_feedback.actionable_error_text
-        or feedback_packet.canonical_feedback.normalized_text
-    )
+    feedback_block = feedback_packet.canonical_feedback.actionable_error_text or ""
     has_teacher_signal = feedback_packet.self_containment_checks.has_actionable_error_text
     return feedback_block, has_teacher_signal, feedback_packet.to_dict()
 

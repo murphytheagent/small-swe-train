@@ -15,6 +15,7 @@ from env.task_dataset import (
     resolve_sdpo_task_split_cache_paths,
     split_sdpo_task_rows_for_eval,
 )
+from prompts.runtime_messages import build_onpolicy_initial_user_message
 
 
 def _config() -> OnPolicyDataConfig:
@@ -199,7 +200,10 @@ def test_build_sdpo_task_rows_uses_full_split_with_prompt_metadata() -> None:
     )
 
     assert [row["task_id"] for row in sdpo_rows] == ["task-0", "task-2"]
-    assert sdpo_rows[0]["prompt"] == [{"role": "user", "content": "fix bug 0"}]
+    expected_prompt = build_onpolicy_initial_user_message(
+        problem_statement="fix bug 0",
+    )
+    assert sdpo_rows[0]["prompt"] == [{"role": "user", "content": expected_prompt}]
     assert sdpo_rows[0]["image_name"] == "img:0"
     assert sdpo_rows[0]["data_source"] == "dummy/dataset"
     assert sdpo_rows[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
