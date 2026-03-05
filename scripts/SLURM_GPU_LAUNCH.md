@@ -278,9 +278,31 @@ applied everywhere in the launcher (`--model`, `--served-model-name`, and pilot
   `rft_runtime_loop_manifest.json` from `outputs/slurm/rft_runtime/*` (or
   `outputs/rft_runtime/*`) and uses the resolved checkpoint as the vLLM model.
 - `--rft-manifest <path>` uses an explicit manifest.
-- `--rft-checkpoint <path-or-model-id>` directly overrides the model name.
+- `--rft-checkpoint <path>` directly overrides the RFT checkpoint/export path.
 - If none of those flags are passed, the launcher falls back to
   `PILOT_MODEL_PATH` (default `/data/scratch/$USER/models/Qwen3-4B-Instruct-2507`).
+
+Arbitrary HF model selection is controlled separately from RFT checkpoint flags:
+- Set `PILOT_MODEL_PATH=<repo-id-or-local-path>` for the model passed to vLLM
+  `--model`.
+- Set `PILOT_SERVED_MODEL=<name>` for the request-side model id used by
+  `SMALL_SWE_VLLM_MODEL` and vLLM `--served-model-name`.
+- Keep `--rft-checkpoint` / `--rft-manifest` / `--load-latest-rft-checkpoint`
+  for actual RFT artifacts only.
+
+HF model id behavior:
+- `PILOT_MODEL_PATH` may be a Hugging Face repo id such as `Qwen/Qwen3.5-9B`.
+- For repo ids, vLLM downloads the model into the standard Hugging Face/vLLM
+  caches exported by the launcher (`HF_HOME`, `HUGGINGFACE_HUB_CACHE`,
+  `TRANSFORMERS_CACHE`, `VLLM_CACHE_ROOT`).
+- First launch is slower because weights must be fetched. For private repos,
+  export `HF_TOKEN` before launch.
+- Qwen instruct/chat models are the most drop-in-friendly case in the current
+  call chain. The pilot uses standard OpenAI-compatible chat completions and
+  accepts either assistant text or OpenAI `tool_calls`, but the model still
+  needs a usable chat template and must follow the repo's `<tool_call>...`
+  output contract. Base models and models that need extra vLLM flags are not
+  guaranteed drop-in.
 
 Example submit:
 
@@ -329,6 +351,41 @@ Latest manifest auto-discovery example:
 
 ```bash
 bash scripts/run_teacher_reprompt_pilot_slurm.sh --load-latest-rft-checkpoint
+```
+
+Arbitrary HF model example:
+
+```bash
+GPUS=2
+CPUS=$((GPUS * 16))
+MEM="$((GPUS * 48))G"
+
+sbatch \
+  --partition=gpu \
+  --nodes=1 \
+  --gres="gpu:${GPUS}" \
+  --cpus-per-task="${CPUS}" \
+  --mem="${MEM}" \
+  --time=12:00:00 \
+  --job-name=teacher-reprompt-qwen35 \
+  --output="$PWD/outputs/slurm/%x-%j.out" \
+  --error="$PWD/outputs/slurm/%x-%j.err" \
+  --wrap "cd $PWD \
+    && export PYTHON_BIN=$PWD/.venv/bin/python \
+    && export PILOT_VLLM_TP_SIZE=${GPUS} \
+    && export PILOT_MODEL_PATH=Qwen/Qwen3.5-9B \
+    && export PILOT_SERVED_MODEL=Qwen/Qwen3.5-9B \
+    && export HF_TOKEN=\${HF_TOKEN:-} \
+    && bash scripts/run_teacher_reprompt_pilot_slurm.sh"
+```
+
+Manual launch example with a Hub model id:
+
+```bash
+PILOT_VLLM_TP_SIZE=2 \
+PILOT_MODEL_PATH=Qwen/Qwen3.5-9B \
+PILOT_SERVED_MODEL=Qwen/Qwen3.5-9B \
+bash scripts/run_teacher_reprompt_pilot_slurm.sh
 ```
 
 ## 5) `scripts/run_flash_attn_rebuild.sh` (resources handled by script)

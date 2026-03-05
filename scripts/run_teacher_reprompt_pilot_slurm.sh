@@ -31,7 +31,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --rft-checkpoint)
       if [[ $# -lt 2 ]]; then
-        echo "--rft-checkpoint requires a path or model argument." >&2
+        echo "--rft-checkpoint requires a checkpoint path argument." >&2
         exit 1
       fi
       RFT_CHECKPOINT_OVERRIDE="$2"
@@ -59,6 +59,28 @@ fi
 if [[ -z "${RUNTIME_USER}" ]]; then
   RUNTIME_USER="unknown"
 fi
+
+is_huggingface_repo_id() {
+  local value="$1"
+  [[ "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+validate_model_reference() {
+  local value="$1"
+  local allow_hf_repo_id="${2:-0}"
+  if [[ -d "${value}" ]]; then
+    return 0
+  fi
+  if [[ "${allow_hf_repo_id}" == "1" ]] && is_huggingface_repo_id "${value}"; then
+    return 0
+  fi
+  if [[ "${allow_hf_repo_id}" == "1" ]]; then
+    echo "Model reference must be an existing local directory or a Hugging Face repo id: ${value}" >&2
+  else
+    echo "Checkpoint path does not exist: ${value}" >&2
+  fi
+  return 1
+}
 
 PYTHON_RESOLVER_BIN="${PYTHON_BIN}"
 if [[ ! -x "${PYTHON_RESOLVER_BIN}" ]]; then
@@ -105,8 +127,11 @@ if [[ "${DRY_RUN}" -eq 0 ]]; then
     echo "Missing python interpreter at ${PYTHON_BIN}" >&2
     exit 1
   fi
-  if [[ ! -d "${MODEL_PATH}" ]]; then
-    echo "Model path does not exist: ${MODEL_PATH}" >&2
+  if [[ -n "${RESOLVED_RFT_CHECKPOINT}" ]]; then
+    if ! validate_model_reference "${MODEL_PATH}" 0; then
+      exit 1
+    fi
+  elif ! validate_model_reference "${MODEL_PATH}" 1; then
     exit 1
   fi
 fi

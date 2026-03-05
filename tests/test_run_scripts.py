@@ -240,6 +240,64 @@ def _write_python_cleanup_probe_stub(tmp_path: Path) -> Path:
     return stub_path
 
 
+def _write_teacher_pilot_python_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "python-teacher-pilot-stub.sh"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == \"-m\" && \"${2:-}\" == \"trainer.vllm_api_server_entry\" ]]; then\n"
+        "  exec python3 - <<'PY'\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "import json\n"
+        "\n"
+        "class Handler(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        if self.path != '/v1/models':\n"
+        "            self.send_error(404)\n"
+        "            return\n"
+        "        payload = json.dumps({'data': [{'id': 'stub-model'}]}).encode('utf-8')\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Type', 'application/json')\n"
+        "        self.send_header('Content-Length', str(len(payload)))\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(payload)\n"
+        "\n"
+        "    def log_message(self, format, *args):\n"
+        "        return\n"
+        "\n"
+        "HTTPServer(('127.0.0.1', 8000), Handler).serve_forever()\n"
+        "PY\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == */run_teacher_reprompt_pilot.py || \"${1:-}\" == \"scripts/run_teacher_reprompt_pilot.py\" ]]; then\n"
+        "  if [[ \" ${*} \" == *\" --print-resolved-rft-checkpoint \"* ]]; then\n"
+        "    shift\n"
+        "    while [[ $# -gt 0 ]]; do\n"
+        "      case \"$1\" in\n"
+        "        --rft-checkpoint)\n"
+        "          printf '%s\\n' \"${2:-}\"\n"
+        "          exit 0\n"
+        "          ;;\n"
+        "        --rft-checkpoint=*)\n"
+        "          printf '%s\\n' \"${1#*=}\"\n"
+        "          exit 0\n"
+        "          ;;\n"
+        "      esac\n"
+        "      shift\n"
+        "    done\n"
+        "    printf '\\n'\n"
+        "    exit 0\n"
+        "  fi\n"
+        "  : \"${TEACHER_PILOT_CAPTURE:?}\"\n"
+        "  printf '%s\\n' \"$@\" >\"${TEACHER_PILOT_CAPTURE}\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "exec python3 \"$@\"\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
 def test_run_rft_script_dry_run_prints_verl_command() -> None:
     result = _run_script("run_rft.sh", "trainer.total_training_steps=1")
     assert "-m torch.distributed.run" in result.stdout
@@ -572,6 +630,102 @@ def test_teacher_reprompt_pilot_slurm_script_dry_run_load_latest_rft_checkpoint_
     assert f"--model {checkpoint_path}" in result.stdout
     assert f"--served-model-name {checkpoint_path}" in result.stdout
     assert f"--rft-checkpoint {checkpoint_path}" in result.stdout
+
+
+def test_teacher_reprompt_pilot_slurm_script_dry_run_accepts_hf_repo_id_via_pilot_model_path() -> None:
+    result = _run_script(
+        "run_teacher_reprompt_pilot_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "2",
+            "PILOT_MODEL_PATH": "Qwen/Qwen3.5-9B",
+            "PILOT_SERVED_MODEL": "Qwen/Qwen3.5-9B",
+        },
+    )
+    assert "--model Qwen/Qwen3.5-9B" in result.stdout
+    assert "--served-model-name Qwen/Qwen3.5-9B" in result.stdout
+    assert "--rft-checkpoint Qwen/Qwen3.5-9B" not in result.stdout
+
+
+def test_teacher_reprompt_pilot_slurm_script_non_dry_run_accepts_hf_repo_id_via_pilot_model_path(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_teacher_reprompt_pilot_slurm.sh"
+    python_stub = _write_teacher_pilot_python_stub(tmp_path)
+    capture_path = tmp_path / "teacher-pilot-args.txt"
+    output_dir = repo_root / "outputs" / "teacher_reprompt_pilot" / "job987654"
+    vllm_log = repo_root / "outputs" / "slurm" / "teacher-pilot-vllm-987654.log"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "SLURM_JOB_ID": "987654",
+            "TEACHER_PILOT_CAPTURE": str(capture_path),
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+        }
+    )
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script_path)],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            env={
+                **env,
+                "PILOT_MODEL_PATH": "Qwen/Qwen3.5-9B",
+                "PILOT_SERVED_MODEL": "Qwen/Qwen3.5-9B",
+            },
+            timeout=30,
+        )
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        if vllm_log.exists():
+            vllm_log.unlink()
+
+    assert result.returncode == 0, result.stderr
+    captured_args = capture_path.read_text(encoding="utf-8").splitlines()
+    assert any(item.endswith("scripts/run_teacher_reprompt_pilot.py") for item in captured_args)
+    assert "--rft-checkpoint" not in captured_args
+
+
+def test_teacher_reprompt_pilot_slurm_script_non_dry_run_rejects_hf_repo_id_via_rft_checkpoint(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_teacher_reprompt_pilot_slurm.sh"
+    python_stub = _write_teacher_pilot_python_stub(tmp_path)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(script_path), "--rft-checkpoint", "Qwen/Qwen3.5-9B"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "Checkpoint path does not exist" in result.stderr
 
 
 def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
