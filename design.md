@@ -252,6 +252,8 @@ for Ray/tmpdir and cleanup guidance. The launcher defaults
 4. Teacher prompt builder includes student attempt by default; gating retained.
 5. Terminal tool is `submit` (not `answer`).
 6. Reward adapter bridges verl `DataProto` → row-wise reward/feedback (`reward_adapter.py` + `reward_function.py`).
+7. SDPO reward semantics are subtraction-based: start at `1.0` when verifier targets exist, subtract `1.0` each for missing `fail_to_pass` or `pass_to_pass` verification, then apply `TERMINAL_VALIDITY_PENALTY` when the terminal submit contract is violated.
+8. System prompt is always enforced for SDPO and pilot teacher reprompts: SDPO agent-loop prepends `build_onpolicy_system_prompt()` to incoming messages, and pilot teacher requests reuse the baseline raw prompt messages (with system prompt) or fall back to the same system contract.
 
 ## 10) Implementation progress
 
@@ -304,11 +306,23 @@ for Ray/tmpdir and cleanup guidance. The launcher defaults
 | **Live GPU validation** | Run `scripts/run_rft.sh` + `scripts/run_sdpo.sh` on Slurm with vLLM/Ray to validate full loops. | Requires external infra. |
 | **End-to-end evaluation harness** | Produce prediction JSONs from live agent runs and score via `eval/swebench_lite.py`. | Partial offline evaluator exists. |
 
-## 11) Bug-fix log (v1.8, 2026-02-22)
+## 11) Bug-fix log (v1.9, 2026-03-05)
+
+Four regressions/oversights were corrected in the pilot + SDPO paths, each
+with explicit regression coverage or test updates. These updates align reward
+semantics and prompt construction with the agreed contracts.
+
+| # | File | Bug | Fix |
+|---|------|-----|-----|
+| 1 | `scripts/run_teacher_reprompt_pilot.py` | Pilot ablation used a dummy reward function, so student/teacher deltas were meaningless | Swap to `reward_fn` from `reward_function.py` for both baseline + teacher rows; record `reward_delta` from real verifier-based scores |
+| 2 | `scripts/run_teacher_reprompt_pilot.py`, `src/verl_integration/swe_bridge_agent_loop.py` | Teacher reprompt requests did not consistently include the system prompt (pilot + SDPO), yielding off-contract generations | Always inject `build_onpolicy_system_prompt()` into SDPO agent-loop messages; pilot teacher requests now reuse the baseline raw prompt messages (including system prompt) or fall back to the same contract |
+| 3 | `src/verl_integration/reward_function.py` | SDPO reward logic was incorrectly gated on submit-only signals instead of subtraction-based verifier deltas | Implement subtraction-based reward: `1.0` base when verifier targets exist, subtract for each failed verification group, then apply terminal validity penalty |
+| 4 | `src/env/docker_executor.py` | `search` tool fallback emitted stderr but never executed a real search after fallback | Ensure fallback path still runs `grep -R` and avoid suppressing errors (`|| true` / `2>/dev/null`) so failures are visible |
+
+## 11.1) Prior bug-fix log (v1.8, 2026-02-22)
 
 Seven bugs were identified and fixed in the verl integration layer. All fixes
 have regression tests in `tests/`.
-No new entries since 2026-02-22.
 
 | # | File | Bug | Fix |
 |---|------|-----|-----|
