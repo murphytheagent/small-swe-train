@@ -101,6 +101,49 @@ def test_build_self_distillation_batch_empty_tool_output_does_not_set_teacher_si
     assert batch["self_distillation_mask"] == [False]
 
 
+def test_legacy_prompt_omits_canonical_feedback_from_additional_feedback_by_default() -> None:
+    samples = [
+        {
+            "prompt": "Fix failing test",
+            "assistant_response": "rerun pytest",
+            "tool_output": {
+                "stdout": "FAILED tests/test_math.py::test_add - AssertionError",
+                "stderr": "",
+                "exit_code": 1,
+            },
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples)
+
+    prompt = batch["teacher_prompts"][0]
+    assert "FAILED tests/test_math.py::test_add - AssertionError" not in prompt
+    assert "Additional feedback:" not in prompt
+
+
+def test_legacy_prompt_can_include_canonical_feedback_when_enabled() -> None:
+    samples = [
+        {
+            "prompt": "Fix failing test",
+            "assistant_response": "rerun pytest",
+            "tool_output": {
+                "stdout": "FAILED tests/test_math.py::test_add - AssertionError",
+                "stderr": "",
+                "exit_code": 1,
+            },
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        include_canonicalized_feedback_in_additional_feedback=True,
+    )
+
+    prompt = batch["teacher_prompts"][0]
+    assert "FAILED tests/test_math.py::test_add - AssertionError" in prompt
+    assert "Additional feedback:" in prompt
+
+
 def test_feedback_present_gating_ignores_neutral_exit_code_only_tool_output() -> None:
     samples = [
         {
@@ -230,6 +273,7 @@ def test_build_self_distillation_batch_treats_false_string_as_unresolved(monkeyp
         step_index,
         supervision_mode,
         include_student_attempt_for_teacher,
+        include_canonicalized_feedback_in_additional_feedback,
         max_reprompt_len,
         verifier_feedback_mode,
     ):
@@ -238,6 +282,7 @@ def test_build_self_distillation_batch_treats_false_string_as_unresolved(monkeyp
             step_index,
             supervision_mode,
             include_student_attempt_for_teacher,
+            include_canonicalized_feedback_in_additional_feedback,
             max_reprompt_len,
             verifier_feedback_mode,
         )
@@ -670,6 +715,26 @@ def test_verifier_feedback_all_turns_does_not_activate_turn_without_tool_feedbac
     assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][1]
     assert batch["turn_distillation_mask"][0] == [False, False]
     assert batch["self_distillation_mask"] == [False]
+
+
+def test_turn_prompt_omits_canonical_feedback_from_additional_feedback_by_default() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1],
+            "trajectory_assistant_turns": ["turn-0"],
+            "trajectory_assistant_turn_token_lengths": [2],
+            "trajectory_turn_tool_response_blocks": [
+                ['<tool_response>{"stderr":"boom","exit_code":1,"stdout":""}</tool_response>'],
+            ],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, turn_supervision_mode="current_turn")
+
+    prompt = batch["turn_teacher_prompts"][0][0]
+    assert '<tool_response>{"stderr":"boom","exit_code":1,"stdout":""}</tool_response>' in prompt
+    assert "Additional feedback:" not in prompt
 
 
 def test_verifier_feedback_final_turn_only_injection() -> None:

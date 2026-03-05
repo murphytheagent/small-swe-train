@@ -687,12 +687,13 @@ def _build_turn_prompt(
     turn_blocks: Sequence[str],
     turn_tool_blocks: Sequence[Sequence[str]],
     include_student_attempt_for_teacher: bool,
+    include_canonicalized_feedback_in_additional_feedback: bool,
     max_reprompt_len: int,
     num_recent_raw_blocks: int,
     verifier_feedback_mode: str,
 ) -> tuple[str, bool, dict[str, Any]]:
     tool = str(sample.get("feedback_tool", "bash"))
-    feedback_block, has_teacher_signal, feedback_packet = _build_feedback_for_turn(
+    canonical_feedback_block, has_teacher_signal, feedback_packet = _build_feedback_for_turn(
         tool=tool,
         turn_index=current_turn_index,
         tool_response_blocks=turn_tool_blocks[current_turn_index],
@@ -722,7 +723,9 @@ def _build_turn_prompt(
         turn_supervision_mode=supervision_mode,
     ):
         verifier_feedback_block = _extract_verifier_feedback_block(sample)
-    combined_feedback_block = feedback_block
+    combined_feedback_block = (
+        canonical_feedback_block if include_canonicalized_feedback_in_additional_feedback else ""
+    )
     if verifier_feedback_block:
         if combined_feedback_block:
             combined_feedback_block = f"{combined_feedback_block}\n\n[VERIFIER_FEEDBACK]\n{verifier_feedback_block}"
@@ -756,6 +759,7 @@ def _build_legacy_prompt_for_sample(
     step_index: int,
     supervision_mode: str,
     include_student_attempt_for_teacher: bool,
+    include_canonicalized_feedback_in_additional_feedback: bool,
     max_reprompt_len: int,
     verifier_feedback_mode: str,
 ) -> tuple[str, bool, dict[str, Any]]:
@@ -774,7 +778,7 @@ def _build_legacy_prompt_for_sample(
         tool_output=tool_output,
         include_student_attempt_for_teacher=include_student_attempt_for_teacher,
     )
-    feedback_block = (
+    canonical_feedback_block = (
         feedback_packet.canonical_feedback.actionable_error_text
         or feedback_packet.canonical_feedback.normalized_text
     )
@@ -785,7 +789,9 @@ def _build_legacy_prompt_for_sample(
     verifier_feedback_block = ""
     if verifier_feedback_mode != _VERIFIER_FEEDBACK_NONE:
         verifier_feedback_block = _extract_verifier_feedback_block(sample)
-    combined_feedback_block = feedback_block
+    combined_feedback_block = (
+        canonical_feedback_block if include_canonicalized_feedback_in_additional_feedback else ""
+    )
     if verifier_feedback_block:
         if combined_feedback_block:
             combined_feedback_block = f"{combined_feedback_block}\n\n[VERIFIER_FEEDBACK]\n{verifier_feedback_block}"
@@ -823,6 +829,7 @@ def build_self_distillation_batch(
     turn_supervision_mode: str = _TURN_SUPERVISION_CURRENT,
     verifier_feedback_mode: str = _VERIFIER_FEEDBACK_NONE,
     legacy_distillation_gating_policy: str = _LEGACY_GATING_RESOLVED_ONLY,
+    include_canonicalized_feedback_in_additional_feedback: bool = False,
 ) -> dict[str, Any]:
     """Build deterministic teacher prompts and mask fields for verl hooks."""
     normalized_turn_supervision_mode = _normalize_turn_supervision_mode(turn_supervision_mode)
@@ -896,6 +903,9 @@ def build_self_distillation_batch(
                     turn_blocks=turn_blocks,
                     turn_tool_blocks=per_turn_tool_blocks,
                     include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+                    include_canonicalized_feedback_in_additional_feedback=(
+                        include_canonicalized_feedback_in_additional_feedback
+                    ),
                     max_reprompt_len=max_reprompt_len,
                     num_recent_raw_blocks=num_recent_raw_blocks,
                     verifier_feedback_mode=normalized_verifier_feedback_mode,
@@ -936,6 +946,9 @@ def build_self_distillation_batch(
             step_index=step_index,
             supervision_mode=normalized_turn_supervision_mode,
             include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+            include_canonicalized_feedback_in_additional_feedback=(
+                include_canonicalized_feedback_in_additional_feedback
+            ),
             max_reprompt_len=max_reprompt_len,
             verifier_feedback_mode=normalized_verifier_feedback_mode,
         )
