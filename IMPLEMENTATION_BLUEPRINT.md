@@ -736,6 +736,7 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-28 00:00 UTC] Updated this blueprint to mark D6 acceptance-run evidence as remaining gap: full monitored run artifacts (`acceptance_summary.md`) still not persisted under `outputs/integration/<run_label>` by automation.
 - [2026-03-04 00:00 UTC] Merged `step_sdpo_implementation_plan.md` into this blueprint and formalized D0..D6 deliverables, acceptance gate, contracts, and strict missing-items list (D6 artifacts still absent under `outputs/integration/`).
 - [2026-03-05 17:00 UTC] Corrected pilot + SDPO regressions: pilot reward now uses the real verifier-based `reward_fn` (no dummy scoring), SDPO reward is subtraction-based (fail-to-pass/pass-to-pass deltas plus terminal validity penalty), system prompt is injected for SDPO agent-loop messages and pilot teacher reprompts, and the Docker `search` tool now executes `grep -R` even after fallback without suppressing stderr.
+- [2026-03-05 21:10 UTC] Ran RFT/pilot/SDPO E2E checks on `tianhaowang-gpu0`: RFT job 817 (2 steps) trained step 0, skipped step 1 due to insufficient selected rows (checkpoint `global_step_1`); pilot job 819 (dynamic_middle + current_turn/all_turns) reward delta mean `-0.00625` (2/3/27); SDPO job 825 completed 2 steps (global_step=2, ~49m) with step-2 val reward mean@1 `-0.9891`, critic score mean `-0.8875`, prompt truncation `0.0`.
 
 ---
 
