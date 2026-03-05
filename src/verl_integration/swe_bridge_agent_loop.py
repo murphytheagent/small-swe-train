@@ -1070,6 +1070,51 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 if reached_limit:
                     loop_exit_reason = "response_length_budget_exhausted"
                     break
+
+            if (
+                not verification_metadata
+                and executor is not None
+                and attempt_budget_started_at is not None
+            ):
+                remaining_sec = _remaining_attempt_timeout_sec(
+                    started_at=attempt_budget_started_at,
+                    attempt_timeout_sec=self.attempt_timeout_sec,
+                )
+                if remaining_sec > 0:
+                    _set_stage("verify_submission")
+                    try:
+                        verification_metadata = await _await_with_attempt_timeout(
+                            asyncio.to_thread(
+                                _verify_terminal_submission,
+                                executor,
+                                task_sample,
+                                self.verifier_timeout_sec,
+                                final_submit_format_valid,
+                                final_response_text,
+                            ),
+                            task_id=task_context.task_id,
+                            stage=current_stage,
+                            started_at=attempt_budget_started_at,
+                            attempt_timeout_sec=self.attempt_timeout_sec,
+                        )
+                    except TimeoutError as exc:
+                        verification_metadata = {
+                            "submission_final_response": final_response_text,
+                            "fail_to_pass": _coerce_test_targets(task_sample.fail_to_pass),
+                            "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
+                            "fail_to_pass_results": {},
+                            "pass_to_pass_results": {},
+                            "fail_to_pass_verified": False,
+                            "pass_to_pass_verified": False,
+                            "verification_missing": False,
+                            "verification_error": f"verifier timeout: {exc}",
+                            "verification_feedback": "",
+                            "resolved": False,
+                        }
+                    if verification_metadata and trajectory_steps:
+                        metadata = trajectory_steps[-1].setdefault("metadata", {})
+                        if isinstance(metadata, dict):
+                            metadata.update(verification_metadata)
         except TimeoutError as exc:
             timeout_error = str(exc)
             loop_exit_reason = "attempt_timeout"
@@ -1089,51 +1134,6 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 current_stage,
                 exc,
             )
-
-        if (
-            not verification_metadata
-            and executor is not None
-            and attempt_budget_started_at is not None
-        ):
-            remaining_sec = _remaining_attempt_timeout_sec(
-                started_at=attempt_budget_started_at,
-                attempt_timeout_sec=self.attempt_timeout_sec,
-            )
-            if remaining_sec > 0:
-                _set_stage("verify_submission")
-                try:
-                    verification_metadata = await _await_with_attempt_timeout(
-                        asyncio.to_thread(
-                            _verify_terminal_submission,
-                            executor,
-                            task_sample,
-                            self.verifier_timeout_sec,
-                            final_submit_format_valid,
-                            final_response_text,
-                        ),
-                        task_id=task_context.task_id,
-                        stage=current_stage,
-                        started_at=attempt_budget_started_at,
-                        attempt_timeout_sec=self.attempt_timeout_sec,
-                    )
-                except TimeoutError as exc:
-                    verification_metadata = {
-                        "submission_final_response": final_response_text,
-                        "fail_to_pass": _coerce_test_targets(task_sample.fail_to_pass),
-                        "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
-                        "fail_to_pass_results": {},
-                        "pass_to_pass_results": {},
-                        "fail_to_pass_verified": False,
-                        "pass_to_pass_verified": False,
-                        "verification_missing": False,
-                        "verification_error": f"verifier timeout: {exc}",
-                        "verification_feedback": "",
-                        "resolved": False,
-                    }
-                if verification_metadata and trajectory_steps:
-                    metadata = trajectory_steps[-1].setdefault("metadata", {})
-                    if isinstance(metadata, dict):
-                        metadata.update(verification_metadata)
         finally:
             _set_stage("cleanup")
             try:
