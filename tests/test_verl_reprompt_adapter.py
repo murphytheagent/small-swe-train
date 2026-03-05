@@ -4,6 +4,8 @@ import pytest
 
 from verl_integration.reprompt_adapter import build_self_distillation_batch
 
+VERIFIER_HEADING = "Here is the final verifier response for the student's attempt:"
+
 
 def test_build_self_distillation_batch_contains_contract_blocks() -> None:
     samples = [
@@ -227,7 +229,7 @@ def test_turn_prompt_compaction_retains_protected_sections() -> None:
     prompt = batch["turn_teacher_prompts"][0][1]
     assert "ORIGINAL_PROBLEM_MUST_KEEP" in prompt
     assert "CURRENT_STUDENT_ATTEMPT_MUST_KEEP" in prompt
-    assert "[VERIFIER_FEEDBACK]" in prompt
+    assert VERIFIER_HEADING in prompt
     assert "VERIFIER_RESPONSE_MUST_KEEP" in prompt
     assert "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:" in prompt
     assert len(prompt.split()) <= 120
@@ -244,7 +246,7 @@ def test_legacy_prompt_compaction_retains_protected_sections() -> None:
                 "stderr": "",
                 "exit_code": 1,
             },
-            "verification_feedback": "VERIFIER_FEEDBACK_MUST_KEEP command still exits non-zero",
+            "verification_error": "VERIFIER_ERROR_MUST_KEEP command still exits non-zero",
             "resolved": False,
         }
     ]
@@ -259,8 +261,8 @@ def test_legacy_prompt_compaction_retains_protected_sections() -> None:
     prompt = batch["teacher_prompts"][0]
     assert "ORIGINAL_TASK_MUST_KEEP" in prompt
     assert "CURRENT_ATTEMPT_MUST_KEEP" in prompt
-    assert "[VERIFIER_FEEDBACK]" in prompt
-    assert "VERIFIER_FEEDBACK_MUST_KEEP" in prompt
+    assert VERIFIER_HEADING in prompt
+    assert "VERIFIER_ERROR_MUST_KEEP" in prompt
     assert "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:" in prompt
     assert len(prompt.split()) <= 120
     assert batch["prompt_truncated"] == [True]
@@ -689,8 +691,8 @@ def test_verifier_feedback_all_turns_injection() -> None:
     )
 
     assert len(batch["turn_teacher_prompts"][0]) == 2
-    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][0]
-    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][1]
+    assert VERIFIER_HEADING in batch["turn_teacher_prompts"][0][0]
+    assert VERIFIER_HEADING in batch["turn_teacher_prompts"][0][1]
 
 
 def test_verifier_feedback_all_turns_does_not_activate_turn_without_tool_feedback() -> None:
@@ -711,8 +713,8 @@ def test_verifier_feedback_all_turns_does_not_activate_turn_without_tool_feedbac
         verifier_feedback_mode="all_turns",
     )
 
-    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][0]
-    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][1]
+    assert VERIFIER_HEADING in batch["turn_teacher_prompts"][0][0]
+    assert VERIFIER_HEADING in batch["turn_teacher_prompts"][0][1]
     assert batch["turn_distillation_mask"][0] == [False, False]
     assert batch["self_distillation_mask"] == [False]
 
@@ -755,8 +757,8 @@ def test_verifier_feedback_final_turn_only_injection() -> None:
         verifier_feedback_mode="final_turn_only",
     )
 
-    assert "[VERIFIER_FEEDBACK]" not in batch["turn_teacher_prompts"][0][0]
-    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][1]
+    assert VERIFIER_HEADING not in batch["turn_teacher_prompts"][0][0]
+    assert VERIFIER_HEADING in batch["turn_teacher_prompts"][0][1]
 
 
 def test_verifier_feedback_final_turn_only_injection_next_turn_mode() -> None:
@@ -778,7 +780,7 @@ def test_verifier_feedback_final_turn_only_injection_next_turn_mode() -> None:
     )
 
     assert len(batch["turn_teacher_prompts"][0]) == 1
-    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][0]
+    assert VERIFIER_HEADING in batch["turn_teacher_prompts"][0][0]
 
 
 def test_submission_final_response_not_leaked_into_prompt() -> None:
@@ -832,7 +834,7 @@ def test_legacy_gating_policy_activation_matrix() -> None:
     assert always["self_distillation_mask"] == [True]
 
 
-def test_legacy_prompt_does_not_inject_status_only_verifier_block() -> None:
+def test_legacy_prompt_injects_status_only_verifier_block() -> None:
     samples = [
         {
             "prompt": "Fix issue",
@@ -848,7 +850,8 @@ def test_legacy_prompt_does_not_inject_status_only_verifier_block() -> None:
         legacy_distillation_gating_policy="feedback_present",
     )
 
-    assert "[VERIFIER_FEEDBACK]" not in batch["teacher_prompts"][0]
+    assert VERIFIER_HEADING in batch["teacher_prompts"][0]
+    assert "All required verifier tests passed." in batch["teacher_prompts"][0]
 
 
 def test_feedback_present_gating_respects_verifier_mode_and_payload_presence() -> None:
@@ -874,8 +877,47 @@ def test_feedback_present_gating_respects_verifier_mode_and_payload_presence() -
 
     assert verifier_disabled["self_distillation_mask"] == [False]
     assert verifier_enabled["self_distillation_mask"] == [True]
-    assert "[VERIFIER_FEEDBACK]" not in verifier_disabled["teacher_prompts"][0]
-    assert "[VERIFIER_FEEDBACK]" in verifier_enabled["teacher_prompts"][0]
+    assert VERIFIER_HEADING not in verifier_disabled["teacher_prompts"][0]
+    assert VERIFIER_HEADING in verifier_enabled["teacher_prompts"][0]
+
+
+@pytest.mark.parametrize(
+    ("sample_overrides", "expected_line"),
+    [
+        ({"final_turn_has_submit": False}, "The student did not make a final submit call."),
+        (
+            {"final_turn_has_submit": True, "final_submit_format_valid": False},
+            "The student made a final submit call, but its format was invalid.",
+        ),
+        (
+            {"final_turn_has_submit": True, "final_submit_format_valid": True},
+            "The student made a valid final submit call.",
+        ),
+    ],
+)
+def test_verifier_feedback_includes_explicit_submit_status(
+    sample_overrides: dict[str, bool],
+    expected_line: str,
+) -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "assistant_response": "attempt",
+            "resolved": False,
+            **sample_overrides,
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        verifier_feedback_mode="all_turns",
+        legacy_distillation_gating_policy="feedback_present",
+    )
+
+    prompt = batch["teacher_prompts"][0]
+    assert VERIFIER_HEADING in prompt
+    assert "Not all required verifier tests passed." in prompt
+    assert expected_line in prompt
 
 
 def test_current_turn_prompts_do_not_include_future_turn_blocks() -> None:

@@ -27,7 +27,7 @@ _VERIFIER_FEEDBACK_MODES = {
     _VERIFIER_FEEDBACK_FINAL_TURN_ONLY,
     _VERIFIER_FEEDBACK_ALL_TURNS,
 }
-_VERIFIER_FEEDBACK_MARKER = "[VERIFIER_FEEDBACK]"
+_VERIFIER_FEEDBACK_HEADING = "Here is the final verifier response for the student's attempt:"
 _LEGACY_GATING_RESOLVED_ONLY = "resolved_only"
 _LEGACY_GATING_FEEDBACK_PRESENT = "feedback_present"
 _LEGACY_GATING_ALWAYS = "always"
@@ -82,7 +82,7 @@ def _split_feedback_block(feedback_block: str) -> tuple[str, str]:
     rendered = str(feedback_block).strip()
     if not rendered:
         return "", ""
-    marker_index = rendered.find(_VERIFIER_FEEDBACK_MARKER)
+    marker_index = rendered.find(_VERIFIER_FEEDBACK_HEADING)
     if marker_index < 0:
         return rendered, ""
     feedback_main = rendered[:marker_index].rstrip()
@@ -204,7 +204,7 @@ def _compact_teacher_prompt(
     protected_token_floors = {
         "initial_prompt_block": min(_token_count(sections["initial_prompt_block"]), 24),
         "current_attempt_block": min(_token_count(sections["current_attempt_block"]), 16),
-        "verifier_feedback_block": min(_token_count(sections["verifier_feedback_block"]), 16),
+        "verifier_feedback_block": min(_token_count(sections["verifier_feedback_block"]), 32),
         "output_contract_block": min(_token_count(sections["output_contract_block"]), 32),
     }
     protected_changed = _reduce_sections_to_budget(
@@ -270,6 +270,24 @@ def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
         if normalized in _FALSE_STRINGS:
             return False
     return fallback
+
+
+def _coerce_optional_bool_flag(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, float):
+        return value != 0.0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+    return None
 
 
 def _coerce_optional_int(value: Any) -> int | None:
@@ -580,26 +598,40 @@ def _build_feedback_for_turn(
 def _extract_verifier_feedback_block(sample: Mapping[str, Any]) -> str:
     verification_feedback = str(sample.get("verification_feedback", "")).strip()
     verification_error = str(sample.get("verification_error", "")).strip()
-    if not verification_feedback and not verification_error:
-        return ""
-
-    status_lines: list[str] = []
-    if sample.get("resolved") is not None:
-        status_lines.append(f"resolved={_coerce_bool_flag(sample.get('resolved'), fallback=False)}")
-    if sample.get("verification_missing") is not None:
-        status_lines.append(
-            f"verification_missing={_coerce_bool_flag(sample.get('verification_missing'), fallback=False)}"
-        )
+    resolved = _coerce_optional_bool_flag(sample.get("resolved"))
+    verification_missing = _coerce_optional_bool_flag(sample.get("verification_missing"))
+    final_turn_has_submit = _coerce_optional_bool_flag(sample.get("final_turn_has_submit"))
+    final_submit_format_valid = _coerce_optional_bool_flag(sample.get("final_submit_format_valid"))
 
     sections: list[str] = []
-    if verification_feedback:
-        sections.append(f"feedback: {verification_feedback}")
+    if verification_missing is True:
+        sections.append("No verifier tests were configured for this task.")
+    elif verification_error:
+        sections.append(
+            "The final verifier did not complete cleanly, so the attempt is not verified as passing "
+            "all required tests."
+        )
+    elif resolved is True:
+        sections.append("All required verifier tests passed.")
+    elif resolved is False:
+        sections.append("Not all required verifier tests passed.")
+
+    if final_turn_has_submit is False:
+        sections.append("The student did not make a final submit call.")
+    elif final_turn_has_submit is True and final_submit_format_valid is False:
+        sections.append("The student made a final submit call, but its format was invalid.")
+    elif final_turn_has_submit is True and final_submit_format_valid is True:
+        sections.append("The student made a valid final submit call.")
+
     if verification_error:
-        sections.append(f"error: {verification_error}")
-    sections.extend(status_lines)
+        sections.append(f"Verifier error: {verification_error}")
+
+    if not sections and verification_feedback:
+        sections.append(f"The final verifier reported: {verification_feedback}")
+
     if not sections:
         return ""
-    return "\n".join(sections)
+    return f"{_VERIFIER_FEEDBACK_HEADING}\n" + "\n".join(sections)
 
 
 def _should_include_verifier_feedback(
@@ -632,11 +664,8 @@ def _has_feedback_signal(
 ) -> bool:
     if has_teacher_signal:
         return True
-    if verifier_feedback_mode != _VERIFIER_FEEDBACK_NONE:
-        if str(sample.get("verification_feedback", "")).strip():
-            return True
-        if str(sample.get("verification_error", "")).strip():
-            return True
+    if verifier_feedback_mode != _VERIFIER_FEEDBACK_NONE and _extract_verifier_feedback_block(sample):
+        return True
     tool_output = sample.get("tool_output")
     if isinstance(tool_output, Mapping):
         if str(tool_output.get("stdout", "")).strip() or str(tool_output.get("stderr", "")).strip():
@@ -728,9 +757,9 @@ def _build_turn_prompt(
     )
     if verifier_feedback_block:
         if combined_feedback_block:
-            combined_feedback_block = f"{combined_feedback_block}\n\n[VERIFIER_FEEDBACK]\n{verifier_feedback_block}"
+            combined_feedback_block = f"{combined_feedback_block}\n\n{verifier_feedback_block}"
         else:
-            combined_feedback_block = f"[VERIFIER_FEEDBACK]\n{verifier_feedback_block}"
+            combined_feedback_block = verifier_feedback_block
         has_teacher_signal = True
 
     truncated_prompt, was_truncated = _compact_teacher_prompt(
@@ -794,9 +823,9 @@ def _build_legacy_prompt_for_sample(
     )
     if verifier_feedback_block:
         if combined_feedback_block:
-            combined_feedback_block = f"{combined_feedback_block}\n\n[VERIFIER_FEEDBACK]\n{verifier_feedback_block}"
+            combined_feedback_block = f"{combined_feedback_block}\n\n{verifier_feedback_block}"
         else:
-            combined_feedback_block = f"[VERIFIER_FEEDBACK]\n{verifier_feedback_block}"
+            combined_feedback_block = verifier_feedback_block
 
     memory_blocks = build_teacher_memory_blocks(sample, current_turn_index=step_index)
     truncated_prompt, was_truncated = _compact_teacher_prompt(
