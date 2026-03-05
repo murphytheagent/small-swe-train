@@ -781,6 +781,10 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 1. Baseline defaults live in `configs/verl/sdpo_swe.yaml`.
 2. `scripts/run_sdpo.sh` is the authoritative launcher path and handles interpreter/import/runtime hygiene.
 3. CLI/Hydra overrides are run-scoped only.
+4. When dataset construction changes (for example system-prompt injection), refresh the SDPO parquet cache before running:
+   `python -m env.preload_sdpo_dataset --emit-split --force-refresh --cache-dir data/sdpo_task_cache`.
+5. Sequence caps must be set in `sdpo_swe.yaml` (including `actor_rollout_ref.model.override_config.max_position_embeddings`)
+   so vLLM inherits the same `max_model_len` without ad-hoc CLI overrides.
 
 ### 11.7 Source of Truth for Initial Checkpoint
 
