@@ -10,7 +10,7 @@ This note covers GPU-using scripts under `scripts/` and the resource requests th
 | `run_rft_onpolicy_rollout_proof.sh` | Variable (recommend 8) | `8 x GPUs` | `64G x GPUs` | `08:00:00` | Direct proof path, also keyed by GPU count. |
 | `run_sdpo.sh` | **8 required** | 64 | 512G | `24:00:00` | `configs/verl/sdpo_swe.yaml` is 8-GPU tuned (`fsdp_size=8`, rollout TP/DP layout). |
 | `run_sdft.sh` | **8 required** | 64 | 512G | `24:00:00` | Same base config and parallel layout as SDPO. |
-| `run_teacher_reprompt_pilot_slurm.sh` | **8 recommended** | 64 | 256G | `12:00:00` | Teacher-reprompt pilot inference is much faster with vLLM tensor parallel over all 8 GPUs. |
+| `run_teacher_reprompt_pilot_slurm.sh` | Variable (recommend 8) | `8 x GPUs` | `32G x GPUs` | `12:00:00` | Pilot ablations run with vLLM tensor parallel; set `PILOT_VLLM_TP_SIZE == requested GPUs`. |
 | `run_flash_attn_rebuild.sh` | 0 (default) | 8 | 128G | `03:00:00` | Build job defaults to no GPU request; override if your site requires one. |
 
 ## Shared Setup
@@ -261,59 +261,74 @@ Dry-run (prints resolved command including auto-overrides; does not start Ray):
 bash scripts/run_sdpo.sh --dry-run trainer.total_training_steps=1
 ```
 
-## 4) `scripts/run_teacher_reprompt_pilot_slurm.sh` (8 GPUs recommended)
+## 4) `scripts/run_teacher_reprompt_pilot_slurm.sh` (variable GPU count)
 
 This launcher starts a local vLLM OpenAI endpoint and runs
 `scripts/run_teacher_reprompt_pilot.py` against it. By default it maps
 `--tensor-parallel-size` to the Slurm GPU allocation (`SLURM_GPUS_ON_NODE`), so
-requesting `--gres=gpu:8` yields `tensor-parallel-size=8`.
+requesting `--gres=gpu:x` yields `tensor-parallel-size=x`. For ablations, set
+`PILOT_VLLM_TP_SIZE=${GPUS}` explicitly.
+If `PILOT_TEACHER_TURN_INDEX=-1` is provided, the launcher auto-normalizes to
+`--teacher-reprompt-turn-index-mode dynamic_middle`.
+
+RFT checkpoint selection is resolved via `run_teacher_reprompt_pilot.py` and
+applied everywhere in the launcher (`--model`, `--served-model-name`, and pilot
+`--rft-checkpoint`), overriding `PILOT_MODEL_PATH`/`PILOT_SERVED_MODEL` when set:
+- `--load-latest-rft-checkpoint` discovers the newest
+  `rft_runtime_loop_manifest.json` from `outputs/slurm/rft_runtime/*` (or
+  `outputs/rft_runtime/*`) and uses the resolved checkpoint as the vLLM model.
+- `--rft-manifest <path>` uses an explicit manifest.
+- `--rft-checkpoint <path-or-model-id>` directly overrides the model name.
+- If none of those flags are passed, the launcher falls back to
+  `PILOT_MODEL_PATH` (default `/data/scratch/$USER/models/Qwen3-4B-Instruct-2507`).
 
 Example submit:
 
 ```bash
+GPUS=2
+CPUS=$((GPUS * 16))
+MEM="$((GPUS * 48))G"
+
 sbatch \
   --partition=gpu \
   --nodes=1 \
-  --gres=gpu:8 \
-  --cpus-per-task=64 \
-  --mem=256G \
+  --gres="gpu:${GPUS}" \
+  --cpus-per-task="${CPUS}" \
+  --mem="${MEM}" \
   --time=12:00:00 \
   --job-name=teacher-reprompt-pilot \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
   --wrap "cd $PWD \
     && export PYTHON_BIN=$PWD/.venv/bin/python \
-    && export PILOT_MODEL_PATH=/data/scratch/\$USER/models/Qwen3-4B-Instruct-2507 \
-    && export PILOT_SERVED_MODEL=Qwen/Qwen3-4B-Instruct-2507 \
-    && bash scripts/run_teacher_reprompt_pilot_slurm.sh"
+    && export PILOT_VLLM_TP_SIZE=${GPUS} \
+    && export PILOT_TEACHER_TURN_INDEX_MODE=dynamic_middle \
+    && export PILOT_TEACHER_TURN_INDEX=-1 \
+    && export PILOT_TURN_SUPERVISION_MODE=current_turn \
+    && export PILOT_VERIFIER_FEEDBACK_MODE=all_turns \
+    && bash scripts/run_teacher_reprompt_pilot_slurm.sh --load-latest-rft-checkpoint"
 ```
 
 Dry-run:
 
 ```bash
+PILOT_VLLM_TP_SIZE=8 \
+PILOT_TEACHER_TURN_INDEX_MODE=dynamic_middle \
+PILOT_TEACHER_TURN_INDEX=-1 \
 bash scripts/run_teacher_reprompt_pilot_slurm.sh --dry-run
 ```
 
-## 4) `scripts/run_sdft.sh` (8 GPUs required)
+Explicit manifest example (pin a specific run):
 
 ```bash
-sbatch \
-  --partition=gpu \
-  --nodes=1 \
-  --gres=gpu:8 \
-  --cpus-per-task=64 \
-  --mem=512G \
-  --time=24:00:00 \
-  --job-name=small-swe-sdft \
-  --output="$PWD/outputs/slurm/%x-%j.out" \
-  --error="$PWD/outputs/slurm/%x-%j.err" \
-  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && export WANDB_MODE=offline && export EXPERIMENT=small-swe-sdft_job\$SLURM_JOB_ID_\$(date -u +%Y%m%dT%H%M%SZ) && bash scripts/run_sdft.sh <hydra-overrides>"
+bash scripts/run_teacher_reprompt_pilot_slurm.sh \
+  --rft-manifest "$PWD/outputs/slurm/rft_runtime/20260305T120000Z_job123456/rft_runtime_loop_manifest.json"
 ```
 
-Dry-run:
+Latest manifest auto-discovery example:
 
 ```bash
-bash scripts/run_sdft.sh --dry-run <hydra-overrides>
+bash scripts/run_teacher_reprompt_pilot_slurm.sh --load-latest-rft-checkpoint
 ```
 
 ## 5) `scripts/run_flash_attn_rebuild.sh` (resources handled by script)
@@ -359,3 +374,4 @@ bash scripts/run_flash_attn_rebuild.sh --dry-run
 - If your cluster policy differs, keep the GPU count contract intact:
   - `run_rft.sh`: `NPROC_PER_NODE == requested GPUs`
   - `run_rft_onpolicy_rollout_proof.sh`: `ON_POLICY_PROOF_NPROC_PER_NODE == requested GPUs`
+  - `run_teacher_reprompt_pilot_slurm.sh`: `PILOT_VLLM_TP_SIZE == requested GPUs`

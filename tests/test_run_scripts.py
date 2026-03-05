@@ -522,6 +522,58 @@ def test_teacher_reprompt_pilot_slurm_script_dry_run_succeeds_without_user_env()
     assert "--max-in-flight-tasks 64" in result.stdout
 
 
+def test_teacher_reprompt_pilot_slurm_script_dry_run_normalizes_negative_index_to_dynamic_middle() -> None:
+    result = _run_script(
+        "run_teacher_reprompt_pilot_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "8",
+            "PILOT_MODEL_PATH": "/tmp/nonexistent-model-ok-for-dry-run",
+            "PILOT_TEACHER_TURN_INDEX": "-1",
+            "PILOT_TEACHER_TURN_INDEX_MODE": "fixed",
+        },
+    )
+    assert "--teacher-reprompt-turn-index -1" in result.stdout
+    assert "--teacher-reprompt-turn-index-mode dynamic_middle" in result.stdout
+
+
+def test_teacher_reprompt_pilot_slurm_script_dry_run_load_latest_rft_checkpoint_overrides_model_everywhere(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    checkpoint_path = tmp_path / "resolved-rft-checkpoint"
+    checkpoint_path.mkdir(parents=True)
+
+    run_dir = (
+        repo_root
+        / "outputs"
+        / "slurm"
+        / "rft_runtime"
+        / f"pytest-teacher-pilot-manifest-{os.getpid()}-{time.time_ns()}"
+    )
+    manifest_path = run_dir / "rft_runtime_loop_manifest.json"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps({"final_model_path": str(checkpoint_path)}), encoding="utf-8")
+    future_epoch = 4_102_444_800  # 2100-01-01T00:00:00Z
+    os.utime(manifest_path, (future_epoch, future_epoch))
+
+    try:
+        result = _run_script(
+            "run_teacher_reprompt_pilot_slurm.sh",
+            "--load-latest-rft-checkpoint",
+            env_overrides={
+                "SLURM_GPUS_ON_NODE": "8",
+                "PILOT_MODEL_PATH": "/tmp/nonexistent-model-ok-for-dry-run",
+                "PILOT_SERVED_MODEL": "Qwen/Qwen3-4B-Instruct-2507",
+            },
+        )
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    assert f"--model {checkpoint_path}" in result.stdout
+    assert f"--served-model-name {checkpoint_path}" in result.stdout
+    assert f"--rft-checkpoint {checkpoint_path}" in result.stdout
+
+
 def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     result = _run_script("run_sdpo.sh", "data.train_batch_size=4")
     assert "-m verl_integration.main_ppo_entry" in result.stdout

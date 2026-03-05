@@ -2,10 +2,51 @@
 set -euo pipefail
 
 DRY_RUN=0
-if [[ "${1:-}" == "--dry-run" ]]; then
-  DRY_RUN=1
-  shift
-fi
+LOAD_LATEST_RFT_CHECKPOINT=0
+RFT_MANIFEST_PATH=""
+RFT_CHECKPOINT_OVERRIDE=""
+PILOT_EXTRA_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --load-latest-rft-checkpoint)
+      LOAD_LATEST_RFT_CHECKPOINT=1
+      shift
+      ;;
+    --rft-manifest)
+      if [[ $# -lt 2 ]]; then
+        echo "--rft-manifest requires a path argument." >&2
+        exit 1
+      fi
+      RFT_MANIFEST_PATH="$2"
+      shift 2
+      ;;
+    --rft-manifest=*)
+      RFT_MANIFEST_PATH="${1#*=}"
+      shift
+      ;;
+    --rft-checkpoint)
+      if [[ $# -lt 2 ]]; then
+        echo "--rft-checkpoint requires a path or model argument." >&2
+        exit 1
+      fi
+      RFT_CHECKPOINT_OVERRIDE="$2"
+      shift 2
+      ;;
+    --rft-checkpoint=*)
+      RFT_CHECKPOINT_OVERRIDE="${1#*=}"
+      shift
+      ;;
+    *)
+      PILOT_EXTRA_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -19,8 +60,45 @@ if [[ -z "${RUNTIME_USER}" ]]; then
   RUNTIME_USER="unknown"
 fi
 
+PYTHON_RESOLVER_BIN="${PYTHON_BIN}"
+if [[ ! -x "${PYTHON_RESOLVER_BIN}" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_RESOLVER_BIN="$(command -v python3)"
+  fi
+fi
+
+RESOLVED_RFT_CHECKPOINT=""
+if [[ -n "${RFT_CHECKPOINT_OVERRIDE}" || -n "${RFT_MANIFEST_PATH}" || "${LOAD_LATEST_RFT_CHECKPOINT}" -eq 1 ]]; then
+  RESOLVE_RFT_CMD=(
+    "${PYTHON_RESOLVER_BIN}" "${SCRIPT_DIR}/run_teacher_reprompt_pilot.py"
+    --print-resolved-rft-checkpoint
+  )
+  if [[ -n "${RFT_CHECKPOINT_OVERRIDE}" ]]; then
+    RESOLVE_RFT_CMD+=(--rft-checkpoint "${RFT_CHECKPOINT_OVERRIDE}")
+  fi
+  if [[ -n "${RFT_MANIFEST_PATH}" ]]; then
+    RESOLVE_RFT_CMD+=(--rft-manifest "${RFT_MANIFEST_PATH}")
+  fi
+  if [[ "${LOAD_LATEST_RFT_CHECKPOINT}" -eq 1 ]]; then
+    RESOLVE_RFT_CMD+=(--load-latest-rft-checkpoint)
+  fi
+  if ! RESOLVED_RFT_CHECKPOINT="$("${RESOLVE_RFT_CMD[@]}")"; then
+    echo "Unable to resolve pilot RFT checkpoint via run_teacher_reprompt_pilot.py." >&2
+    exit 1
+  fi
+  RESOLVED_RFT_CHECKPOINT="$(printf '%s' "${RESOLVED_RFT_CHECKPOINT}" | tr -d '\r')"
+  if [[ -z "${RESOLVED_RFT_CHECKPOINT}" ]]; then
+    echo "Resolved empty pilot RFT checkpoint." >&2
+    exit 1
+  fi
+fi
+
 MODEL_PATH="${PILOT_MODEL_PATH:-/data/scratch/${RUNTIME_USER}/models/Qwen3-4B-Instruct-2507}"
 SERVED_MODEL="${PILOT_SERVED_MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
+if [[ -n "${RESOLVED_RFT_CHECKPOINT}" ]]; then
+  MODEL_PATH="${RESOLVED_RFT_CHECKPOINT}"
+  SERVED_MODEL="${RESOLVED_RFT_CHECKPOINT}"
+fi
 
 if [[ "${DRY_RUN}" -eq 0 ]]; then
   if [[ ! -x "${PYTHON_BIN}" ]]; then
@@ -90,23 +168,61 @@ fi
 OUTPUT_DIR="${PROJECT_ROOT}/outputs/teacher_reprompt_pilot/job${SLURM_JOB_ID:-manual}"
 mkdir -p "${OUTPUT_DIR}"
 
+TURN_INDEX_MODE_RAW="${PILOT_TEACHER_TURN_INDEX_MODE:-fixed}"
+TURN_INDEX_MODE="$(printf '%s' "${TURN_INDEX_MODE_RAW}" | tr '[:upper:]' '[:lower:]')"
+TURN_INDEX_VALUE="${PILOT_TEACHER_TURN_INDEX:-}"
+
+case "${TURN_INDEX_MODE}" in
+  fixed|dynamic_middle) ;;
+  *)
+    echo "Invalid PILOT_TEACHER_TURN_INDEX_MODE=${TURN_INDEX_MODE_RAW}. Supported: fixed, dynamic_middle." >&2
+    exit 1
+    ;;
+esac
+
+if [[ -z "${TURN_INDEX_VALUE}" ]]; then
+  if [[ "${TURN_INDEX_MODE}" == "dynamic_middle" ]]; then
+    TURN_INDEX_VALUE="-1"
+  else
+    TURN_INDEX_VALUE="1"
+  fi
+fi
+
+if [[ "${TURN_INDEX_MODE}" == "fixed" ]]; then
+  if [[ "${TURN_INDEX_VALUE}" == "-1" ]]; then
+    echo "PILOT_TEACHER_TURN_INDEX=-1 is dynamic-middle sentinel; switching mode to dynamic_middle." >&2
+    TURN_INDEX_MODE="dynamic_middle"
+  elif [[ "${TURN_INDEX_VALUE}" =~ ^- ]]; then
+    echo "Invalid PILOT_TEACHER_TURN_INDEX=${TURN_INDEX_VALUE} for fixed mode; must be >= 0." >&2
+    exit 1
+  fi
+fi
+
+if [[ "${TURN_INDEX_MODE}" == "dynamic_middle" && "${TURN_INDEX_VALUE}" != "-1" ]]; then
+  echo "dynamic_middle mode requires PILOT_TEACHER_TURN_INDEX=-1; overriding provided value ${TURN_INDEX_VALUE}." >&2
+  TURN_INDEX_VALUE="-1"
+fi
+
 PILOT_CMD=(
   "${PYTHON_BIN}" scripts/run_teacher_reprompt_pilot.py
   --output-dir "${OUTPUT_DIR}"
   --task-batch-size "${PILOT_TASK_BATCH_SIZE:-128}"
   --attempts-per-task "${PILOT_ATTEMPTS_PER_TASK:-8}"
   --max-in-flight-tasks "${MAX_IN_FLIGHT_TASKS}"
-  --teacher-reprompt-turn-index "${PILOT_TEACHER_TURN_INDEX:-1}"
-  --teacher-reprompt-turn-index-mode "${PILOT_TEACHER_TURN_INDEX_MODE:-fixed}"
+  --teacher-reprompt-turn-index "${TURN_INDEX_VALUE}"
+  --teacher-reprompt-turn-index-mode "${TURN_INDEX_MODE}"
   --turn-supervision-mode "${PILOT_TURN_SUPERVISION_MODE:-current_turn}"
   --verifier-feedback-mode "${PILOT_VERIFIER_FEEDBACK_MODE:-all_turns}"
   --max-reprompt-len "${PILOT_MAX_REPROMPT_LEN:-12288}"
   --num-recent-raw-blocks "${PILOT_NUM_RECENT_RAW_BLOCKS:-3}"
 )
+if [[ -n "${RESOLVED_RFT_CHECKPOINT}" ]]; then
+  PILOT_CMD+=(--rft-checkpoint "${RESOLVED_RFT_CHECKPOINT}")
+fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   printf '%q ' "${VLLM_CMD[@]}"; printf '\n'
-  printf '%q ' "${PILOT_CMD[@]}"; printf '\n'
+  printf '%q ' "${PILOT_CMD[@]}" "${PILOT_EXTRA_ARGS[@]}"; printf '\n'
   exit 0
 fi
 
@@ -122,24 +238,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"${PYTHON_BIN}" - <<'PY'
-import sys
-import time
-from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+READY=0
+for _ in $(seq 1 300); do
+  if ! kill -0 "${VLLM_PID}" 2>/dev/null; then
+    echo "Local vLLM server process exited before becoming ready. Last vLLM log lines:" >&2
+    tail -n 120 "${VLLM_LOG}" >&2 || true
+    exit 1
+  fi
+  if curl -fsS --max-time 5 "http://127.0.0.1:8000/v1/models" >/dev/null 2>&1; then
+    READY=1
+    break
+  fi
+  sleep 2
+done
 
-url = "http://127.0.0.1:8000/v1/models"
-deadline = time.time() + 600
-while time.time() < deadline:
-    try:
-        with urlopen(url, timeout=5) as response:
-            if response.status == 200:
-                sys.exit(0)
-    except (URLError, HTTPError):
-        pass
-    time.sleep(2)
-print("Timed out waiting for local vLLM server readiness", file=sys.stderr)
-sys.exit(1)
-PY
+if [[ "${READY}" -ne 1 ]]; then
+  echo "Timed out waiting for local vLLM server readiness. Last vLLM log lines:" >&2
+  tail -n 120 "${VLLM_LOG}" >&2 || true
+  exit 1
+fi
 
-"${PILOT_CMD[@]}" "$@"
+"${PILOT_CMD[@]}" "${PILOT_EXTRA_ARGS[@]}"

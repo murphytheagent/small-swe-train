@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from prompts import build_onpolicy_initial_user_message
+
 _TOOL_RESPONSE_PREFIX = "<tool_response>"
 
 
@@ -79,7 +81,7 @@ def build_multiturn_messages(
     row_index: int,
 ) -> list[dict[str, str]]:
     """Build a multi-turn chat transcript from one selected RFT row."""
-    prompt = _as_text(row.get("prompt")).strip()
+    prompt = _build_canonical_initial_user_message(row)
     messages: list[dict[str, str]] = []
     if prompt:
         messages.append({"role": "user", "content": prompt})
@@ -102,6 +104,19 @@ def build_multiturn_messages(
             f"selected_rows[{row_index}] cannot be serialized: no assistant turns available."
         )
     return messages
+
+
+def _build_canonical_initial_user_message(row: Mapping[str, Any]) -> str:
+    problem_statement = _as_text(row.get("prompt")).strip()
+    if not problem_statement:
+        return ""
+    fail_to_pass = _resolve_test_targets_from_row(row, key="fail_to_pass")
+    pass_to_pass = _resolve_test_targets_from_row(row, key="pass_to_pass")
+    return build_onpolicy_initial_user_message(
+        problem_statement=problem_statement,
+        fail_to_pass=fail_to_pass,
+        pass_to_pass=pass_to_pass,
+    )
 
 
 def build_rollout_prompt_messages(

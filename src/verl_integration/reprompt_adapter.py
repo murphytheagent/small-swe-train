@@ -906,11 +906,9 @@ def build_self_distillation_batch(
                 else:
                     target_span = spans[current_turn_index + 1] if current_turn_index + 1 < len(spans) else None
                 target_mask = _build_mask_from_span(width=len(response_mask), span=target_span)
-                # Only distill a turn when its supervised span has an actual
-                # teacher-signal source (tool feedback or injected verifier text).
-                has_turn_feedback_signal = bool(per_turn_tool_blocks[current_turn_index]) or bool(
-                    metadata.get("verifier_feedback_injected", False)
-                )
+                # Turn-level SDPO stays feedback-gated even with verifier injection:
+                # only same-turn tool-response feedback activates distillation.
+                has_turn_feedback_signal = bool(per_turn_tool_blocks[current_turn_index])
                 is_active = any(target_mask) and has_turn_feedback_signal
 
                 sample_turn_teacher_prompts.append(prompt)

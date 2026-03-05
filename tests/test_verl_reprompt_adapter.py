@@ -644,6 +644,30 @@ def test_verifier_feedback_all_turns_injection() -> None:
     assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][1]
 
 
+def test_verifier_feedback_all_turns_does_not_activate_turn_without_tool_feedback() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1"],
+            "trajectory_assistant_turn_token_lengths": [2, 2],
+            "trajectory_turn_tool_response_blocks": [[], []],
+            "verification_feedback": "Verifier: future info available",
+        }
+    ]
+
+    batch = build_self_distillation_batch(
+        samples,
+        turn_supervision_mode="current_turn",
+        verifier_feedback_mode="all_turns",
+    )
+
+    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][0]
+    assert "[VERIFIER_FEEDBACK]" in batch["turn_teacher_prompts"][0][1]
+    assert batch["turn_distillation_mask"][0] == [False, False]
+    assert batch["self_distillation_mask"] == [False]
+
+
 def test_verifier_feedback_final_turn_only_injection() -> None:
     samples = [
         {
