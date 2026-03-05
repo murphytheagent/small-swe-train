@@ -171,6 +171,23 @@ def test_recent_raw_leakage_detector_flags_target_turn_marker() -> None:
     assert module._recent_raw_block_contains_target_turn(prompt, turn_index=1) is False
 
 
+def test_recent_raw_leakage_detector_ignores_prompt_when_end_tag_missing() -> None:
+    module = _load_script_module()
+    prompt = (
+        "[TRAJECTORY_BLOCK]\n"
+        "[RECENT_RAW_BLOCK]\n"
+        "[TURN_0]\n"
+        "[ASSISTANT]\n"
+        "safe\n\n"
+        "[CURRENT_ATTEMPT_BLOCK]\n"
+        "[TURN_2]\n"
+        "[ASSISTANT]\n"
+        "target-turn appears outside RECENT_RAW\n"
+    )
+
+    assert module._recent_raw_block_contains_target_turn(prompt, turn_index=2) is False
+
+
 def test_coerce_binary_mask_parses_string_values() -> None:
     module = _load_script_module()
 

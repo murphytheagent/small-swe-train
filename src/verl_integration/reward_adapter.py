@@ -425,23 +425,11 @@ def _row_looks_like_swe(non_tensor_batch: Mapping[str, Any], index: int) -> bool
         if key not in non_tensor_batch:
             continue
         value = _select_non_tensor(non_tensor_batch, key, index)
-        if _has_row_signal(value):
+        # Treat explicit SWE schema keys as authoritative even when payloads are empty.
+        # Empty trajectories still need strict _response_mask enforcement.
+        if value is not None:
             return True
     return False
-
-
-def _has_row_signal(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, bytes):
-        return bool(value.strip())
-    if isinstance(value, Mapping):
-        return bool(value)
-    if isinstance(value, Sequence):
-        return len(value) > 0
-    return bool(value)
 
 
 def _coerce_binary_mask(value: Any, *, length_hint: int | None = None) -> list[int]:

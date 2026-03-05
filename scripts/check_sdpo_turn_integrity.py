@@ -128,7 +128,7 @@ def _extract_tagged_block(
     end_marker = f"\n{end_tag}"
     end_index = text.find(end_marker, content_start)
     if end_index < 0:
-        return text[content_start:]
+        return ""
     return text[content_start:end_index]
 
 

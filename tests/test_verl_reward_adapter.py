@@ -197,6 +197,25 @@ def test_dataproto_to_rows_raises_when_swe_mask_is_missing() -> None:
         reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
 
 
+def test_dataproto_to_rows_requires_mask_for_empty_swe_payloads() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 12]],
+        },
+        non_tensor_batch={
+            "raw_prompt": [[{"role": "user", "content": "Fix task"}]],
+            "task_id": ["task-1"],
+            "image_name": ["img-1"],
+            # Empty rows still use SWE schema and must not silently fall back.
+            "trajectory_steps": [[]],
+            "trajectory_assistant_turns": [[]],
+        },
+    )
+
+    with pytest.raises(ValueError, match="_response_mask"):
+        reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+
 def test_dataproto_to_rows_keeps_non_swe_mask_fallback() -> None:
     batch = _FakeBatch(
         batch={
@@ -228,9 +247,9 @@ def test_dataproto_to_rows_requires_explicit_mask_only_for_swe_rows_in_mixed_bat
             "image_name": ["img-1", "img-2"],
             "trajectory_steps": [
                 [{"tool": "bash", "stdout": "", "stderr": "", "exit_code": 0}],
-                [],
+                None,
             ],
-            "trajectory_assistant_turns": [["turn-0"], []],
+            "trajectory_assistant_turns": [["turn-0"], None],
         },
     )
 
