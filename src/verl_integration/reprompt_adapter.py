@@ -906,7 +906,12 @@ def build_self_distillation_batch(
                 else:
                     target_span = spans[current_turn_index + 1] if current_turn_index + 1 < len(spans) else None
                 target_mask = _build_mask_from_span(width=len(response_mask), span=target_span)
-                is_active = any(target_mask)
+                # Only distill a turn when its supervised span has an actual
+                # teacher-signal source (tool feedback or injected verifier text).
+                has_turn_feedback_signal = bool(per_turn_tool_blocks[current_turn_index]) or bool(
+                    metadata.get("verifier_feedback_injected", False)
+                )
+                is_active = any(target_mask) and has_turn_feedback_signal
 
                 sample_turn_teacher_prompts.append(prompt)
                 sample_turn_response_masks.append(target_mask)

@@ -397,6 +397,30 @@ def test_turn_supervision_current_turn_exact_masks() -> None:
     ]
 
 
+def test_current_turn_requires_feedback_signal_for_turn_distillation() -> None:
+    samples = [
+        {
+            "prompt": "Fix issue",
+            "_response_mask": [1, 1, 0, 1, 1],
+            "trajectory_assistant_turns": ["turn-0", "turn-1"],
+            "trajectory_assistant_turn_token_lengths": [2, 2],
+            "trajectory_turn_tool_response_blocks": [
+                ["<tool_response>failing test</tool_response>"],
+                [],
+            ],
+        }
+    ]
+
+    batch = build_self_distillation_batch(samples, turn_supervision_mode="current_turn")
+
+    assert len(batch["turn_teacher_prompts"][0]) == 2
+    assert batch["turn_response_masks"][0] == [
+        [1, 1, 0, 0, 0],
+        [0, 0, 0, 1, 1],
+    ]
+    assert batch["turn_distillation_mask"][0] == [True, False]
+
+
 def test_current_turn_includes_first_and_last_turn_when_spans_exist() -> None:
     samples = [
         {
