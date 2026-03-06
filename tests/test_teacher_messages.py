@@ -8,7 +8,7 @@ def test_contract_current_turn_has_no_next_turn_language() -> None:
 
     lower_contract = contract.lower()
     assert "current turn" in lower_contract
-    assert "should have done differently" in lower_contract
+    assert "produce the best corrected action for the current turn." in lower_contract
     assert "next turn" not in lower_contract
 
 

@@ -25,8 +25,28 @@ _DEFAULT_SYSTEM_PROMPT_PREFIX = (
     "Inspect code, run tools, apply targeted patches, and validate behavior with tests.\n"
     "Return one assistant turn at a time and follow the tool-output contract exactly.\n"
 )
+_DEFAULT_SYSTEM_PROMPT_WORKFLOW = (
+    "First inspect surrounding code, related tests, and project configuration so you understand how "
+    "this repository is built and validated.\n"
+    "When practical, understand the root cause and broader context before editing, but do not wait "
+    "for complete understanding before making progress.\n"
+    "Make focused, minimal changes that address the issue instead of speculative churn.\n"
+    "Use the bash tool to run repository-specific validation commands. Do not assume a standard "
+    "test command; infer the correct commands from this codebase.\n"
+    "If applicable and feasible, verify your changes with the repository's own tests, build, lint, "
+    "or other validation procedures.\n"
+    "Start with the most specific relevant validation you can identify from the changed code, "
+    "nearby tests, stack traces, failing outputs, or naming conventions, then broaden to more "
+    "general checks as confidence grows.\n"
+    "If the exact targeted command is unclear or too expensive to find quickly, run a lightweight "
+    "related validation instead of skipping validation entirely.\n"
+    "If no relevant test exists, add one when appropriate and feasible while following existing "
+    "test patterns.\n"
+    "If the environment prevents validation, state that limitation briefly and make the best "
+    "supported patch you can.\n"
+)
 _SDPO_ROLLOUT_FOLLOWUP_USER_MESSAGE = (
-    "Return the next assistant turn now. Use bash/search/edit while still working. "
+    "Return the next assistant turn now. Use bash/read/search/apply_patch while still working. "
     "If solved, return one submit tool call with a concise final_response."
 )
 
@@ -104,7 +124,7 @@ def _tool_schema_line(tool_name: str, schema: Mapping[str, Any]) -> str:
 
 
 def _build_tool_schema_prompt() -> str:
-    lines = ["Tool arg schema (from TOOL_SCHEMAS):"]
+    lines = ["Tool arg schema:"]
     for tool_name in ALLOWED_TOOLS:
         schema = TOOL_SCHEMAS.get(tool_name)
         if isinstance(schema, Mapping):
@@ -162,13 +182,14 @@ def build_assistant_contract_prompt(
     lines: list[str] = []
     lines.append("Surround each tool action with a tool-call delimiter block.")
     lines.append(
-        f"Emit 1..{max_tool_calls} ordered tool calls: "
+        f"Emit ordered tool calls (max {max_tool_calls}): "
         f"{d.tool_call_start}{{\"tool\":\"...\",\"args\":{{...}}}}{d.tool_call_end}"
     )
     lines.append(
         "Every tool-call JSON object MUST include both keys: 'tool' and 'args'. "
         "'args' MUST be a JSON object (never put command/query/path at top level)."
     )
+    lines.append("Begin with a tool-call block. Do not emit prose before the first tool call.")
     lines.append(f"Allowed tools: {allowed_tools_text}.")
     lines.append(_build_required_args_prompt())
     lines.append("Do not invent tool names or wrapper labels.")
@@ -176,9 +197,6 @@ def build_assistant_contract_prompt(
         f"Terminal tool is '{terminal_tool}', you must end conversation with this tool, "
         "and if present it must be the only tool call."
     )
-    if include_repeat_warning:
-        lines.append("Do not repeat an identical previously-failed command without a new hypothesis.")
-
     if tool_schema_block:
         lines.append(tool_schema_block)
     if tool_examples_block:
@@ -198,7 +216,11 @@ def build_assistant_contract_prompt(
 
 def build_onpolicy_system_prompt() -> str:
     """Build the default system prompt for on-policy runtime rollouts."""
-    return _DEFAULT_SYSTEM_PROMPT_PREFIX + build_assistant_contract_prompt()
+    return (
+        _DEFAULT_SYSTEM_PROMPT_PREFIX
+        + _DEFAULT_SYSTEM_PROMPT_WORKFLOW
+        + build_assistant_contract_prompt()
+    )
 
 
 def build_sdpo_rollout_followup_user_message() -> str:

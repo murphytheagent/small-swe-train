@@ -9,7 +9,6 @@
     "tool_call_block_presence_rate_min": 0.98,
     "tool_call_count_valid_rate_min": 0.98,
     "submit_singleton_rule_rate_min": 0.995,
-    "thinking_delimiter_balance_rate_min": 0.995,
     "terminal_submission_rate_min": 0.98
   },
   "hard_block_rules": {

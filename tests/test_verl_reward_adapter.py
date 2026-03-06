@@ -66,6 +66,15 @@ def test_dataproto_to_rows_extracts_metadata_and_tool_outputs() -> None:
                 {"ground_truth": {"resolved": False}},
             ],
             "tool_response_blocks": [["<tool_response>{}</tool_response>"], []],
+            "fail_to_pass_failures": [
+                {
+                    "tests/test_bug.py::test_bugfix": {
+                        "returncode": 1,
+                        "command": ["python3", "-m", "pytest", "-q", "tests/test_bug.py::test_bugfix"],
+                    }
+                },
+                {},
+            ],
         },
     )
 
@@ -80,6 +89,19 @@ def test_dataproto_to_rows_extracts_metadata_and_tool_outputs() -> None:
     assert rows[0]["resolved"] is True
     assert rows[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
     assert rows[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
+    assert rows[0]["fail_to_pass_failures"] == {
+        "tests/test_bug.py::test_bugfix": {
+            "returncode": 1,
+            "command": ["python3", "-m", "pytest", "-q", "tests/test_bug.py::test_bugfix"],
+        }
+    }
+    assert rows[0]["fail_to_pass_failures"]["tests/test_bug.py::test_bugfix"]["command"] == [
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_bug.py::test_bugfix",
+    ]
     assert rows[0]["_response_mask"] == [1, 1, 1]
     assert rows[1]["prompt"] == "Fix task two"
     assert rows[1]["tool_output"] == {}

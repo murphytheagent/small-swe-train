@@ -2,9 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 from env.runtime_protocol import ToolResponse
-from verl_integration.submission_verifier import run_submission_verifier
+from env.shell_helpers import build_python_interpreter_resolver_shell
+from verl_integration.submission_verifier import (
+    _VERIFY_SCRIPT,
+    _build_verifier_shell_command,
+    run_submission_verifier,
+)
 
 
 @dataclass
@@ -121,6 +130,16 @@ def test_run_submission_verifier_uses_generous_group_timeout_budget() -> None:
     assert "SMALL_SWE_PER_TEST_TIMEOUT_SEC=180" in request.args["command"]
 
 
+def test_build_verifier_shell_command_uses_shared_python_resolution() -> None:
+    command = _build_verifier_shell_command(
+        tests_json='["tests/test_bug.py::test_fix"]',
+        per_test_timeout_sec=180,
+    )
+
+    assert build_python_interpreter_resolver_shell(var_name="pybin") in command
+    assert 'SMALL_SWE_PYBIN="${pybin}"' in command
+
+
 def test_run_submission_verifier_parses_large_json_payload_from_full_stdout() -> None:
     payload = {
         "results": {"tests/test_bug.py::test_fix": True},
@@ -150,3 +169,133 @@ def test_run_submission_verifier_parses_large_json_payload_from_full_stdout() ->
     assert result["resolved"] is True
     assert result["verification_error"] == ""
     assert result["fail_to_pass_results"] == {"tests/test_bug.py::test_fix": True}
+
+
+def test_run_submission_verifier_returns_group_diagnostics() -> None:
+    executor = _FakeExecutor(
+        responses=[
+            ToolResponse(
+                stdout=json.dumps(
+                    {
+                        "results": {
+                            "tests/test_bug.py::test_a": False,
+                            "tests/test_bug.py::test_b": True,
+                        },
+                        "executed": 2,
+                        "all_passed": False,
+                        "failures": {
+                            "tests/test_bug.py::test_a": {
+                                "returncode": 1,
+                                "command": [
+                                    "python3",
+                                    "-m",
+                                    "pytest",
+                                    "-q",
+                                    "tests/test_bug.py::test_a",
+                                ],
+                            }
+                        },
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+                stderr="container stderr",
+                exit_code=0,
+            ),
+            ToolResponse(
+                stdout=json.dumps(
+                    {
+                        "results": {"tests/test_ok.py::test_regression": True},
+                        "executed": 1,
+                        "all_passed": True,
+                        "failures": {},
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+                stderr="",
+                exit_code=0,
+            ),
+        ]
+    )
+
+    result = run_submission_verifier(
+        executor=executor,
+        fail_to_pass=["tests/test_bug.py::test_a", "tests/test_bug.py::test_b"],
+        pass_to_pass=["tests/test_ok.py::test_regression"],
+        verifier_timeout_sec=120,
+        final_response="patched",
+    )
+
+    assert result["fail_to_pass_results"] == {
+        "tests/test_bug.py::test_a": False,
+        "tests/test_bug.py::test_b": True,
+    }
+    assert result["fail_to_pass_failures"]["tests/test_bug.py::test_a"]["returncode"] == 1
+    assert result["fail_to_pass_stderr_tail"] == "container stderr"
+    assert result["fail_to_pass_failures"]["tests/test_bug.py::test_a"]["command"] == [
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_bug.py::test_a",
+    ]
+
+
+def test_verify_script_runs_all_tests_after_a_failure(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_ordering.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "def test_first_fail():",
+                "    assert False",
+                "",
+                "def test_second_pass():",
+                "    assert True",
+                "",
+                "def test_third_pass():",
+                "    assert True",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _VERIFY_SCRIPT],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "SMALL_SWE_TESTS_JSON": json.dumps(
+                [
+                    "test_ordering.py::test_first_fail",
+                    "test_ordering.py::test_second_pass",
+                    "test_ordering.py::test_third_pass",
+                ]
+            ),
+            "TASK_REPO_ROOT": str(tmp_path),
+            "SMALL_SWE_PYBIN": sys.executable,
+            "SMALL_SWE_PER_TEST_TIMEOUT_SEC": "30",
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout.strip())
+    assert payload["executed"] == 3
+    assert payload["results"] == {
+        "test_ordering.py::test_first_fail": False,
+        "test_ordering.py::test_second_pass": True,
+        "test_ordering.py::test_third_pass": True,
+    }
+    assert payload["all_passed"] is False
+    assert payload["failures"]["test_ordering.py::test_first_fail"]["command"] == [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "test_ordering.py::test_first_fail",
+    ]

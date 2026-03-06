@@ -7,6 +7,7 @@ import shlex
 from typing import Any, Mapping, Sequence
 
 from env.runtime_protocol import ToolRequest
+from env.shell_helpers import build_python_interpreter_resolver_shell
 
 _MIN_PER_TEST_TIMEOUT_SEC = 180
 _MAX_PER_TEST_TIMEOUT_SEC = 1800
@@ -26,7 +27,7 @@ results: dict[str, bool] = {}
 failures: dict[str, dict[str, object]] = {}
 executed = 0
 
-for index, raw_name in enumerate(tests):
+for raw_name in tests:
     test_name = str(raw_name).strip()
     if not test_name:
         continue
@@ -46,27 +47,15 @@ for index, raw_name in enumerate(tests):
         if not passed:
             failures[test_name] = {
                 "returncode": int(completed.returncode),
-                "stdout_tail": completed.stdout[-4000:],
-                "stderr_tail": completed.stderr[-4000:],
+                "command": list(command),
             }
-            for remainder in tests[index + 1 :]:
-                remainder_name = str(remainder).strip()
-                if remainder_name and remainder_name not in results:
-                    results[remainder_name] = False
-            break
     except subprocess.TimeoutExpired as exc:
         failures[test_name] = {
             "returncode": 124,
-            "stdout_tail": (exc.stdout or "")[-4000:],
-            "stderr_tail": (exc.stderr or "")[-4000:],
             "timed_out": True,
+            "command": list(command),
         }
         results[test_name] = False
-        for remainder in tests[index + 1 :]:
-            remainder_name = str(remainder).strip()
-            if remainder_name and remainder_name not in results:
-                results[remainder_name] = False
-        break
 
 all_passed = all(bool(value) for value in results.values()) if results else True
 print(
@@ -130,6 +119,10 @@ def run_submission_verifier(
         "pass_to_pass": list(pass_targets),
         "fail_to_pass_results": dict(fail_group["results"]),
         "pass_to_pass_results": dict(pass_group["results"]),
+        "fail_to_pass_failures": dict(fail_group.get("failures", {})),
+        "pass_to_pass_failures": dict(pass_group.get("failures", {})),
+        "fail_to_pass_stderr_tail": str(fail_group.get("stderr_tail", "")),
+        "pass_to_pass_stderr_tail": str(pass_group.get("stderr_tail", "")),
         "fail_to_pass_all_passed": bool(fail_passed),
         "pass_to_pass_all_passed": bool(pass_passed),
         "fail_to_pass_verified": bool(fail_passed),
@@ -160,7 +153,7 @@ def _verify_test_group(
             "all_passed": True,
             "executed": 0,
             "error": "",
-            "stdout_tail": "",
+            "failures": {},
             "stderr_tail": "",
         }
 
@@ -185,7 +178,6 @@ def _verify_test_group(
     response = executor.run(request)
 
     stdout_text = str(response.stdout or "")
-    stdout_tail = str(response.stdout or "")[-4000:]
     stderr_tail = str(response.stderr or "")[-4000:]
     if int(response.exit_code) != 0:
         return {
@@ -193,7 +185,7 @@ def _verify_test_group(
             "all_passed": False,
             "executed": 0,
             "error": f"verifier command failed with exit code {response.exit_code}",
-            "stdout_tail": stdout_tail,
+            "failures": {},
             "stderr_tail": stderr_tail,
         }
 
@@ -204,7 +196,7 @@ def _verify_test_group(
             "all_passed": False,
             "executed": 0,
             "error": "verifier command returned invalid JSON payload",
-            "stdout_tail": stdout_tail,
+            "failures": {},
             "stderr_tail": stderr_tail,
         }
 
@@ -220,19 +212,26 @@ def _verify_test_group(
     if result_map:
         all_passed = all(result_map.values())
 
+    raw_failures = payload.get("failures")
+    failure_map: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_failures, Mapping):
+        for name in tests:
+            raw_failure = raw_failures.get(name)
+            if isinstance(raw_failure, Mapping):
+                failure_map[name] = dict(raw_failure)
+
     return {
         "results": result_map,
         "all_passed": bool(all_passed),
         "executed": int(payload.get("executed", 0) or 0),
         "error": "",
-        "stdout_tail": stdout_tail,
         "stderr_tail": stderr_tail,
-        "failures": payload.get("failures", {}),
+        "failures": failure_map,
     }
 
 
 def _build_verifier_shell_command(*, tests_json: str, per_test_timeout_sec: int) -> str:
-    return (
+    prefix = (
         "set -eu; "
         'repo_root="${TASK_REPO_ROOT:-${SMALL_SWE_REPO_ROOT:-}}"; '
         'if [ -n "$repo_root" ] && [ ! -e "$repo_root" ]; then repo_root=""; fi; '
@@ -250,20 +249,15 @@ def _build_verifier_shell_command(*, tests_json: str, per_test_timeout_sec: int)
         'echo "Unable to locate task repository root." >&2; '
         "exit 2; "
         "fi; "
-        'pybin=""; '
-        'for candidate in python3 python; do '
-        'if command -v "${candidate}" >/dev/null 2>&1; then pybin="${candidate}"; break; fi; '
-        "done; "
-        'if [ -z "${pybin}" ]; then '
-        'echo "Python interpreter missing in task container." >&2; '
-        "exit 127; "
-        "fi; "
+    )
+    suffix = (
         f"SMALL_SWE_TESTS_JSON={shlex.quote(tests_json)} "
         f"SMALL_SWE_PER_TEST_TIMEOUT_SEC={int(max(per_test_timeout_sec, 1))} "
         'TASK_REPO_ROOT="${repo_root}" '
         'SMALL_SWE_PYBIN="${pybin}" '
         '"${pybin}" -'
     )
+    return prefix + build_python_interpreter_resolver_shell(var_name="pybin") + suffix
 
 
 def _resolve_group_timeout_sec(
@@ -357,6 +351,13 @@ def _build_feedback(
         lines.append(f"FAIL_TO_PASS verifier error: {fail_error}")
     if pass_error:
         lines.append(f"PASS_TO_PASS verifier error: {pass_error}")
+
+    fail_failed_tests = [name for name, passed in dict(fail_group.get("results", {})).items() if not passed]
+    pass_failed_tests = [name for name, passed in dict(pass_group.get("results", {})).items() if not passed]
+    if fail_failed_tests:
+        lines.append("FAIL_TO_PASS failing tests: " + ", ".join(fail_failed_tests[:5]))
+    if pass_failed_tests:
+        lines.append("PASS_TO_PASS failing tests: " + ", ".join(pass_failed_tests[:5]))
 
     fail_tail = str(fail_group.get("stderr_tail", "")).strip()
     pass_tail = str(pass_group.get("stderr_tail", "")).strip()

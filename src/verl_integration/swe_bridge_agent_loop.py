@@ -1274,6 +1274,10 @@ def _initial_verification_extra_fields(
         "verification_feedback": "",
         "fail_to_pass_results": {},
         "pass_to_pass_results": {},
+        "fail_to_pass_failures": {},
+        "pass_to_pass_failures": {},
+        "fail_to_pass_stderr_tail": "",
+        "pass_to_pass_stderr_tail": "",
         "fail_to_pass_all_passed": None,
         "pass_to_pass_all_passed": None,
         "fail_to_pass_verified": None,
@@ -1310,6 +1314,22 @@ def _apply_verification_metadata(
             "pass_to_pass_results": verification_metadata.get(
                 "pass_to_pass_results",
                 extra_fields.get("pass_to_pass_results", {}),
+            ),
+            "fail_to_pass_failures": verification_metadata.get(
+                "fail_to_pass_failures",
+                extra_fields.get("fail_to_pass_failures", {}),
+            ),
+            "pass_to_pass_failures": verification_metadata.get(
+                "pass_to_pass_failures",
+                extra_fields.get("pass_to_pass_failures", {}),
+            ),
+            "fail_to_pass_stderr_tail": verification_metadata.get(
+                "fail_to_pass_stderr_tail",
+                extra_fields.get("fail_to_pass_stderr_tail", ""),
+            ),
+            "pass_to_pass_stderr_tail": verification_metadata.get(
+                "pass_to_pass_stderr_tail",
+                extra_fields.get("pass_to_pass_stderr_tail", ""),
             ),
             "fail_to_pass_all_passed": verification_metadata.get(
                 "fail_to_pass_all_passed",
@@ -1370,6 +1390,10 @@ def _verify_terminal_submission(
             "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
             "fail_to_pass_results": {},
             "pass_to_pass_results": {},
+            "fail_to_pass_failures": {},
+            "pass_to_pass_failures": {},
+            "fail_to_pass_stderr_tail": "",
+            "pass_to_pass_stderr_tail": "",
             "fail_to_pass_verified": False,
             "pass_to_pass_verified": False,
             "verification_missing": False,

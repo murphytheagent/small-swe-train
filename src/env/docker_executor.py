@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import textwrap
 from typing import Any
 
 from .command_runner import CommandRunner, default_command_runner
@@ -10,10 +11,176 @@ from .runtime_protocol import ToolRequest, ToolResponse
 
 _BASH_TIMEOUT_MIN = 1
 _BASH_TIMEOUT_MAX = 7200
+_READ_LINE_NUMBER_MIN = 1
+_READ_LINE_NUMBER_MAX = 1_000_000_000
+_READ_MAX_LINES = 200
+_READ_MAX_STDOUT_CHARS = 8192
 _SEARCH_TOP_K_DEFAULT = 10
 _SEARCH_TOP_K_MIN = 1
 _SEARCH_TOP_K_MAX = 50
 _APPLY_PATCH_BEGIN_MARKER = "*** Begin Patch"
+_PREFER_BASH_LOGIN_SHELL_WRAPPER = (
+    'if command -v bash >/dev/null 2>&1; then '
+    'exec bash -lc "$1"; '
+    "else "
+    'exec sh -lc "$1"; '
+    "fi"
+)
+_PREFER_BASH_LOGIN_SHELL_ARG0 = "small-swe-shell"
+_PYTHON_INTERPRETER_DISCOVERY_SNIPPET = (
+    'pybin=""; '
+    'for candidate in python3 python; do '
+    'if command -v "$candidate" >/dev/null 2>&1; then pybin="$candidate"; break; fi; '
+    "done; "
+    'if [ -z "$pybin" ]; then '
+    'printf "Python interpreter missing in task container.\\n" >&2; '
+    "exit 127; "
+    "fi; "
+)
+_SEARCH_PYTHON_SCRIPT = textwrap.dedent(
+    """\
+    import os
+    import sys
+
+    CANDIDATES = ("/testbed", "/workspace", "/repo", "/app")
+
+
+    def discover_repo_root() -> str:
+        for value in (os.environ.get("TASK_REPO_ROOT"), os.environ.get("SMALL_SWE_REPO_ROOT")):
+            if value and os.path.exists(value):
+                return os.path.abspath(value)
+        for candidate in CANDIDATES:
+            if os.path.isdir(os.path.join(candidate, ".git")):
+                return candidate
+        for candidate in CANDIDATES:
+            if os.path.isdir(candidate):
+                return candidate
+        return ""
+
+
+    def resolve_search_path(path_hint: str, repo_root: str) -> tuple[str, str | None]:
+        fallback = repo_root or "."
+        if not path_hint:
+            return fallback, None
+        if os.path.isabs(path_hint):
+            candidate = path_hint
+        elif repo_root:
+            candidate = os.path.join(repo_root, path_hint)
+        else:
+            candidate = path_hint
+        if os.path.exists(candidate):
+            return candidate, None
+        return fallback, f"search path_hint not found: {path_hint}; falling back to {fallback}"
+
+
+    def iter_files(search_path: str):
+        if os.path.isfile(search_path):
+            yield search_path
+            return
+        for root, dirnames, filenames in os.walk(search_path):
+            dirnames.sort()
+            filenames.sort()
+            for filename in filenames:
+                yield os.path.join(root, filename)
+
+
+    query = os.environ["QUERY"]
+    top_k = int(os.environ["TOP_K"])
+    repo_root = discover_repo_root()
+    search_path, warning = resolve_search_path(os.environ.get("PATH_HINT", ""), repo_root)
+    if warning:
+        sys.stderr.write(warning + "\\n")
+
+    errors = 0
+    matches = 0
+    for file_path in iter_files(search_path):
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if query not in line:
+                        continue
+                    sys.stdout.write(f"{file_path}:{line_number}:{line.rstrip(chr(10))}\\n")
+                    matches += 1
+                    if matches >= top_k:
+                        raise SystemExit(errors)
+        except OSError as exc:
+            sys.stderr.write(f"{file_path}: {exc}\\n")
+            errors = 2
+
+    raise SystemExit(errors)
+    """
+)
+_READ_PYTHON_SCRIPT = textwrap.dedent(
+    """\
+    import os
+    import sys
+
+    CANDIDATES = ("/testbed", "/workspace", "/repo", "/app")
+
+
+    def discover_repo_root() -> str:
+        for value in (os.environ.get("TASK_REPO_ROOT"), os.environ.get("SMALL_SWE_REPO_ROOT")):
+            if value and os.path.exists(value):
+                return os.path.abspath(value)
+        for candidate in CANDIDATES:
+            if os.path.isdir(os.path.join(candidate, ".git")):
+                return candidate
+        for candidate in CANDIDATES:
+            if os.path.isdir(candidate):
+                return candidate
+        return ""
+
+
+    def resolve_read_path(path: str, repo_root: str) -> str:
+        if os.path.isabs(path):
+            return path
+        if repo_root:
+            return os.path.join(repo_root, path)
+        return path
+
+
+    target_path = os.environ["TARGET_PATH"]
+    read_path = resolve_read_path(target_path, discover_repo_root())
+    if not os.path.exists(read_path):
+        sys.stderr.write(f"read path not found: {target_path}\\n")
+        raise SystemExit(1)
+    if os.path.isdir(read_path):
+        sys.stderr.write(f"read target is a directory, not a file: {target_path}\\n")
+        raise SystemExit(1)
+    if not os.path.isfile(read_path):
+        sys.stderr.write(f"read target is not a regular file: {target_path}\\n")
+        raise SystemExit(1)
+
+    start_line = int(os.environ["START_LINE"]) if os.environ.get("START_LINE") else 1
+    end_line = int(os.environ["END_LINE"]) if os.environ.get("END_LINE") else None
+    max_lines = int(os.environ["MAX_LINES"])
+    max_chars = int(os.environ["MAX_CHARS"])
+
+    selected_line_count = 0
+    selected_char_count = 0
+    rendered_lines: list[str] = []
+    with open(read_path, "r", encoding="utf-8", errors="replace") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            if line_number < start_line:
+                continue
+            if end_line is not None and line_number > end_line:
+                break
+            rendered = f"{line_number:8d}\\t{raw_line.rstrip(chr(10)).rstrip(chr(13))}\\n"
+            selected_line_count += 1
+            selected_char_count += len(rendered)
+            if len(rendered_lines) < max_lines:
+                rendered_lines.append(rendered)
+
+    output = "".join(rendered_lines)
+    if len(output) > max_chars:
+        output = output[:max_chars]
+    sys.stdout.write(output)
+    if selected_line_count > max_lines or selected_char_count > max_chars:
+        sys.stderr.write(
+            f"read output truncated to {max_lines} lines or {max_chars} chars; narrow with start_line/end_line.\\n"
+        )
+    """
+)
 
 
 class DockerToolExecutor:
@@ -66,6 +233,8 @@ class DockerToolExecutor:
 
         if request.tool == "bash":
             return self._run_bash(request.args)
+        if request.tool == "read":
+            return self._run_read(request.args)
         if request.tool == "search":
             return self._run_search(request.args)
         if request.tool in {"apply_patch", "edit"}:
@@ -106,7 +275,16 @@ class DockerToolExecutor:
             docker_cmd.append("-i")
         if cwd is not None:
             docker_cmd.extend(["-w", cwd])
-        docker_cmd.extend([self._container_id, "sh", "-lc", command or ""])
+        docker_cmd.extend(
+            [
+                self._container_id,
+                "sh",
+                "-lc",
+                _PREFER_BASH_LOGIN_SHELL_WRAPPER,
+                _PREFER_BASH_LOGIN_SHELL_ARG0,
+                command or "",
+            ]
+        )
         return self._run_command(
             docker_cmd,
             timeout_sec=timeout_sec or self._tool_timeout_sec,
@@ -136,35 +314,7 @@ class DockerToolExecutor:
             return self._validation_error(errors)
 
         resolved_path = path_hint if path_hint else ""
-        search_cmd = (
-            'SEARCH_PATH="$PATH_HINT"; '
-            'if [ -z "$SEARCH_PATH" ]; then SEARCH_PATH=""; fi; '
-            'repo_root="${TASK_REPO_ROOT:-${SMALL_SWE_REPO_ROOT:-}}"; '
-            'if [ -n "$repo_root" ] && [ ! -e "$repo_root" ]; then repo_root=""; fi; '
-            'if [ -z "$repo_root" ]; then '
-            'for candidate in /testbed /workspace /repo /app; do '
-            'if [ -d "${candidate}/.git" ]; then repo_root="${candidate}"; break; fi; '
-            "done; "
-            'if [ -z "${repo_root}" ]; then '
-            'for candidate in /testbed /workspace /repo /app; do '
-            'if [ -d "${candidate}" ]; then repo_root="${candidate}"; break; fi; '
-            "done; "
-            "fi; "
-            "fi; "
-            'if [ -z "$SEARCH_PATH" ]; then '
-            'if [ -n "$repo_root" ]; then SEARCH_PATH="$repo_root"; else SEARCH_PATH="."; fi; '
-            'elif [ ! -e "$SEARCH_PATH" ]; then '
-            'if [ -n "$repo_root" ] && [ -e "$repo_root/$PATH_HINT" ]; then '
-            'SEARCH_PATH="$repo_root/$PATH_HINT"; '
-            "else "
-            'fallback="${repo_root:-.}"; '
-            'printf "search path_hint not found: %s; falling back to %s\\n" "$PATH_HINT" "$fallback" >&2; '
-            'SEARCH_PATH="$fallback"; '
-            "fi; "
-            "fi; "
-            'status=0; grep -R -n -F -m "$TOP_K" -- "$QUERY" "$SEARCH_PATH" || status=$?; '
-            'if [ "$status" -eq 0 ] || [ "$status" -eq 1 ]; then exit 0; fi; exit "$status"'
-        )
+        search_cmd = _build_container_python_shell(_SEARCH_PYTHON_SCRIPT)
         docker_cmd = [
             "docker",
             "exec",
@@ -178,6 +328,65 @@ class DockerToolExecutor:
             "sh",
             "-lc",
             search_cmd,
+        ]
+        return self._run_command(docker_cmd, timeout_sec=self._tool_timeout_sec)
+
+    def _run_read(self, args: dict[str, Any]) -> ToolResponse:
+        errors: list[str] = []
+        self._reject_unknown_args(
+            args,
+            allowed={"path", "start_line", "end_line"},
+            tool_name="read",
+            errors=errors,
+        )
+        path = self._require_non_empty_str(args, key="path", tool_name="read", errors=errors)
+        start_line = self._optional_int_in_range(
+            args,
+            key="start_line",
+            tool_name="read",
+            minimum=_READ_LINE_NUMBER_MIN,
+            maximum=_READ_LINE_NUMBER_MAX,
+            default=0,
+            errors=errors,
+        )
+        end_line = self._optional_int_in_range(
+            args,
+            key="end_line",
+            tool_name="read",
+            minimum=_READ_LINE_NUMBER_MIN,
+            maximum=_READ_LINE_NUMBER_MAX,
+            default=0,
+            errors=errors,
+        )
+        if (
+            start_line is not None
+            and end_line is not None
+            and start_line > 0
+            and end_line > 0
+            and end_line < start_line
+        ):
+            errors.append("Arg 'end_line': must be >= start_line")
+        if errors:
+            return self._validation_error(errors)
+
+        read_cmd = _build_container_python_shell(_READ_PYTHON_SCRIPT)
+        docker_cmd = [
+            "docker",
+            "exec",
+            "-e",
+            f"TARGET_PATH={path or ''}",
+            "-e",
+            f"START_LINE={start_line if start_line and start_line > 0 else ''}",
+            "-e",
+            f"END_LINE={end_line if end_line and end_line > 0 else ''}",
+            "-e",
+            f"MAX_LINES={_READ_MAX_LINES}",
+            "-e",
+            f"MAX_CHARS={_READ_MAX_STDOUT_CHARS}",
+            self._container_id,
+            "sh",
+            "-lc",
+            read_cmd,
         ]
         return self._run_command(docker_cmd, timeout_sec=self._tool_timeout_sec)
 
@@ -453,3 +662,14 @@ class DockerToolExecutor:
 def _is_codex_apply_patch_payload(patch: str) -> bool:
     stripped = patch.lstrip()
     return stripped.startswith(_APPLY_PATCH_BEGIN_MARKER)
+
+
+def _build_container_python_shell(script: str) -> str:
+    normalized_script = script if script.endswith("\n") else f"{script}\n"
+    return (
+        "set -eu; "
+        + _PYTHON_INTERPRETER_DISCOVERY_SNIPPET
+        + "exec \"$pybin\" - <<'PY'\n"
+        + normalized_script
+        + "PY"
+    )

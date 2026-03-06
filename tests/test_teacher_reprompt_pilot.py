@@ -69,6 +69,28 @@ def test_summarize_pair_rewards_computes_delta_statistics() -> None:
     assert summary["tied_count"] == 1
 
 
+def test_extract_format_metrics_uses_reward_fn_contract_payload() -> None:
+    pilot = _load_pilot_module()
+
+    metrics = pilot.extract_format_metrics(
+        reward_info={
+            "format_metrics": [
+                {
+                    "parse_valid_rate": 0.99,
+                    "thinking_delimiter_balance_rate": 0.75,
+                    "terminal_submission_rate": 0.98,
+                }
+            ]
+        }
+    )
+
+    assert metrics == {
+        "parse_valid_rate": 0.99,
+        "thinking_delimiter_balance_rate": 0.75,
+        "terminal_submission_rate": 0.98,
+    }
+
+
 def test_discover_latest_rft_manifest_prefers_newest_across_slurm_and_default_roots(tmp_path: Path) -> None:
     pilot = _load_pilot_module()
     local_manifest = tmp_path / "outputs" / "rft_runtime" / "run-local" / "rft_runtime_loop_manifest.json"
@@ -132,6 +154,108 @@ def test_main_print_resolved_rft_checkpoint_from_manifest(
     pilot.main()
     captured = capsys.readouterr()
     assert captured.out.strip() == str(checkpoint_path)
+
+
+def test_main_writes_pilot_summary_format_metric_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pilot = _load_pilot_module()
+    output_dir = tmp_path / "pilot-output"
+
+    monkeypatch.setattr(
+        pilot,
+        "resolve_on_policy_settings",
+        lambda **_: SimpleNamespace(runtime=SimpleNamespace(max_tool_calls_per_turn=4)),
+    )
+    monkeypatch.setattr(
+        pilot,
+        "load_vllm_turn_generator_config",
+        lambda: pilot.VLLMTurnGeneratorConfig(
+            base_url="http://127.0.0.1:8000/v1",
+            model_name="local-model",
+            request_timeout_sec=10,
+            max_tokens=128,
+            temperature=0.0,
+            top_p=1.0,
+            system_prompt="pilot-system",
+        ),
+    )
+    monkeypatch.setattr(pilot, "build_vllm_turn_generator", lambda *_args, **_kwargs: "turn-generator")
+
+    baseline_rows = [
+        {
+            "task_id": "task-1",
+            "attempt_index": 0,
+            "prompt": "Fix task",
+            "trajectory_assistant_turns": ["turn-0"],
+            "trajectory_history": ["turn-0"],
+            "verification_feedback": "",
+            "verification_error": "",
+            "resolved": False,
+        }
+    ]
+    teacher_rows = [
+        {
+            "task_id": "task-1",
+            "attempt_index": 0,
+            "prompt": "Fix task",
+            "trajectory_assistant_turns": ["turn-0"],
+            "trajectory_history": ["turn-0"],
+            "verification_feedback": "",
+            "verification_error": "",
+            "resolved": False,
+        }
+    ]
+    collector_payloads = [baseline_rows, teacher_rows]
+
+    class _FakeCollector:
+        def __init__(self, *, settings, turn_generator):
+            del settings, turn_generator
+            self._rows = collector_payloads.pop(0)
+
+        def collect_step(self, step_index: int):
+            del step_index
+            return list(self._rows)
+
+    reward_payloads = [
+        (
+            [0.0],
+            {"format_metrics": [{"parse_valid_rate": 0.99, "terminal_submission_rate": 0.99}]},
+        ),
+        (
+            [1.0],
+            {"format_metrics": [{"parse_valid_rate": 0.99, "terminal_submission_rate": 0.97}]},
+        ),
+    ]
+
+    def _fake_reward_fn(rows, *, max_tool_calls):
+        del rows, max_tool_calls
+        return reward_payloads.pop(0)
+
+    monkeypatch.setattr(pilot, "OnPolicyRolloutCollector", _FakeCollector)
+    monkeypatch.setattr(pilot, "reward_fn", _fake_reward_fn)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_teacher_reprompt_pilot.py",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    pilot.main()
+
+    summary = json.loads((output_dir / "pilot_summary.json").read_text(encoding="utf-8"))
+    assert summary["baseline_format_metrics"] == {
+        "parse_valid_rate": 0.99,
+        "terminal_submission_rate": 0.99,
+    }
+    assert summary["teacher_format_metrics"] == {
+        "parse_valid_rate": 0.99,
+        "terminal_submission_rate": 0.97,
+    }
 
 
 def test_resolve_teacher_reprompt_turn_index_supports_dynamic_middle() -> None:

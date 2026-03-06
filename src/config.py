@@ -17,7 +17,9 @@ from typing import Any, Mapping, Sequence
 import yaml
 
 from runtime_paths import (
+    DEFAULT_ON_POLICY_BAD_TASK_CACHE_RELATIVE_DIR,
     DEFAULT_SDPO_TASK_CACHE_RELATIVE_DIR,
+    resolve_on_policy_bad_task_cache_dir,
     resolve_sdpo_task_cache_dir,
 )
 from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME

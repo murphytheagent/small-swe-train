@@ -480,6 +480,22 @@ def summarize_pair_rewards(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     }
 
 
+def extract_format_metrics(*, reward_info: Mapping[str, Any]) -> dict[str, float]:
+    raw_blocks = reward_info.get("format_metrics")
+    if not isinstance(raw_blocks, Sequence) or isinstance(raw_blocks, (str, bytes)) or not raw_blocks:
+        raise ValueError("reward_fn info must include format_metrics[0].")
+    metrics_block = raw_blocks[0]
+    if not isinstance(metrics_block, Mapping):
+        raise ValueError("reward_fn info format_metrics[0] must be a mapping.")
+
+    metrics: dict[str, float] = {}
+    for key, value in metrics_block.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        metrics[str(key)] = float(value)
+    return metrics
+
+
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(dict(payload), ensure_ascii=True, sort_keys=True, indent=2) + "\n", encoding="utf-8")
@@ -677,6 +693,8 @@ def main() -> None:
         teacher_rows,
         max_tool_calls=settings.runtime.max_tool_calls_per_turn,
     )
+    baseline_format_metrics = extract_format_metrics(reward_info=_baseline_info)
+    teacher_format_metrics = extract_format_metrics(reward_info=_teacher_info)
     baseline_reward_map = {
         (str(row.get("task_id", "")).strip(), int(row.get("attempt_index", 0) or 0)): float(
             baseline_rewards[index]
@@ -732,6 +750,8 @@ def main() -> None:
         "baseline_row_count": len(baseline_rows),
         "teacher_row_count": len(teacher_rows),
         "missing_teacher_rows": int(sum(1 for item in pairs if item["teacher_row_missing"])),
+        "baseline_format_metrics": baseline_format_metrics,
+        "teacher_format_metrics": teacher_format_metrics,
         "reward_summary": summarize_pair_rewards(pairs),
     }
 

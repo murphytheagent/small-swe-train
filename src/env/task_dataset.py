@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 from dataclasses import dataclass
@@ -12,11 +13,15 @@ from typing import Any, Callable, Mapping, Sequence
 
 from config import OnPolicyDataConfig
 from prompts.runtime_messages import build_onpolicy_initial_user_message
+from runtime_paths import resolve_on_policy_bad_task_cache_dir
 
 
 DatasetLoader = Callable[[str, str], Sequence[Mapping[str, Any]]]
 SDPO_DEFAULT_MAX_PROBLEM_STATEMENT_CHARS = 4000
 SDPO_TASK_ROWS_SCHEMA_VERSION = 3
+ON_POLICY_BAD_TASK_CACHE_SCHEMA_VERSION = 1
+_BAD_TASK_CACHE_PATH_ENV = "SMALL_SWE_BAD_TASK_CACHE_PATH"
+_BAD_TASK_CACHE_DIR_ENV = "SMALL_SWE_BAD_TASK_CACHE_DIR"
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,13 @@ class TaskSample:
     fail_to_pass: Any
     pass_to_pass: Any
     raw: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class TaskPoolBuildResult:
+    tasks: tuple[TaskSample, ...]
+    scanned_rows: int
+    last_error: str = ""
 
 
 def _required_columns(config: OnPolicyDataConfig) -> tuple[str, str, str, str]:
@@ -80,6 +92,30 @@ def _load_hf_dataset_cached(dataset_id: str, split: str) -> Sequence[Mapping[str
 
 def load_hf_dataset(dataset_id: str, split: str) -> Sequence[Mapping[str, Any]]:
     return _load_hf_dataset_cached(dataset_id, split)
+
+
+def resolve_on_policy_bad_task_cache_path(
+    *,
+    config: OnPolicyDataConfig,
+    cache_dir: str | Path,
+) -> Path:
+    """Resolve deterministic bad-task cache path for one on-policy dataset config."""
+    config_fingerprint = {
+        "schema_version": ON_POLICY_BAD_TASK_CACHE_SCHEMA_VERSION,
+        "dataset_id": config.dataset_id,
+        "dataset_split": config.dataset_split,
+        "columns": {
+            "image_name": config.columns.image_name,
+            "problem_statement": config.columns.problem_statement,
+            "fail_to_pass": config.columns.fail_to_pass,
+            "pass_to_pass": config.columns.pass_to_pass,
+        },
+    }
+    encoded = json.dumps(config_fingerprint, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+    dataset_slug = _slugify_for_filename(config.dataset_id)
+    split_slug = _slugify_for_filename(config.dataset_split)
+    return Path(cache_dir) / f"bad_tasks_{dataset_slug}_{split_slug}_{digest}.json"
 
 
 def _coerce_task_row(
@@ -156,6 +192,198 @@ def _normalize_test_targets(value: Any) -> list[str]:
     return []
 
 
+def _coerce_name_set(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, Mapping):
+        return {
+            name
+            for name in (str(key).strip() for key in value.keys())
+            if name
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return {
+            name
+            for name in (str(item).strip() for item in value)
+            if name
+        }
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return set()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = None
+            if parsed is not None:
+                return _coerce_name_set(parsed)
+        return {stripped}
+    return set()
+
+
+def _resolve_bad_task_cache_path(config: OnPolicyDataConfig) -> Path | None:
+    explicit_path = str(os.environ.get(_BAD_TASK_CACHE_PATH_ENV, "")).strip()
+    if explicit_path:
+        return Path(explicit_path)
+
+    explicit_dir = str(os.environ.get(_BAD_TASK_CACHE_DIR_ENV, "")).strip()
+    if explicit_dir:
+        return resolve_on_policy_bad_task_cache_path(config=config, cache_dir=explicit_dir)
+
+    project_root = Path(__file__).resolve().parents[2]
+    default_cache_dir = resolve_on_policy_bad_task_cache_dir(project_root=project_root)
+    return resolve_on_policy_bad_task_cache_path(config=config, cache_dir=default_cache_dir)
+
+
+def _load_bad_task_filter(config: OnPolicyDataConfig) -> tuple[set[str], set[str]]:
+    cache_path = _resolve_bad_task_cache_path(config)
+    if cache_path is None or not cache_path.is_file():
+        return set(), set()
+
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Bad-task cache must be a mapping: {cache_path}")
+
+    bad_task_ids = _coerce_name_set(payload.get("bad_task_ids"))
+    bad_image_names = _coerce_name_set(payload.get("bad_image_names"))
+
+    records = payload.get("records")
+    if isinstance(records, Sequence) and not isinstance(records, (str, bytes)):
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            status = str(record.get("status", "")).strip().lower()
+            if status and status != "bad":
+                continue
+            task_id = str(record.get("task_id", "")).strip()
+            image_name = str(record.get("image_name", "")).strip()
+            if task_id:
+                bad_task_ids.add(task_id)
+            if image_name:
+                bad_image_names.add(image_name)
+
+    return bad_task_ids, bad_image_names
+
+
+def _bad_task_filter_fingerprint(config: OnPolicyDataConfig) -> dict[str, Any]:
+    bad_task_ids, bad_image_names = _load_bad_task_filter(config)
+    return _bad_task_filter_fingerprint_from_sets(
+        bad_task_ids=bad_task_ids,
+        bad_image_names=bad_image_names,
+    )
+
+
+def _bad_task_filter_fingerprint_from_sets(
+    *,
+    bad_task_ids: set[str],
+    bad_image_names: set[str],
+) -> dict[str, Any]:
+    payload = {
+        "bad_task_ids": sorted(bad_task_ids),
+        "bad_image_names": sorted(bad_image_names),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return {
+        "present": bool(bad_task_ids or bad_image_names),
+        "bad_task_count": len(bad_task_ids),
+        "bad_image_count": len(bad_image_names),
+        "digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
+    }
+
+
+def _is_cached_bad_task(
+    task: TaskSample,
+    *,
+    bad_task_ids: set[str],
+    bad_image_names: set[str],
+) -> bool:
+    return task.task_id in bad_task_ids or task.image_name in bad_image_names
+
+
+def _build_task_pool(
+    dataset: Sequence[Mapping[str, Any]],
+    *,
+    config: OnPolicyDataConfig,
+    bad_task_ids: set[str],
+    bad_image_names: set[str],
+) -> TaskPoolBuildResult:
+    if len(dataset) == 0:
+        raise ValueError(
+            f"Dataset {config.dataset_id!r}:{config.dataset_split!r} is empty."
+        )
+
+    _validate_required_columns(dataset, config=config)
+    tasks: list[TaskSample] = []
+    last_error: ValueError | None = None
+    for row_index in range(len(dataset)):
+        row = dataset[row_index]
+        if not isinstance(row, Mapping):
+            last_error = ValueError(f"Dataset row {row_index} is not a mapping.")
+            continue
+        try:
+            task = _coerce_task_row(row, config=config, row_index=row_index)
+        except ValueError as exc:
+            last_error = exc
+            continue
+        if _is_cached_bad_task(
+            task,
+            bad_task_ids=bad_task_ids,
+            bad_image_names=bad_image_names,
+        ):
+            continue
+        tasks.append(task)
+
+    return TaskPoolBuildResult(
+        tasks=tuple(tasks),
+        scanned_rows=len(dataset),
+        last_error=str(last_error) if last_error is not None else "",
+    )
+
+
+@functools.lru_cache(maxsize=4)
+def _load_hf_task_pool_cached(
+    config: OnPolicyDataConfig,
+    bad_task_filter_digest: str,
+) -> TaskPoolBuildResult:
+    del bad_task_filter_digest
+    dataset = load_hf_dataset(config.dataset_id, config.dataset_split)
+    bad_task_ids, bad_image_names = _load_bad_task_filter(config)
+    return _build_task_pool(
+        dataset,
+        config=config,
+        bad_task_ids=bad_task_ids,
+        bad_image_names=bad_image_names,
+    )
+
+
+def _load_task_pool(
+    *,
+    config: OnPolicyDataConfig,
+    dataset_loader: DatasetLoader | None = None,
+) -> TaskPoolBuildResult:
+    if dataset_loader is None or dataset_loader is load_hf_dataset:
+        bad_task_ids, bad_image_names = _load_bad_task_filter(config)
+        bad_filter_fingerprint = _bad_task_filter_fingerprint_from_sets(
+            bad_task_ids=bad_task_ids,
+            bad_image_names=bad_image_names,
+        )
+        return _load_hf_task_pool_cached(
+            config,
+            str(bad_filter_fingerprint["digest"]),
+        )
+
+    loader = dataset_loader
+    dataset = loader(config.dataset_id, config.dataset_split)
+    bad_task_ids, bad_image_names = _load_bad_task_filter(config)
+    return _build_task_pool(
+        dataset,
+        config=config,
+        bad_task_ids=bad_task_ids,
+        bad_image_names=bad_image_names,
+    )
+
+
 def _resolve_sdpo_data_source(config: OnPolicyDataConfig) -> str:
     dataset_id = str(config.dataset_id).strip()
     if dataset_id:
@@ -176,45 +404,22 @@ def load_task_batch(
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
 
-    loader = dataset_loader or load_hf_dataset
-    dataset = loader(config.dataset_id, config.dataset_split)
-
-    if len(dataset) == 0:
-        raise ValueError(
-            f"Dataset {config.dataset_id!r}:{config.dataset_split!r} is empty."
-        )
-
-    _validate_required_columns(dataset, config=config)
-
-    start = (step_index * batch_size) % len(dataset)
-    samples: list[TaskSample] = []
-    last_error: ValueError | None = None
-    scanned = 0
-
-    # Real SWE datasets may contain occasional malformed rows. Keep deterministic
-    # iteration but skip invalid samples until the requested batch is filled.
-    while len(samples) < batch_size and scanned < len(dataset):
-        row_index = (start + scanned) % len(dataset)
-        scanned += 1
-        row = dataset[row_index]
-        if not isinstance(row, Mapping):
-            last_error = ValueError(f"Dataset row {row_index} is not a mapping.")
-            continue
-        try:
-            samples.append(_coerce_task_row(row, config=config, row_index=row_index))
-        except ValueError as exc:
-            last_error = exc
-
-    if len(samples) < batch_size:
-        detail = str(last_error) if last_error is not None else "no valid rows found"
+    task_pool = _load_task_pool(config=config, dataset_loader=dataset_loader)
+    if len(task_pool.tasks) < batch_size:
+        detail = task_pool.last_error if task_pool.last_error else "no valid rows found"
         raise ValueError(
             f"Unable to build task batch of size {batch_size} from "
             f"{config.dataset_id!r}:{config.dataset_split!r}. "
-            f"Collected {len(samples)} valid rows after scanning {scanned}. "
+            f"Collected {len(task_pool.tasks)} valid rows after scanning {task_pool.scanned_rows}. "
             f"Last validation error: {detail}"
         )
 
-    return samples
+    start = (step_index * batch_size) % len(task_pool.tasks)
+    samples = [
+        task_pool.tasks[(start + offset) % len(task_pool.tasks)]
+        for offset in range(batch_size)
+    ]
+    return list(samples)
 
 
 def build_sdpo_task_rows(
@@ -224,30 +429,12 @@ def build_sdpo_task_rows(
     max_problem_statement_chars: int | None = SDPO_DEFAULT_MAX_PROBLEM_STATEMENT_CHARS,
 ) -> list[dict[str, Any]]:
     """Build SDPO prompt rows from the full on-policy task dataset split."""
-    loader = dataset_loader or load_hf_dataset
-    dataset = loader(config.dataset_id, config.dataset_split)
-    if len(dataset) == 0:
-        raise ValueError(
-            f"Dataset {config.dataset_id!r}:{config.dataset_split!r} is empty."
-        )
-    _validate_required_columns(dataset, config=config)
-
     prompt_char_limit = _coerce_sdpo_prompt_char_limit(max_problem_statement_chars)
     data_source = _resolve_sdpo_data_source(config)
+    task_pool = _load_task_pool(config=config, dataset_loader=dataset_loader)
     rows: list[dict[str, Any]] = []
-    last_error: ValueError | None = None
     skipped_for_prompt_length = 0
-    for row_index in range(len(dataset)):
-        row = dataset[row_index]
-        if not isinstance(row, Mapping):
-            last_error = ValueError(f"Dataset row {row_index} is not a mapping.")
-            continue
-        try:
-            task = _coerce_task_row(row, config=config, row_index=row_index)
-        except ValueError as exc:
-            last_error = exc
-            continue
-
+    for task in task_pool.tasks:
         if prompt_char_limit is not None and len(task.problem_statement) >= prompt_char_limit:
             skipped_for_prompt_length += 1
             continue
@@ -278,7 +465,7 @@ def build_sdpo_task_rows(
         )
 
     if not rows:
-        detail = str(last_error) if last_error is not None else "no valid rows found"
+        detail = task_pool.last_error if task_pool.last_error else "no valid rows found"
         if skipped_for_prompt_length > 0 and prompt_char_limit is not None:
             detail = (
                 f"all candidate rows exceeded prompt-length filter "
@@ -300,6 +487,7 @@ def resolve_sdpo_task_rows_cache_path(
 ) -> Path:
     """Resolve deterministic parquet cache path for SDPO prompt rows."""
     prompt_char_limit = _coerce_sdpo_prompt_char_limit(max_problem_statement_chars)
+    bad_task_filter = _bad_task_filter_fingerprint(config)
     config_fingerprint = {
         "schema_version": SDPO_TASK_ROWS_SCHEMA_VERSION,
         "dataset_id": config.dataset_id,
@@ -311,6 +499,7 @@ def resolve_sdpo_task_rows_cache_path(
             "pass_to_pass": config.columns.pass_to_pass,
         },
         "max_problem_statement_chars": prompt_char_limit,
+        "bad_task_filter": bad_task_filter,
     }
     encoded = json.dumps(config_fingerprint, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
@@ -402,6 +591,7 @@ def resolve_sdpo_task_split_cache_paths(
 ) -> tuple[Path, Path]:
     """Resolve deterministic train/eval parquet cache paths for SDPO task rows."""
     prompt_char_limit = _coerce_sdpo_prompt_char_limit(max_problem_statement_chars)
+    bad_task_filter = _bad_task_filter_fingerprint(config)
     split_fingerprint = {
         "schema_version": SDPO_TASK_ROWS_SCHEMA_VERSION,
         "dataset_id": config.dataset_id,
@@ -415,6 +605,7 @@ def resolve_sdpo_task_split_cache_paths(
         "eval_split_fraction": float(eval_split_fraction),
         "min_eval_rows": int(min_eval_rows),
         "max_problem_statement_chars": prompt_char_limit,
+        "bad_task_filter": bad_task_filter,
     }
     encoded = json.dumps(split_fingerprint, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]

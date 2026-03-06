@@ -10,9 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, TypedDict, cast, get_type_hints
 
-AllowedTool = Literal["bash", "search", "apply_patch", "submit"]
+AllowedTool = Literal["bash", "read", "search", "apply_patch", "submit"]
 # NOTE: AllowedTool above must remain a Literal for static type narrowing.
 BASH_TOOL_NAME: str = "bash"
+READ_TOOL_NAME: str = "read"
 SEARCH_TOOL_NAME: str = "search"
 APPLY_PATCH_TOOL_NAME: str = "apply_patch"
 TERMINAL_TOOL_NAME: str = "submit"
@@ -23,6 +24,7 @@ EDIT_TOOL_NAME: str = APPLY_PATCH_TOOL_NAME
 
 ALLOWED_TOOLS: tuple[str, ...] = (
     BASH_TOOL_NAME,
+    READ_TOOL_NAME,
     SEARCH_TOOL_NAME,
     APPLY_PATCH_TOOL_NAME,
     TERMINAL_TOOL_NAME,
@@ -39,6 +41,12 @@ class SearchArgs(TypedDict, total=False):
     query: str
     path_hint: str
     top_k: int
+
+
+class ReadArgs(TypedDict, total=False):
+    path: str
+    start_line: int
+    end_line: int
 
 
 class ApplyPatchArgs(TypedDict, total=False):
@@ -74,8 +82,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "prompt_example": {
             "tool": BASH_TOOL_NAME,
             "args": {
-                "command": "python -m pytest -q",
-                "cwd": "/workspace/project",
+                "command": "make test-target",
+                "cwd": ".",
                 "timeout_sec": 120,
             },
         },
@@ -83,6 +91,23 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "command": {"min_length": 1},
             "cwd": {"min_length": 1},
             "timeout_sec": {"minimum": 1, "maximum": 7200},
+        },
+    },
+    READ_TOOL_NAME: {
+        "source": ReadArgs,
+        "required": ["path"],
+        "prompt_example": {
+            "tool": READ_TOOL_NAME,
+            "args": {
+                "path": "src/app.py",
+                "start_line": 10,
+                "end_line": 40,
+            },
+        },
+        "constraints": {
+            "path": {"min_length": 1},
+            "start_line": {"minimum": 1},
+            "end_line": {"minimum": 1},
         },
     },
     SEARCH_TOOL_NAME: {
@@ -330,5 +355,11 @@ def validate_tool_call(tool_call: ToolCall) -> list[str]:
                 errors.append(f"Arg '{key}': must be >= {lo}")
             if hi is not None and value > hi:
                 errors.append(f"Arg '{key}': must be <= {hi}")
+
+    if tool_call.tool == READ_TOOL_NAME:
+        start_line = tool_call.args.get("start_line")
+        end_line = tool_call.args.get("end_line")
+        if isinstance(start_line, int) and isinstance(end_line, int) and end_line < start_line:
+            errors.append("Arg 'end_line': must be >= start_line")
 
     return errors

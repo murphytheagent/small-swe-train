@@ -21,6 +21,20 @@ class RolloutRowRequired(TypedDict):
 class RolloutRow(RolloutRowRequired, total=False):
     fail_to_pass: Any
     pass_to_pass: Any
+    fail_to_pass_results: Any
+    pass_to_pass_results: Any
+    fail_to_pass_failures: Any
+    pass_to_pass_failures: Any
+    fail_to_pass_stderr_tail: str
+    pass_to_pass_stderr_tail: str
+    fail_to_pass_all_passed: bool
+    pass_to_pass_all_passed: bool
+    fail_to_pass_verified: bool
+    pass_to_pass_verified: bool
+    verification_missing: bool
+    verification_error: str
+    verification_feedback: str
+    submission_final_response: str
     collector_error: str
     bridge_error: str
     timeout_error: str
