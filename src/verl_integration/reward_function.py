@@ -385,8 +385,11 @@ def reward_fn(
         reward_verification_missing.append(verification_missing)
 
         reward_value = 0.0
+        if has_expected_tests:
+            # Missing verifier signal on tasks with expected tests is treated as
+            # an unresolved verification failure, not a neutral baseline.
+            reward_value = -1.0 if verification_missing else 1.0
         if has_expected_tests and not verification_missing:
-            reward_value = 1.0
             if not fail_verified:
                 reward_value -= 1.0
             if not pass_verified:

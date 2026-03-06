@@ -297,6 +297,15 @@ HF model id behavior:
   `TRANSFORMERS_CACHE`, `VLLM_CACHE_ROOT`).
 - First launch is slower because weights must be fetched. For private repos,
   export `HF_TOKEN` before launch.
+- `Qwen/Qwen3.5-9B` currently requires a nightly `vllm` build in this repo
+  environment. Install it into the project venv before submitting:
+
+```bash
+uv pip install --python "$PWD/.venv/bin/python" --upgrade vllm \
+  --torch-backend=auto \
+  --extra-index-url https://wheels.vllm.ai/nightly
+```
+
 - Qwen instruct/chat models are the most drop-in-friendly case in the current
   call chain. The pilot uses standard OpenAI-compatible chat completions and
   accepts either assistant text or OpenAI `tool_calls`, but the model still
