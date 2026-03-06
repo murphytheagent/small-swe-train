@@ -1,8 +1,10 @@
 # Implementation Blueprint: step-SDPO on verl for SWE-Agent Training
 
-> **Status**: Active implementation snapshot — 2026-03-05 00:00 UTC
+> **Status**: Active implementation snapshot — 2026-03-06 12:18 UTC
 > **Scope**: Runtime-integrated step-SDPO on `lasgroup/SDPO` (a verl fork) with
 > on-policy RFT handoff and `swe_bridge_agent` multi-turn execution.
+> **Latest validated execution**: 2026-03-05 23:13 UTC — rerun chain `826` / `827` / `828` completed, with RFT step 1 trained and final checkpoint at `global_step=2`.
+> **Maintenance note**: PR #18 head advanced to `7ca5e8f` on 2026-03-06 08:21 UTC and remains review-active (not merge-ready yet).
 
 ---
 
