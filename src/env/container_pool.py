@@ -148,6 +148,11 @@ class BatchContainerPool:
             "small_swe.managed": "1",
             "small_swe.pool_name": self._name_prefix,
         }
+        runtime_user = os.environ.get("USER", "").strip()
+        if not runtime_user:
+            runtime_user = os.environ.get("LOGNAME", "").strip()
+        if runtime_user:
+            labels["small_swe.user"] = runtime_user
         slurm_job_id = os.environ.get("SLURM_JOB_ID", "").strip() or os.environ.get(
             "SLURM_JOBID", ""
         ).strip()

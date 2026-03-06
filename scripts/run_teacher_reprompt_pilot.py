@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import mean
@@ -202,6 +203,37 @@ def _coerce_message_list(value: Any) -> list[dict[str, str]]:
             continue
         rows.append({"role": role, "content": content})
     return rows
+
+
+def _resolve_temperature_override(*, env_var_name: str, fallback: float) -> float:
+    raw_value = os.environ.get(env_var_name)
+    if raw_value is None:
+        return float(fallback)
+    normalized = str(raw_value).strip()
+    if not normalized:
+        return float(fallback)
+    try:
+        return float(normalized)
+    except ValueError as exc:
+        raise ValueError(f"{env_var_name} must be a float if set; received {raw_value!r}.") from exc
+
+
+def _resolve_pilot_vllm_configs(
+    *,
+    base_config: VLLMTurnGeneratorConfig,
+) -> tuple[VLLMTurnGeneratorConfig, VLLMTurnGeneratorConfig]:
+    student_temperature = _resolve_temperature_override(
+        env_var_name="PILOT_STUDENT_TEMPERATURE",
+        fallback=base_config.temperature,
+    )
+    teacher_temperature = _resolve_temperature_override(
+        env_var_name="PILOT_TEACHER_TEMPERATURE",
+        fallback=base_config.temperature,
+    )
+    return (
+        replace(base_config, temperature=student_temperature),
+        replace(base_config, temperature=teacher_temperature),
+    )
 
 
 def _build_teacher_request_messages(
@@ -602,7 +634,8 @@ def main() -> None:
     vllm_config = load_vllm_turn_generator_config()
     if resolved_rft_checkpoint is not None:
         vllm_config = replace(vllm_config, model_name=resolved_rft_checkpoint)
-    student_turn_generator = build_vllm_turn_generator(vllm_config)
+    student_vllm_config, teacher_vllm_config = _resolve_pilot_vllm_configs(base_config=vllm_config)
+    student_turn_generator = build_vllm_turn_generator(student_vllm_config)
 
     baseline_collector = OnPolicyRolloutCollector(
         settings=settings,
@@ -614,7 +647,7 @@ def main() -> None:
     teacher_turn_generator = _build_teacher_turn_generator(
         baseline_trace_map=baseline_trace_map,
         fallback_turn_generator=student_turn_generator,
-        vllm_config=vllm_config,
+        vllm_config=teacher_vllm_config,
         teacher_reprompt_turn_index=int(args.teacher_reprompt_turn_index),
         teacher_reprompt_turn_index_mode=turn_index_mode,
         max_reprompt_len=int(args.max_reprompt_len),
@@ -692,6 +725,8 @@ def main() -> None:
         "max_reprompt_len": int(args.max_reprompt_len),
         "num_recent_raw_blocks": int(args.num_recent_raw_blocks),
         "vllm_model_name": str(vllm_config.model_name),
+        "student_temperature": float(student_vllm_config.temperature),
+        "teacher_temperature": float(teacher_vllm_config.temperature),
         "rft_checkpoint_override": resolved_rft_checkpoint,
         "rft_manifest_path": str(resolved_rft_manifest) if resolved_rft_manifest is not None else None,
         "baseline_row_count": len(baseline_rows),

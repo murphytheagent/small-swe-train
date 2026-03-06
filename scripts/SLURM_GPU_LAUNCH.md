@@ -298,14 +298,7 @@ HF model id behavior:
 - First launch is slower because weights must be fetched. For private repos,
   export `HF_TOKEN` before launch.
 - `Qwen/Qwen3.5-9B` currently requires a nightly `vllm` build in this repo
-  environment. Install it into the project venv before submitting:
-
-```bash
-uv pip install --python "$PWD/.venv/bin/python" --upgrade vllm \
-  --torch-backend=auto \
-  --extra-index-url https://wheels.vllm.ai/nightly
-```
-
+  environment: `uv pip install --python "$PWD/.venv/bin/python" --upgrade vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly`
 - Qwen instruct/chat models are the most drop-in-friendly case in the current
   call chain. The pilot uses standard OpenAI-compatible chat completions and
   accepts either assistant text or OpenAI `tool_calls`, but the model still
@@ -313,12 +306,50 @@ uv pip install --python "$PWD/.venv/bin/python" --upgrade vllm \
   output contract. Base models and models that need extra vLLM flags are not
   guaranteed drop-in.
 
-Example submit:
+VRAM control knobs for the pilot launcher:
+- `PILOT_VLLM_TP_SIZE` controls vLLM tensor parallel size. Increasing it spreads
+  model weights and KV cache across more GPUs, reducing per-GPU VRAM pressure.
+- `PILOT_GPU_MEMORY_UTILIZATION` passes through to vLLM
+  `--gpu-memory-utilization` (default `0.90`). Lower it to leave more headroom
+  for graph capture, NCCL, and other CUDA allocations.
+- `PILOT_MAX_MODEL_LEN` passes through to vLLM `--max-model-len` (default
+  `32768`). Lowering it is the highest-leverage way to reduce KV-cache usage.
+- `PILOT_VLLM_KV_CACHE_MEMORY_BYTES` sets an explicit KV-cache memory budget.
+  Use this when you want a hard cap instead of the `gpu-memory-utilization`
+  heuristic.
+- `PILOT_VLLM_NUM_GPU_BLOCKS_OVERRIDE` manually overrides vLLM's GPU block
+  count. This is an advanced escape hatch for tight fits and debugging, not the
+  first knob to reach for.
+
+Sampling knobs for the pilot launcher:
+- `PILOT_STUDENT_TEMPERATURE` overrides the baseline/student rollout sampling
+  temperature.
+- `PILOT_TEACHER_TEMPERATURE` overrides the teacher-reprompt sampling
+  temperature.
+- If either is unset, that side falls back to the shared
+  `SMALL_SWE_VLLM_TEMPERATURE` override or the default
+  `rft_runtime.vllm.temperature` config value.
+
+Practical order for OOM reduction:
+1. Lower `PILOT_MAX_MODEL_LEN`.
+2. Lower `PILOT_GPU_MEMORY_UTILIZATION`.
+3. Increase `PILOT_VLLM_TP_SIZE` if you can allocate more GPUs.
+4. Only then try `PILOT_VLLM_KV_CACHE_MEMORY_BYTES` or
+   `PILOT_VLLM_NUM_GPU_BLOCKS_OVERRIDE`.
+
+Use only Slurm submissions for this launcher. The two canonical launch patterns
+below are the intended ones. For RFT artifacts, swap `RFT_SELECTOR` between
+`--load-latest-rft-checkpoint`, `--rft-manifest "$MANIFEST"`, and
+`--rft-checkpoint "$CHECKPOINT"` as needed. For dry-run validation, add
+`--dry-run` at the end of the wrapped launcher command.
+
+Comprehensive RFT-checkpoint submit:
 
 ```bash
 GPUS=2
 CPUS=$((GPUS * 16))
 MEM="$((GPUS * 48))G"
+RFT_SELECTOR="--load-latest-rft-checkpoint"
 
 sbatch \
   --partition=gpu \
@@ -333,39 +364,21 @@ sbatch \
   --wrap "cd $PWD \
     && export PYTHON_BIN=$PWD/.venv/bin/python \
     && export PILOT_VLLM_TP_SIZE=${GPUS} \
+    && export PILOT_STUDENT_TEMPERATURE=0.6 \
+    && export PILOT_TEACHER_TEMPERATURE=0.6 \
     && export PILOT_TEACHER_TURN_INDEX_MODE=dynamic_middle \
     && export PILOT_TEACHER_TURN_INDEX=-1 \
     && export PILOT_TURN_SUPERVISION_MODE=current_turn \
     && export PILOT_VERIFIER_FEEDBACK_MODE=all_turns \
-    && bash scripts/run_teacher_reprompt_pilot_slurm.sh --load-latest-rft-checkpoint"
+    && export PILOT_MAX_MODEL_LEN=32768 \
+    && export PILOT_GPU_MEMORY_UTILIZATION=0.90 \
+    && bash scripts/run_teacher_reprompt_pilot_slurm.sh ${RFT_SELECTOR}"
 ```
 
-Dry-run:
+Comprehensive HF-model submit:
 
 ```bash
-PILOT_VLLM_TP_SIZE=8 \
-PILOT_TEACHER_TURN_INDEX_MODE=dynamic_middle \
-PILOT_TEACHER_TURN_INDEX=-1 \
-bash scripts/run_teacher_reprompt_pilot_slurm.sh --dry-run
-```
-
-Explicit manifest example (pin a specific run):
-
-```bash
-bash scripts/run_teacher_reprompt_pilot_slurm.sh \
-  --rft-manifest "$PWD/outputs/slurm/rft_runtime/20260305T120000Z_job123456/rft_runtime_loop_manifest.json"
-```
-
-Latest manifest auto-discovery example:
-
-```bash
-bash scripts/run_teacher_reprompt_pilot_slurm.sh --load-latest-rft-checkpoint
-```
-
-Arbitrary HF model example:
-
-```bash
-GPUS=2
+GPUS=8
 CPUS=$((GPUS * 16))
 MEM="$((GPUS * 48))G"
 
@@ -384,17 +397,16 @@ sbatch \
     && export PILOT_VLLM_TP_SIZE=${GPUS} \
     && export PILOT_MODEL_PATH=Qwen/Qwen3.5-9B \
     && export PILOT_SERVED_MODEL=Qwen/Qwen3.5-9B \
+    && export PILOT_STUDENT_TEMPERATURE=0.6 \
+    && export PILOT_TEACHER_TEMPERATURE=0.3 \
     && export HF_TOKEN=\${HF_TOKEN:-} \
+    && export PILOT_TEACHER_TURN_INDEX_MODE=dynamic_middle \
+    && export PILOT_TEACHER_TURN_INDEX=-1 \
+    && export PILOT_TURN_SUPERVISION_MODE=current_turn \
+    && export PILOT_VERIFIER_FEEDBACK_MODE=all_turns \
+    && export PILOT_MAX_MODEL_LEN=16384 \
+    && export PILOT_GPU_MEMORY_UTILIZATION=0.75 \
     && bash scripts/run_teacher_reprompt_pilot_slurm.sh"
-```
-
-Manual launch example with a Hub model id:
-
-```bash
-PILOT_VLLM_TP_SIZE=2 \
-PILOT_MODEL_PATH=Qwen/Qwen3.5-9B \
-PILOT_SERVED_MODEL=Qwen/Qwen3.5-9B \
-bash scripts/run_teacher_reprompt_pilot_slurm.sh
 ```
 
 ## 5) `scripts/run_flash_attn_rebuild.sh` (resources handled by script)

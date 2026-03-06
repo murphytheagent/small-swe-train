@@ -176,6 +176,46 @@ def _write_docker_cleanup_probe_stub(tmp_path: Path) -> Path:
     return stub_path
 
 
+def _write_pilot_docker_cleanup_probe_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "docker"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "log_file=\"${FAKE_DOCKER_LOG_FILE:?}\"\n"
+        "cmd=\"$*\"\n"
+        "printf '%s\\n' \"${cmd}\" >>\"${log_file}\"\n"
+        "if [[ \"${1:-}\" == \"ps\" ]]; then\n"
+        "  if [[ \"${cmd}\" == *\"label=small_swe.pool_name=onpolicy-task\"* ]]; then\n"
+        "    printf '%s\\n' 'live-container 987654'\n"
+        "    printf '%s\\n' 'other-live-container 555555'\n"
+        "    printf '%s\\n' 'stale-container-1 4242'\n"
+        "    printf '%s\\n' 'stale-container-2 4243'\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"rm\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
+def _write_squeue_probe_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "squeue"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' '987654'\n"
+        "printf '%s\\n' '555555'\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
 def _write_python_wandb_repair_probe_stub(tmp_path: Path) -> Path:
     stub_path = tmp_path / "python-wandb-repair-probe.sh"
     stub_path.write_text(
@@ -693,6 +733,59 @@ def test_teacher_reprompt_pilot_slurm_script_non_dry_run_accepts_hf_repo_id_via_
     captured_args = capture_path.read_text(encoding="utf-8").splitlines()
     assert any(item.endswith("scripts/run_teacher_reprompt_pilot.py") for item in captured_args)
     assert "--rft-checkpoint" not in captured_args
+
+
+def test_teacher_reprompt_pilot_slurm_script_non_dry_run_preflight_sweeps_stale_managed_containers(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_teacher_reprompt_pilot_slurm.sh"
+    python_stub = _write_teacher_pilot_python_stub(tmp_path)
+    _write_pilot_docker_cleanup_probe_stub(tmp_path)
+    _write_squeue_probe_stub(tmp_path)
+    capture_path = tmp_path / "teacher-pilot-args.txt"
+    docker_log_path = tmp_path / "docker-invocations.log"
+    output_dir = repo_root / "outputs" / "teacher_reprompt_pilot" / "job987654"
+    vllm_log = repo_root / "outputs" / "slurm" / "teacher-pilot-vllm-987654.log"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{tmp_path}{os.pathsep}{env.get('PATH', '')}",
+            "FAKE_DOCKER_LOG_FILE": str(docker_log_path),
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "SLURM_JOB_ID": "987654",
+            "TEACHER_PILOT_CAPTURE": str(capture_path),
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+            "PILOT_MODEL_PATH": "Qwen/Qwen3.5-9B",
+            "PILOT_SERVED_MODEL": "Qwen/Qwen3.5-9B",
+        }
+    )
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script_path)],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=30,
+        )
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        if vllm_log.exists():
+            vllm_log.unlink()
+
+    assert result.returncode == 0, result.stderr
+    docker_invocations = docker_log_path.read_text(encoding="utf-8").splitlines()
+    assert any("label=small_swe.pool_name=onpolicy-task" in line for line in docker_invocations)
+    assert any("rm -f stale-container-1 stale-container-2" in line for line in docker_invocations)
+    assert not any("rm -f live-container" in line for line in docker_invocations)
 
 
 def test_teacher_reprompt_pilot_slurm_script_non_dry_run_rejects_hf_repo_id_via_rft_checkpoint(

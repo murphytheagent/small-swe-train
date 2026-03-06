@@ -185,6 +185,49 @@ def test_resolve_teacher_reprompt_turn_index_supports_dynamic_middle() -> None:
     )
 
 
+def test_resolve_pilot_vllm_configs_supports_distinct_temperature_env_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pilot = _load_pilot_module()
+    base_config = pilot.VLLMTurnGeneratorConfig(
+        base_url="http://127.0.0.1:8000/v1",
+        model_name="local-model",
+        request_timeout_sec=10,
+        max_tokens=128,
+        temperature=0.6,
+        top_p=1.0,
+        system_prompt="pilot-system",
+    )
+    monkeypatch.setenv("PILOT_STUDENT_TEMPERATURE", "0.15")
+    monkeypatch.setenv("PILOT_TEACHER_TEMPERATURE", "0.85")
+
+    student_config, teacher_config = pilot._resolve_pilot_vllm_configs(base_config=base_config)
+
+    assert student_config.temperature == 0.15
+    assert teacher_config.temperature == 0.85
+    assert student_config.top_p == base_config.top_p
+    assert teacher_config.top_p == base_config.top_p
+
+
+def test_resolve_pilot_vllm_configs_rejects_invalid_temperature_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pilot = _load_pilot_module()
+    base_config = pilot.VLLMTurnGeneratorConfig(
+        base_url="http://127.0.0.1:8000/v1",
+        model_name="local-model",
+        request_timeout_sec=10,
+        max_tokens=128,
+        temperature=0.6,
+        top_p=1.0,
+        system_prompt="pilot-system",
+    )
+    monkeypatch.setenv("PILOT_TEACHER_TEMPERATURE", "not-a-float")
+
+    with pytest.raises(ValueError, match="PILOT_TEACHER_TEMPERATURE"):
+        pilot._resolve_pilot_vllm_configs(base_config=base_config)
+
+
 def test_teacher_generator_injects_reprompt_once_then_uses_fallback(monkeypatch) -> None:
     pilot = _load_pilot_module()
     trace = pilot.BaselineTrace(
