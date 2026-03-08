@@ -1747,14 +1747,18 @@ def test_reset_step_artifacts_removes_mutable_outputs(tmp_path: Path) -> None:
 
 def test_http_readiness_requires_2xx(monkeypatch) -> None:
     class _Response:
-        def __init__(self, status: int) -> None:
+        def __init__(self, status: int, payload: str = '{"data":[{"id":"model"}]}') -> None:
             self.status = status
+            self._payload = payload
 
         def __enter__(self):
             return self
 
         def __exit__(self, exc_type, exc, tb):
             return False
+
+        def read(self) -> bytes:
+            return self._payload.encode("utf-8")
 
     monkeypatch.setattr(rft_runtime_loop, "urlopen", lambda request, timeout: _Response(200))
     assert _is_http_endpoint_ready("http://127.0.0.1:8000/v1/models") is True
@@ -1781,14 +1785,18 @@ def test_http_readiness_includes_authorization_header_when_api_key_present(monke
     captured = {"authorization": None}
 
     class _Response:
-        def __init__(self, status: int) -> None:
+        def __init__(self, status: int, payload: str = '{"data":[{"id":"model"}]}') -> None:
             self.status = status
+            self._payload = payload
 
         def __enter__(self):
             return self
 
         def __exit__(self, exc_type, exc, tb):
             return False
+
+        def read(self) -> bytes:
+            return self._payload.encode("utf-8")
 
     def _fake_urlopen(request, timeout):
         del timeout
@@ -1805,6 +1813,100 @@ def test_http_readiness_includes_authorization_header_when_api_key_present(monke
         is True
     )
     assert captured["authorization"] == "Bearer api-test-key"
+
+
+def test_http_readiness_requires_expected_model_when_provided(monkeypatch) -> None:
+    class _Response:
+        def __init__(self, payload: str) -> None:
+            self.status = 200
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return self._payload.encode("utf-8")
+
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "urlopen",
+        lambda request, timeout: _Response('{"data":[{"id":"other-model"}]}'),
+    )
+    assert (
+        _is_http_endpoint_ready(
+            "http://127.0.0.1:8000/v1/models",
+            expected_model_name="expected-model",
+        )
+        is False
+    )
+
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "urlopen",
+        lambda request, timeout: _Response('{"data":[{"id":"expected-model"}]}'),
+    )
+    assert (
+        _is_http_endpoint_ready(
+            "http://127.0.0.1:8000/v1/models",
+            expected_model_name="expected-model",
+        )
+        is True
+    )
+
+
+def test_vllm_controller_rejects_occupied_endpoint_before_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=1,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=1,
+        train_batch_size=1,
+        output_dir=tmp_path / "runtime",
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=True,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+    )
+    controller = rft_runtime_loop.VLLMServerController(
+        config=config,
+        log_path=tmp_path / "vllm_server.log",
+    )
+
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "_is_http_endpoint_ready",
+        lambda url, *, api_key=None, expected_model_name=None: expected_model_name is None,
+    )
+
+    def _unexpected_popen(*args, **kwargs):
+        raise AssertionError("subprocess.Popen should not be called when the endpoint is occupied")
+
+    monkeypatch.setattr(rft_runtime_loop.subprocess, "Popen", _unexpected_popen)
+
+    with pytest.raises(RuntimeError, match="already has a ready endpoint"):
+        controller.start(model_path="/tmp/model")
 
 
 def test_resolve_vllm_api_key_prefers_small_swe_env(monkeypatch) -> None:

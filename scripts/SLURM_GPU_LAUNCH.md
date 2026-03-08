@@ -47,6 +47,7 @@ By default, `run_rft.sh` writes artifacts under a unique directory:
 GPUS=8
 CPUS=$((GPUS * 16))
 MEM="$((GPUS * 48))G"
+VLLM_PORT=18080
 
 sbatch \
   --partition=gpu \
@@ -58,11 +59,18 @@ sbatch \
   --job-name=small-swe-rft \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
-  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && export WANDB_MODE=offline && export NPROC_PER_NODE=${GPUS} && export EXPERIMENT=small-swe-rft_job\$SLURM_JOB_ID_\$(date -u +%Y%m%dT%H%M%SZ) && bash scripts/run_rft.sh"
+  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && export WANDB_MODE=offline && export NPROC_PER_NODE=${GPUS} && export SMALL_SWE_VLLM_BASE_URL=http://127.0.0.1:${VLLM_PORT}/v1 && export EXPERIMENT=small-swe-rft_job\$SLURM_JOB_ID_\$(date -u +%Y%m%dT%H%M%SZ) && bash scripts/run_rft.sh"
 ```
 
 To keep runtime artifacts under the Slurm tree, add:
 `export RFT_OUTPUT_ROOT=$PWD/outputs/slurm/rft_runtime` inside `--wrap`.
+
+`run_rft.sh` now preflights the managed vLLM bind address and fails fast if the
+configured `SMALL_SWE_VLLM_BASE_URL` port is already occupied on the node.
+
+If you are launching against a pre-existing vLLM server instead of letting
+`run_rft.sh` manage one, also add `--skip-vllm-management` and make sure
+`SMALL_SWE_VLLM_MODEL` matches that server's `--served-model-name`.
 
 Dry-run:
 

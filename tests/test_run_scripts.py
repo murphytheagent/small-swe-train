@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import signal
 import shutil
 import shlex
@@ -138,6 +139,30 @@ def _write_python_env_probe_stub(tmp_path: Path) -> Path:
         "printf 'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=%s\\n' \"${RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES:-}\"\n"
         "printf 'TVM_FFI_DISABLE_TORCH_C_DLPACK=%s\\n' \"${TVM_FFI_DISABLE_TORCH_C_DLPACK:-}\"\n"
         "exit 0\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
+def _write_python_run_rft_probe_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "python-run-rft-probe-stub.sh"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == \"-c\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-\" ]]; then\n"
+        f"  exec {shlex.quote(sys.executable)} \"$@\"\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-m\" ]]; then\n"
+        "  if [[ -n \"${STUB_RFT_CAPTURE_FILE:-}\" ]]; then\n"
+        "    printf '%s\\n' \"$@\" >\"${STUB_RFT_CAPTURE_FILE}\"\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
         encoding="utf-8",
     )
     stub_path.chmod(0o755)
@@ -571,6 +596,86 @@ def test_run_rft_script_dry_run_direct_mode_uses_centralized_runtime_overrides()
     ) in result.stdout
     assert f"+data.on_policy.runtime_overrides.max_turns_per_attempt={expected_max_turns}" in result.stdout
     assert f"max_model_len={expected_max_length}" in result.stdout
+
+
+def test_run_rft_script_non_dry_run_fails_fast_when_managed_vllm_port_is_occupied(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_rft.sh"
+    python_stub = _write_python_run_rft_probe_stub(tmp_path)
+    capture_path = tmp_path / "rft-loop-capture.txt"
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(python_stub),
+            "NPROC_PER_NODE": "1",
+            "SMALL_SWE_VLLM_BASE_URL": f"http://127.0.0.1:{port}/v1",
+            "SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE": "0",
+            "STUB_RFT_CAPTURE_FILE": str(capture_path),
+        }
+    )
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script_path)],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=30,
+        )
+    finally:
+        listener.close()
+
+    assert result.returncode != 0
+    assert "Managed vLLM launch target is already in use" in result.stderr
+    assert not capture_path.exists()
+
+
+def test_run_rft_script_non_dry_run_allows_occupied_vllm_port_when_management_is_disabled(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_rft.sh"
+    python_stub = _write_python_run_rft_probe_stub(tmp_path)
+    capture_path = tmp_path / "rft-loop-capture.txt"
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(python_stub),
+            "NPROC_PER_NODE": "1",
+            "RFT_MANAGE_VLLM": "0",
+            "SMALL_SWE_VLLM_BASE_URL": f"http://127.0.0.1:{port}/v1",
+            "SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE": "0",
+            "STUB_RFT_CAPTURE_FILE": str(capture_path),
+        }
+    )
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script_path)],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=30,
+        )
+    finally:
+        listener.close()
+
+    assert result.returncode == 0, result.stderr
+    captured_args = capture_path.read_text(encoding="utf-8")
+    assert "trainer.rft_runtime_loop" in captured_args
+    assert "--skip-vllm-management" in captured_args
 
 
 def test_run_sdft_script_dry_run_includes_loss_mode_override() -> None:

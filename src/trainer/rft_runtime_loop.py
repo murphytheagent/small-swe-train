@@ -126,6 +126,11 @@ class VLLMServerController:
     def start(self, *, model_path: str) -> None:
         if self._process is not None and self._process.poll() is None:
             raise RuntimeError("vLLM server is already running; stop it before starting a new model.")
+        if _is_http_endpoint_ready(self._models_url, api_key=self._api_key):
+            raise RuntimeError(
+                "Managed vLLM launch target already has a ready endpoint at "
+                f"{self._models_url}. Refusing to start a new server on an occupied address."
+            )
 
         command = build_vllm_server_command(
             python_bin=self._config.python_bin,
@@ -171,12 +176,24 @@ class VLLMServerController:
                     f"vLLM server exited early with code {self._process.returncode}. "
                     f"Inspect logs at {self._log_path}."
                 )
-            if _is_http_endpoint_ready(self._models_url, api_key=self._api_key):
+            if _is_http_endpoint_ready(
+                self._models_url,
+                api_key=self._api_key,
+                expected_model_name=self._config.vllm_served_model,
+            ):
                 return
             time.sleep(1.0)
+        observed_models = _query_http_endpoint_models(self._models_url, api_key=self._api_key)
+        observed_models_hint = ""
+        if observed_models:
+            observed_models_hint = (
+                " Observed served models: "
+                + ", ".join(repr(model_name) for model_name in observed_models)
+                + f"; expected {self._config.vllm_served_model!r}."
+            )
         raise RuntimeError(
             "Timed out waiting for vLLM readiness at "
-            f"{self._models_url}. Inspect logs at {self._log_path}."
+            f"{self._models_url}.{observed_models_hint} Inspect logs at {self._log_path}."
         )
 
 
@@ -1197,18 +1214,58 @@ def _build_models_url(base_url: str) -> str:
     return base_url.rstrip("/") + "/models"
 
 
-def _is_http_endpoint_ready(url: str, *, api_key: str | None = None) -> bool:
+def _query_http_endpoint_models(
+    url: str,
+    *,
+    api_key: str | None = None,
+) -> tuple[str, ...] | None:
     headers = {}
     if api_key is not None and api_key.strip():
         headers["Authorization"] = f"Bearer {api_key.strip()}"
     request = Request(url, headers=headers, method="GET")
     try:
         with urlopen(request, timeout=2.0) as response:
-            return 200 <= int(response.status) < 300
+            if not (200 <= int(response.status) < 300):
+                return None
+            response_body = response.read().decode("utf-8", errors="replace")
     except HTTPError:
-        return False
+        return None
     except (URLError, TimeoutError, OSError):
+        return None
+    try:
+        payload = json.loads(response_body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
+        return ()
+    model_ids: list[str] = []
+    for item in data:
+        if not isinstance(item, Mapping):
+            continue
+        model_id = item.get("id")
+        if not isinstance(model_id, str):
+            continue
+        normalized = model_id.strip()
+        if normalized:
+            model_ids.append(normalized)
+    return tuple(model_ids)
+
+
+def _is_http_endpoint_ready(
+    url: str,
+    *,
+    api_key: str | None = None,
+    expected_model_name: str | None = None,
+) -> bool:
+    model_ids = _query_http_endpoint_models(url, api_key=api_key)
+    if model_ids is None:
         return False
+    if expected_model_name is None or not expected_model_name.strip():
+        return True
+    return expected_model_name.strip() in model_ids
 
 
 def _resolve_vllm_api_key() -> str | None:

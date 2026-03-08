@@ -37,6 +37,95 @@ _run_small_swe_preflight_container_sweep() {
   bash "${SCRIPT_DIR}/preflight_sweep_stale_docker_containers.sh"
 }
 
+_check_managed_vllm_bind_target_available() {
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    return 0
+  fi
+  if [[ "${RFT_RUNTIME_MODE}" != "loop" ]]; then
+    return 0
+  fi
+  if [[ "${RFT_MANAGE_VLLM}" == "0" ]]; then
+    return 0
+  fi
+  "${PYTHON_BIN}" - "${SMALL_SWE_VLLM_BASE_URL}" <<'PY'
+import errno
+import socket
+import sys
+from urllib.parse import urlsplit
+
+url = sys.argv[1]
+parsed = urlsplit(url)
+if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.port is None:
+    print(
+        "SMALL_SWE_VLLM_BASE_URL must include scheme, host, and port "
+        f"(got {url!r}).",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+host = parsed.hostname
+port = parsed.port
+try:
+    addr_infos = socket.getaddrinfo(
+        host,
+        port,
+        type=socket.SOCK_STREAM,
+        proto=socket.IPPROTO_TCP,
+    )
+except socket.gaierror as exc:
+    print(
+        f"Unable to resolve SMALL_SWE_VLLM_BASE_URL host {host!r}: {exc}.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+seen: set[tuple[int, object]] = set()
+bind_errors: list[str] = []
+address_in_use = False
+
+for family, socktype, proto, _canonname, sockaddr in addr_infos:
+    key = (family, sockaddr)
+    if key in seen:
+        continue
+    seen.add(key)
+    sock = socket.socket(family, socktype, proto)
+    try:
+        sock.bind(sockaddr)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            address_in_use = True
+        elif exc.errno not in {errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT}:
+            bind_errors.append(f"{sockaddr}: {exc}")
+    else:
+        sys.exit(0)
+    finally:
+        sock.close()
+
+if address_in_use:
+    print(
+        "Managed vLLM launch target is already in use at "
+        f"{host}:{port}. Choose a free SMALL_SWE_VLLM_BASE_URL port, or set "
+        "RFT_MANAGE_VLLM=0 if you intend to reuse an existing vLLM server.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if bind_errors:
+    print(
+        "Unable to validate managed vLLM launch target "
+        f"{host}:{port}: {'; '.join(bind_errors)}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+print(
+    f"Unable to validate managed vLLM launch target {host}:{port}.",
+    file=sys.stderr,
+)
+sys.exit(2)
+PY
+}
+
 if [[ -z "${PYTHON_BIN:-}" ]]; then
   if _is_executable_cmd "${VENV_PYTHON}"; then
     PYTHON_BIN="${VENV_PYTHON}"
@@ -540,6 +629,7 @@ if [[ "${DRY_RUN}" -eq 0 ]]; then
   fi
 fi
 
+_check_managed_vllm_bind_target_available
 _run_small_swe_preflight_container_sweep
 export TASK="${TASK:-${RFT_TASK_NAME}}"
 "${LOOP_CMD[@]}"
