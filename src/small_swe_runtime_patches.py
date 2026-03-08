@@ -119,6 +119,8 @@ _LEGACY_GATING_POLICIES = {
     _LEGACY_GATING_FEEDBACK_PRESENT,
     _LEGACY_GATING_ALWAYS,
 }
+_TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
+_FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 
 
 class _TorchDtypeDeprecationFilter(logging.Filter):
@@ -134,8 +136,25 @@ def _coerce_bool_env(name: str, *, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
         return default
-    normalized = value.strip().lower()
-    return normalized in {"1", "true", "t", "yes", "y", "on"}
+    return _coerce_bool_value(value, default=default)
+
+
+def _coerce_bool_value(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, float):
+        return value != 0.0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+    return default
 
 
 def _normalize_turn_supervision_mode(value: Any) -> str:
@@ -256,11 +275,15 @@ def _install_self_distillation_config_compat_patch() -> None:
         isinstance(dataclass_fields, dict)
         and "legacy_distillation_gating_policy" in dataclass_fields
     )
+    has_native_include_teacher_memory_blocks = (
+        isinstance(dataclass_fields, dict) and "include_teacher_memory_blocks" in dataclass_fields
+    )
     if (
         has_native_num_recent
         and has_native_turn_supervision_mode
         and has_native_verifier_feedback_mode
         and has_native_legacy_gating_policy
+        and has_native_include_teacher_memory_blocks
     ):
         return
 
@@ -284,6 +307,9 @@ def _install_self_distillation_config_compat_patch() -> None:
         raw_legacy_gating_policy: Any = missing
         if not has_native_legacy_gating_policy:
             raw_legacy_gating_policy = kwargs.pop("legacy_distillation_gating_policy", missing)
+        raw_include_teacher_memory_blocks: Any = missing
+        if not has_native_include_teacher_memory_blocks:
+            raw_include_teacher_memory_blocks = kwargs.pop("include_teacher_memory_blocks", missing)
 
         original_init(self, *args, **kwargs)
 
@@ -317,6 +343,12 @@ def _install_self_distillation_config_compat_patch() -> None:
             )
             normalized_gating_policy = _normalize_legacy_gating_policy(gating_policy_value)
             setattr(self, "legacy_distillation_gating_policy", normalized_gating_policy)
+        if not has_native_include_teacher_memory_blocks:
+            include_memory_value = (
+                True if raw_include_teacher_memory_blocks is missing else raw_include_teacher_memory_blocks
+            )
+            normalized_include_memory = _coerce_bool_value(include_memory_value, default=True)
+            setattr(self, "include_teacher_memory_blocks", normalized_include_memory)
 
     _small_swe_self_distillation_init.__name__ = "_small_swe_self_distillation_init"
     SelfDistillationConfig.__init__ = _small_swe_self_distillation_init

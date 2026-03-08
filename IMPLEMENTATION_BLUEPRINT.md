@@ -63,10 +63,11 @@
 │    │ • Docker sandbox per  │  │   Our Protocol Layer           │       │
 │    │   SWE-bench instance  │  │                                │       │
 │    │ • Executes bash /     │  │ • TurnParser (format check)    │       │
-│    │   search / edit       │  │ • feedback_canonicalizer       │       │
-│    │ • Returns ToolResponse│  │ • contracts + turn parsing     │       │
-│    │ • Terminal: submit    │  │ • reward_loop_score/reward_fn   │       │
-│    │                       │  │ • reward_adapter               │       │
+│    │   read / file_search /│  │ • feedback_canonicalizer       │       │
+│    │   text_search /       │  │ • contracts + turn parsing     │       │
+│    │   apply_patch         │  │ • reward_loop_score/reward_fn   │       │
+│    │ • Returns ToolResponse│  │ • reward_adapter               │       │
+│    │ • Terminal: submit    │  │                                │       │
 │    └───────────────────────┘  └────────────────────────────────┘       │
 │                                                                         │
 │  ┌────────────────────────────────────────────────────────────────────┐ │
@@ -338,9 +339,11 @@ We treat these surfaces as stable integration points:
 │      ┌──────────────────────────────────────────────────┐        │
 │      │  Docker Sandbox (per SWE-bench instance)          │        │
 │      │                                                    │        │
-│      │  bash   → subprocess.run(cmd) → stdout/stderr     │        │
-│      │  search → find/grep in repo   → file contents     │        │
-│      │  edit   → apply patch to file → confirmation      │        │
+│      │  bash        → subprocess.run(cmd) → stdout/stderr  │        │
+│      │  file_search → fuzzy path lookup  → candidate paths │        │
+│      │  text_search → grep in repo       → matching lines  │        │
+│      │  read        → open file slice    → file contents   │        │
+│      │  apply_patch → apply patch        → confirmation    │        │
 │      └──────────────┬───────────────────────────────────┘        │
 │                     │                                            │
 │      tool_response = format_as_tool_response(result)             │
@@ -657,7 +660,7 @@ docker>=24.0                   # container runtime
 
 ### M3: Environment Executor
 - [x] `verl_integration/env_bridge.py` — deterministic rollout bridge with executor protocol (2026-02-21 09:55 UTC)
-- [x] Tool execution: `bash`, `search`, `edit`, `submit` dispatch path implemented in bridge (2026-02-21 09:55 UTC)
+- [x] Tool execution: `bash`, `read`, `file_search`, `text_search`, `apply_patch`, `submit` dispatch path implemented in bridge (2026-02-21 09:55 UTC)
 - [x] `verl_integration/reward_function.py` — format checks + binary outcome reward scaffold (2026-02-21 09:55 UTC)
 - [x] Integration test: single rollout episode end-to-end (unit-level with fake executor) (2026-02-21 09:55 UTC)
 
@@ -737,7 +740,7 @@ M5 (eval) can run against either M2 or M4 checkpoints.
 - [2026-02-28 00:00 UTC] Activated runtime SDPO patch path: `main_ppo_entry.py` + `ppo_runtime_patch.py` + `reward_adapter.py` + `reward_loop_score.py`, plus `swe_bridge_agent_loop` registration and `run_sdpo.sh` checkpoint/cache validation. Added end-to-end one-step evidence under `outputs/turn_sdpo_runtime/.../global_step_1`.
 - [2026-02-28 00:00 UTC] Updated this blueprint to mark D6 acceptance-run evidence as remaining gap: full monitored run artifacts (`acceptance_summary.md`) still not persisted under `outputs/integration/<run_label>` by automation.
 - [2026-03-04 00:00 UTC] Merged `step_sdpo_implementation_plan.md` into this blueprint and formalized D0..D6 deliverables, acceptance gate, contracts, and strict missing-items list (D6 artifacts still absent under `outputs/integration/`).
-- [2026-03-05 17:00 UTC] Corrected pilot + SDPO regressions: pilot reward now uses the real verifier-based `reward_fn` (no dummy scoring), SDPO reward is subtraction-based (fail-to-pass/pass-to-pass deltas plus terminal validity penalty), system prompt is injected for SDPO agent-loop messages and pilot teacher reprompts, and the Docker `search` tool now executes `grep -R` even after fallback without suppressing stderr.
+- [2026-03-05 17:00 UTC] Corrected pilot + SDPO regressions: pilot reward now uses the real verifier-based `reward_fn` (no dummy scoring), SDPO reward is subtraction-based (fail-to-pass/pass-to-pass deltas plus terminal validity penalty), system prompt is injected for SDPO agent-loop messages and pilot teacher reprompts, and the Docker `text_search` tool now executes `grep -R` even after fallback without suppressing stderr.
 - [2026-03-05 21:10 UTC] Ran RFT/pilot/SDPO E2E checks on `tianhaowang-gpu0`: RFT job 817 (2 steps) trained step 0, skipped step 1 due to insufficient selected rows (checkpoint `global_step_1`); pilot job 819 (dynamic_middle + current_turn/all_turns) reward delta mean `-0.00625` (2/3/27); SDPO job 825 completed 2 steps (global_step=2, ~49m) with step-2 val reward mean@1 `-0.9891`, critic score mean `-0.8875`, prompt truncation `0.0`.
 - [2026-03-05 23:13 UTC] Reran full 8-GPU chain to ensure 2-step RFT completion: RFT job 826 trained steps 0 and 1 (no skip) with final checkpoint `global_step_2`; pilot job 827 (dynamic_middle + current_turn/all_turns) reward delta mean `-0.0125` (improved/worsened/tied `5/9/50` over 64 pairs); SDPO job 828 completed 2 steps (global_step=2, ~40m) with step-2 val reward mean@1 `-1.0125`, critic score mean `-0.8875`, prompt truncation `0.0`, response length mean `3070`.
 

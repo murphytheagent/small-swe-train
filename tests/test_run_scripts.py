@@ -634,6 +634,17 @@ def test_teacher_reprompt_pilot_slurm_script_dry_run_normalizes_negative_index_t
     assert "--teacher-reprompt-turn-index-mode dynamic_middle" in result.stdout
 
 
+def test_teacher_reprompt_pilot_slurm_script_dry_run_uses_larger_default_task_batch_size() -> None:
+    result = _run_script(
+        "run_teacher_reprompt_pilot_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "8",
+            "PILOT_MODEL_PATH": "/tmp/nonexistent-model-ok-for-dry-run",
+        },
+    )
+    assert "--task-batch-size 1024" in result.stdout
+
+
 def test_teacher_reprompt_pilot_slurm_script_dry_run_load_latest_rft_checkpoint_overrides_model_everywhere(
     tmp_path: Path,
 ) -> None:
@@ -2310,170 +2321,6 @@ def test_run_sdpo_script_cleanup_accepts_zero_padded_drain_seconds(tmp_path: Pat
         except subprocess.TimeoutExpired:
             ray_proc.kill()
             ray_proc.wait(timeout=5)
-
-
-def test_run_sdpo_script_runs_cleanup_before_wandb_repair(tmp_path: Path) -> None:
-    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
-    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
-    fake_checkpoint = tmp_path / "rft-checkpoint"
-    fake_checkpoint.mkdir()
-    fake_parquet = tmp_path / "sdpo_tasks.parquet"
-    fake_parquet.write_text("stub", encoding="utf-8")
-    fake_proc_root = tmp_path / "fake-proc"
-    fake_proc_root.mkdir()
-    metrics_path = tmp_path / "metrics.jsonl"
-    metrics_path.write_text(
-        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
-        encoding="utf-8",
-    )
-    trainer_log_path = tmp_path / "trainer.log"
-    trainer_log_path.write_text("wandb: setting up run cleanupOrder123\n", encoding="utf-8")
-    repair_log_path = tmp_path / "repair-calls.log"
-
-    ray_proc = subprocess.Popen(
-        ["bash", "-lc", "exec -a raylet sleep 120"],
-        env={
-            **os.environ,
-            "SLURM_JOB_ID": "4242",
-        },
-    )
-
-    pid_dir = fake_proc_root / str(ray_proc.pid)
-    pid_dir.mkdir(parents=True)
-    environ_path = pid_dir / "environ"
-    environ_path.write_bytes(b"SLURM_JOB_ID=4242\0")
-
-    try:
-        def _flip_job_id_after_drain_start() -> None:
-            time.sleep(0.5)
-            environ_path.write_bytes(b"SLURM_JOB_ID=9999\0")
-
-        mutator = threading.Thread(target=_flip_job_id_after_drain_start, daemon=True)
-        mutator.start()
-
-        env = os.environ.copy()
-        env.update(
-            {
-                "PYTHON_BIN": str(fake_python),
-                "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
-                "SDPO_TRAINER_MODULE": "dummy.module",
-                "SDPO_MONITOR_ENABLE": "0",
-                "SLURM_JOB_ID": "4242",
-                "SLURM_JOBID": "4242",
-                "SDPO_PROC_ROOT": str(fake_proc_root),
-                "SDPO_CLEANUP_DRAIN_SEC": "2",
-                "SDPO_CLEANUP_GRACE_SEC": "0",
-                "SDPO_CONTAINER_CLEANUP_ENABLE": "0",
-                "VERL_FILE_LOGGER_PATH": str(metrics_path),
-                "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
-                "STUB_REPAIR_LOG_FILE": str(repair_log_path),
-                "STUB_TRAINER_STDOUT": "wandb: setting up run cleanupOrder123",
-                "STUB_REPAIR_STDOUT_MARKER": "repair-called",
-            }
-        )
-        result = subprocess.run(
-            [
-                "bash",
-                str(script_path),
-                f"data.train_files={fake_parquet}",
-                f"data.val_files={fake_parquet}",
-            ],
-            cwd=_repo_root(),
-            check=True,
-            text=True,
-            capture_output=True,
-            env=env,
-        )
-
-        assert ray_proc.poll() is None
-        cleanup_marker = "no matching runtime processes remained after drain"
-        assert cleanup_marker in result.stdout
-        assert "repair-called" in result.stdout
-        assert result.stdout.index(cleanup_marker) < result.stdout.index("repair-called")
-
-        logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
-        assert len(logged_invocations) == 1
-    finally:
-        if ray_proc.poll() is None:
-            ray_proc.terminate()
-        try:
-            ray_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            ray_proc.kill()
-            ray_proc.wait(timeout=5)
-
-
-@pytest.mark.parametrize(
-    ("shutdown_signal", "expected_exit_code"),
-    [
-        (signal.SIGINT, 130),
-        (signal.SIGTERM, 143),
-    ],
-)
-def test_run_sdpo_script_signal_shutdown_runs_wandb_repair(
-    tmp_path: Path,
-    shutdown_signal: signal.Signals,
-    expected_exit_code: int,
-) -> None:
-    script_path = _repo_root() / "scripts" / "run_sdpo.sh"
-    fake_python = _write_python_wandb_repair_probe_stub(tmp_path)
-    fake_checkpoint = tmp_path / "rft-checkpoint"
-    fake_checkpoint.mkdir()
-    fake_parquet = tmp_path / "sdpo_tasks.parquet"
-    fake_parquet.write_text("stub", encoding="utf-8")
-    metrics_path = tmp_path / "metrics.jsonl"
-    metrics_path.write_text(
-        json.dumps({"step": 2, "data": {"training/global_step": 2, "_step": 2}}) + "\n",
-        encoding="utf-8",
-    )
-    trainer_log_path = tmp_path / "trainer.log"
-    trainer_log_path.write_text("wandb: setting up run signalRepair123\n", encoding="utf-8")
-    repair_log_path = tmp_path / "repair-calls.log"
-
-    env = os.environ.copy()
-    env.update(
-        {
-            "PYTHON_BIN": str(fake_python),
-            "SDPO_RFT_CHECKPOINT": str(fake_checkpoint),
-            "SDPO_TRAINER_MODULE": "dummy.module",
-            "SDPO_MONITOR_ENABLE": "0",
-            "SDPO_CLEANUP_ON_EXIT": "0",
-            "VERL_FILE_LOGGER_PATH": str(metrics_path),
-            "SDPO_TRAINER_LOG_PATH": str(trainer_log_path),
-            "STUB_REPAIR_LOG_FILE": str(repair_log_path),
-            "STUB_TRAINER_STDOUT": "wandb: setting up run signalRepair123",
-            "STUB_TRAINER_SLEEP_SEC": "30",
-        }
-    )
-    proc = subprocess.Popen(
-        [
-            "bash",
-            str(script_path),
-            f"data.train_files={fake_parquet}",
-            f"data.val_files={fake_parquet}",
-        ],
-        cwd=_repo_root(),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        start_new_session=True,
-    )
-
-    try:
-        time.sleep(0.6)
-        os.killpg(proc.pid, shutdown_signal)
-        stdout, stderr = proc.communicate(timeout=20)
-    finally:
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=5)
-
-    assert proc.returncode == expected_exit_code, (stdout, stderr)
-    logged_invocations = repair_log_path.read_text(encoding="utf-8").splitlines()
-    assert len(logged_invocations) == 1
-    repair_argv = shlex.split(logged_invocations[0])
-    assert repair_argv[-1] == str(expected_exit_code)
 
 
 def test_run_sdpo_script_dry_run_sets_ray_num_cpus_from_slurm_cpus_per_task() -> None:

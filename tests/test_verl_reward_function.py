@@ -54,7 +54,7 @@ def test_reward_fn_returns_negative_one_when_verifier_signals_are_missing() -> N
 def test_reward_fn_applies_terminal_penalty_when_verifier_signals_are_missing() -> None:
     data = [
         {
-            "response_text": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
+            "response_text": '<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
             "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
             "pass_to_pass": ["tests/test_ok.py::test_regression"],
         }
@@ -71,7 +71,7 @@ def test_reward_fn_applies_terminal_penalty_when_verifier_signals_are_missing() 
 def test_reward_fn_applies_terminal_validity_penalty_when_submit_is_missing() -> None:
     data = [
         {
-            "response_text": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
+            "response_text": '<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
             "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
             "pass_to_pass": ["tests/test_ok.py::test_regression"],
             "tool_output": {
@@ -169,7 +169,7 @@ def test_reward_fn_rejects_terminal_metadata_when_submit_is_not_singleton() -> N
         {
             "response_text": (
                 "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
-                "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"needle\"}}</tool_call>"
+                "<tool_call>{\"tool\":\"text_search\",\"args\":{\"query\":\"needle\"}}</tool_call>"
             ),
             "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
             "pass_to_pass": ["tests/test_ok.py::test_regression"],
@@ -194,7 +194,7 @@ def test_reward_fn_rejects_terminal_metadata_when_submit_is_not_singleton() -> N
 def test_reward_fn_coerces_explicit_submission_final_response_to_text() -> None:
     data = [
         {
-            "response_text": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
+            "response_text": '<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
             "submission_final_response": {"summary": "done"},
             "final_turn_has_submit": True,
             "final_submit_format_valid": True,

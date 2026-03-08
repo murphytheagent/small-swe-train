@@ -148,7 +148,7 @@
       },
       {
         "step_index": 2,
-        "tool": "search",
+        "tool": "text_search",
         "args": {
           "query": "requests/models.py",
           "path_hint": "requests/models.py"
@@ -187,7 +187,7 @@
       }
     ]
   },
-  "expected_chatml": "<|im_start|>assistant\n<think>I need to understand the issue first. Let me look at the error traceback.</think>\n<tool_call>{\"args\": {\"command\": \"cd /workspace && python -c \\\"import requests; r = requests.get('https://httpbin.org/get'); print(r.json())\\\" 2>&1 | head -30\", \"cwd\": \".\"}, \"tool\": \"bash\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\nTraceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n  File \"/workspace/requests/api.py\", line 75, in get\n    return request('GET', url, **kwargs)\n  File \"/workspace/requests/sessions.py\", line 529, in request\n    resp = self.send(prep, **send_kwargs)\n  File \"/workspace/requests/sessions.py\", line 645, in send\n    r = adapter.send(request, **kwargs)\n  File \"/workspace/requests/adapters.py\", line 440, in send\n    resp = conn.urlopen(\nConnectionError: HTTPSConnectionPool(host='httpbin.org', port=443): Max retries exceeded</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<think>The connection error might be a network issue in the sandbox. Let me look at the actual bug report to understand what to fix.</think>\n<tool_call>{\"args\": {\"command\": \"cd /workspace && grep -n 'def prepare_url' requests/models.py\", \"cwd\": \".\"}, \"tool\": \"bash\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\n363:    def prepare_url(self, url, params):</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<think>Found it. Let me examine the prepare_url method.</think>\n<tool_call>{\"args\": {\"path_hint\": \"requests/models.py\", \"query\": \"requests/models.py\"}, \"tool\": \"search\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\n     363\t    def prepare_url(self, url, params):\n     364\t        \"\"\"Prepares the given HTTP URL.\"\"\"\n     365\t        if isinstance(url, bytes):\n     366\t            url = url.decode('utf8')\n     367\t        url = url.strip()\n     368\t        if ':' in url and not url.lower().startswith('http'):\n     369\t            self.url = url\n     370\t            return\n     371\t        # ... rest of the method</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<think>The issue is that url.strip() doesn't handle leading/trailing whitespace with special characters. The fix should normalize the URL more carefully.</think>\n<tool_call>{\"args\": {\"patch\": \"    def prepare_url(self, url, params):\\n        \\\"\\\"\\\"Prepares the given HTTP URL.\\\"\\\"\\\"\\n        if isinstance(url, bytes):\\n            url = url.decode('utf8')\\n        url = url.strip()\\n        if not url:\\n            raise MissingSchema('Invalid URL {0!r}: No schema supplied'.format(url))\\n        if ':' in url and not url.lower().startswith('http'):\\n            self.url = url\\n            return\", \"path\": \"requests/models.py\"}, \"tool\": \"edit\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\nFile edited successfully.</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<tool_call>{\"args\": {\"command\": \"cd /workspace && python -m pytest tests/test_requests.py -x -q -k 'test_prepare' 2>&1 | tail -10\", \"cwd\": \".\"}, \"tool\": \"bash\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\n8 passed in 1.23s</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<tool_call>{\"args\": {\"final_response\": \"Added empty URL validation in prepare_url to raise MissingSchema instead of silently proceeding with an empty string.\"}, \"tool\": \"submit\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\nPatch submitted successfully.</tool_response>\n<|im_end|>\n",
+  "expected_chatml": "<|im_start|>assistant\n<think>I need to understand the issue first. Let me look at the error traceback.</think>\n<tool_call>{\"args\": {\"command\": \"cd /workspace && python -c \\\"import requests; r = requests.get('https://httpbin.org/get'); print(r.json())\\\" 2>&1 | head -30\", \"cwd\": \".\"}, \"tool\": \"bash\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\nTraceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n  File \"/workspace/requests/api.py\", line 75, in get\n    return request('GET', url, **kwargs)\n  File \"/workspace/requests/sessions.py\", line 529, in request\n    resp = self.send(prep, **send_kwargs)\n  File \"/workspace/requests/sessions.py\", line 645, in send\n    r = adapter.send(request, **kwargs)\n  File \"/workspace/requests/adapters.py\", line 440, in send\n    resp = conn.urlopen(\nConnectionError: HTTPSConnectionPool(host='httpbin.org', port=443): Max retries exceeded</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<think>The connection error might be a network issue in the sandbox. Let me look at the actual bug report to understand what to fix.</think>\n<tool_call>{\"args\": {\"command\": \"cd /workspace && grep -n 'def prepare_url' requests/models.py\", \"cwd\": \".\"}, \"tool\": \"bash\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\n363:    def prepare_url(self, url, params):</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<think>Found it. Let me examine the prepare_url method.</think>\n<tool_call>{\"args\": {\"path_hint\": \"requests/models.py\", \"query\": \"requests/models.py\"}, \"tool\": \"text_search\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\n     363\t    def prepare_url(self, url, params):\n     364\t        \"\"\"Prepares the given HTTP URL.\"\"\"\n     365\t        if isinstance(url, bytes):\n     366\t            url = url.decode('utf8')\n     367\t        url = url.strip()\n     368\t        if ':' in url and not url.lower().startswith('http'):\n     369\t            self.url = url\n     370\t            return\n     371\t        # ... rest of the method</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<think>The issue is that url.strip() doesn't handle leading/trailing whitespace with special characters. The fix should normalize the URL more carefully.</think>\n<tool_call>{\"args\": {\"patch\": \"    def prepare_url(self, url, params):\\n        \\\"\\\"\\\"Prepares the given HTTP URL.\\\"\\\"\\\"\\n        if isinstance(url, bytes):\\n            url = url.decode('utf8')\\n        url = url.strip()\\n        if not url:\\n            raise MissingSchema('Invalid URL {0!r}: No schema supplied'.format(url))\\n        if ':' in url and not url.lower().startswith('http'):\\n            self.url = url\\n            return\", \"path\": \"requests/models.py\"}, \"tool\": \"edit\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\nFile edited successfully.</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<tool_call>{\"args\": {\"command\": \"cd /workspace && python -m pytest tests/test_requests.py -x -q -k 'test_prepare' 2>&1 | tail -10\", \"cwd\": \".\"}, \"tool\": \"bash\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\n8 passed in 1.23s</tool_response>\n<|im_end|>\n<|im_start|>assistant\n<tool_call>{\"args\": {\"final_response\": \"Added empty URL validation in prepare_url to raise MissingSchema instead of silently proceeding with an empty string.\"}, \"tool\": \"submit\"}</tool_call>\n<|im_end|>\n<|im_start|>tool\n<tool_response>STDOUT:\nPatch submitted successfully.</tool_response>\n<|im_end|>\n",
   "expected_labeled_spans": [
     {
       "start": 22,
@@ -216,27 +216,27 @@
     },
     {
       "start": 1446,
-      "end": 1564,
+      "end": 1569,
       "label": "tool_call"
     },
     {
-      "start": 2067,
-      "end": 2229,
+      "start": 2072,
+      "end": 2234,
       "label": "think"
     },
     {
-      "start": 2229,
-      "end": 2730,
+      "start": 2234,
+      "end": 2735,
       "label": "tool_call"
     },
     {
-      "start": 2856,
-      "end": 3029,
+      "start": 2861,
+      "end": 3034,
       "label": "tool_call"
     },
     {
-      "start": 3147,
-      "end": 3338,
+      "start": 3152,
+      "end": 3343,
       "label": "tool_call"
     }
   ],
@@ -244,13 +244,13 @@
     "episode_id": "requests__requests-5087",
     "source_format": "swe-bench",
     "num_steps": 6,
-    "num_tokens": 3446,
+    "num_tokens": 3451,
     "label_counts": {
       "other": 1668,
       "think": 456,
-      "tool_call": 1322
+      "tool_call": 1327
     },
-    "rft_trained_tokens": 1322,
-    "sdpo_trained_tokens": 1778
+    "rft_trained_tokens": 1327,
+    "sdpo_trained_tokens": 1783
   }
 }

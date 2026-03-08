@@ -140,8 +140,8 @@ def test_rows_to_reward_tensor_marks_last_valid_response_token_when_torch_availa
             },
         },
         {
-            "response_text": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
-            "assistant_response": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
+            "response_text": '<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
+            "assistant_response": '<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
             "_response_mask": [1, 1, 0, 0],
             "resolved": False,
         },

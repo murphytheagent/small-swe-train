@@ -169,6 +169,7 @@ def test_sitecustomize_accepts_self_distillation_compat_fields_on_older_verl_con
             turn_supervision_mode="current_turn",
             verifier_feedback_mode="all_turns",
             legacy_distillation_gating_policy="feedback_present",
+            include_teacher_memory_blocks="off",
         )
     finally:
         builtins.__import__ = original_import
@@ -178,6 +179,7 @@ def test_sitecustomize_accepts_self_distillation_compat_fields_on_older_verl_con
     assert getattr(cfg, "turn_supervision_mode") == "current_turn"
     assert getattr(cfg, "verifier_feedback_mode") == "all_turns"
     assert getattr(cfg, "legacy_distillation_gating_policy") == "feedback_present"
+    assert getattr(cfg, "include_teacher_memory_blocks") is False
 
 
 def test_sitecustomize_defaults_turn_supervision_mode_to_current_turn_on_older_verl_config(monkeypatch) -> None:
@@ -234,6 +236,35 @@ def test_sitecustomize_defaults_verifier_feedback_mode_to_all_turns_on_older_ver
         builtins.__import__ = original_import
 
     assert getattr(cfg, "verifier_feedback_mode") == "all_turns"
+
+
+def test_sitecustomize_defaults_include_teacher_memory_blocks_to_true_on_older_verl_config(
+    monkeypatch,
+) -> None:
+    class _FakeSelfDistillationConfig:
+        def __init__(self, alpha: float = 0.0) -> None:
+            self.alpha = alpha
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_workers_pkg = types.ModuleType("verl.workers")
+    fake_config_pkg = types.ModuleType("verl.workers.config")
+    fake_actor_module = types.ModuleType("verl.workers.config.actor")
+    fake_actor_module.SelfDistillationConfig = _FakeSelfDistillationConfig
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers", fake_workers_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config", fake_config_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config.actor", fake_actor_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    original_import = builtins.__import__
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+        cfg = _FakeSelfDistillationConfig(alpha=0.25)
+    finally:
+        builtins.__import__ = original_import
+
+    assert getattr(cfg, "include_teacher_memory_blocks") is True
 
 
 def test_sitecustomize_rejects_invalid_turn_supervision_mode_on_older_verl_config(monkeypatch) -> None:

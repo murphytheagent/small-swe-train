@@ -193,7 +193,7 @@ fi
 OUTPUT_DIR="${PROJECT_ROOT}/outputs/teacher_reprompt_pilot/job${SLURM_JOB_ID:-manual}"
 mkdir -p "${OUTPUT_DIR}"
 
-TURN_INDEX_MODE_RAW="${PILOT_TEACHER_TURN_INDEX_MODE:-fixed}"
+TURN_INDEX_MODE_RAW="${PILOT_TEACHER_TURN_INDEX_MODE:-dynamic_middle}"
 TURN_INDEX_MODE="$(printf '%s' "${TURN_INDEX_MODE_RAW}" | tr '[:upper:]' '[:lower:]')"
 TURN_INDEX_VALUE="${PILOT_TEACHER_TURN_INDEX:-}"
 
@@ -231,14 +231,14 @@ fi
 PILOT_CMD=(
   "${PYTHON_BIN}" scripts/run_teacher_reprompt_pilot.py
   --output-dir "${OUTPUT_DIR}"
-  --task-batch-size "${PILOT_TASK_BATCH_SIZE:-128}"
+  --task-batch-size "${PILOT_TASK_BATCH_SIZE:-1024}"
   --attempts-per-task "${PILOT_ATTEMPTS_PER_TASK:-8}"
   --max-in-flight-tasks "${MAX_IN_FLIGHT_TASKS}"
   --teacher-reprompt-turn-index "${TURN_INDEX_VALUE}"
   --teacher-reprompt-turn-index-mode "${TURN_INDEX_MODE}"
   --turn-supervision-mode "${PILOT_TURN_SUPERVISION_MODE:-current_turn}"
   --verifier-feedback-mode "${PILOT_VERIFIER_FEEDBACK_MODE:-all_turns}"
-  --max-reprompt-len "${PILOT_MAX_REPROMPT_LEN:-12288}"
+  --max-reprompt-len "${PILOT_MAX_REPROMPT_LEN:-16384}"
   --num-recent-raw-blocks "${PILOT_NUM_RECENT_RAW_BLOCKS:-3}"
 )
 if [[ -n "${RESOLVED_RFT_CHECKPOINT}" ]]; then

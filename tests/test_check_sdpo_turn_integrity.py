@@ -275,7 +275,7 @@ def test_integrity_script_allows_explicit_no_student_attempt(tmp_path: Path) -> 
 
 
 def test_integrity_script_uses_turn_level_truncation_denominator(tmp_path: Path) -> None:
-    long_tool_feedback = " ".join(f"tok{i}" for i in range(12050))
+    long_tool_feedback = " ".join(f"tok{i}" for i in range(17050))
     rows = [
         {
             "prompt": "Fix issue",

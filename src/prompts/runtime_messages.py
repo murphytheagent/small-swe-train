@@ -46,7 +46,7 @@ _DEFAULT_SYSTEM_PROMPT_WORKFLOW = (
     "supported patch you can.\n"
 )
 _SDPO_ROLLOUT_FOLLOWUP_USER_MESSAGE = (
-    "Return the next assistant turn now. Use bash/read/search/apply_patch while still working. "
+    "Return the next assistant turn now. Use bash/read/file_search/text_search/apply_patch while still working. "
     "If solved, return one submit tool call with a concise final_response."
 )
 
@@ -164,6 +164,21 @@ def _build_tool_examples_prompt() -> str:
     return "Realistic examples (one tool call each):\n" + "\n".join(examples)
 
 
+def _build_tool_usage_guardrails_prompt() -> str:
+    lines = [
+        "Tool usage guardrails:",
+        "   - Use 'read' to inspect file contents and line ranges. Prefer it over bash commands like cat/sed/head for reading code.",
+        "   - Use 'file_search' to discover likely repo-relative file paths under the repository root.",
+        "   - Use 'text_search' for exact fixed-string matches inside a known file or directory scope.",
+        "   - If 'read' says the output was truncated, call 'read' again with narrower start_line/end_line before editing.",
+        "   - If 'read' says path not found, use 'file_search' or a lightweight directory listing to find the real repo-relative path. Do not guess the path.",
+        "   - For 'apply_patch', always include both 'path' and 'patch' in normal use.",
+        "   - Prefer using 'apply_patch' for file edits instead of bash heredocs, cat >, or sed -i.",
+        "   - If an apply_patch attempt fails, read the file again and retry with a smaller patch and exact surrounding context.",
+    ]
+    return "\n".join(lines)
+
+
 def build_assistant_contract_prompt(
     *,
     delimiters: ModelDelimiters | None = None,
@@ -178,6 +193,7 @@ def build_assistant_contract_prompt(
     allowed_tools_text = ", ".join(ALLOWED_TOOLS)
     tool_schema_block = _build_tool_schema_prompt() if include_tool_schema else ""
     tool_examples_block = _build_tool_examples_prompt() if include_examples else ""
+    tool_usage_guardrails_block = _build_tool_usage_guardrails_prompt()
 
     lines: list[str] = []
     lines.append("Surround each tool action with a tool-call delimiter block.")
@@ -201,6 +217,8 @@ def build_assistant_contract_prompt(
         lines.append(tool_schema_block)
     if tool_examples_block:
         lines.append(tool_examples_block)
+    if tool_usage_guardrails_block:
+        lines.append(tool_usage_guardrails_block)
 
     numbered_lines: list[str] = []
     step_index = 1

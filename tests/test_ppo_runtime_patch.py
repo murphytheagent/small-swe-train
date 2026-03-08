@@ -337,7 +337,12 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     )
     assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
 
-    captured = {"resolved": None, "turn_supervision_mode": None, "verifier_feedback_mode": None}
+    captured = {
+        "resolved": None,
+        "turn_supervision_mode": None,
+        "verifier_feedback_mode": None,
+        "include_teacher_memory_blocks": None,
+    }
 
     def _fake_rows(batch, tokenizer):
         _ = batch, tokenizer
@@ -350,6 +355,7 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
         rows,
         *,
         include_student_attempt_for_teacher,
+        include_teacher_memory_blocks,
         max_reprompt_len,
         num_recent_raw_blocks,
         turn_supervision_mode,
@@ -364,6 +370,7 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
             legacy_distillation_gating_policy,
         )
         captured["resolved"] = [bool(row.get("resolved")) for row in rows]
+        captured["include_teacher_memory_blocks"] = include_teacher_memory_blocks
         captured["turn_supervision_mode"] = turn_supervision_mode
         captured["verifier_feedback_mode"] = verifier_feedback_mode
         return {
@@ -421,6 +428,7 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
 
     distill_batch, metrics = output
     assert captured["resolved"] == [True, False]
+    assert captured["include_teacher_memory_blocks"] is True
     assert captured["turn_supervision_mode"] == "current_turn"
     assert captured["verifier_feedback_mode"] == "all_turns"
     assert list(distill_batch.tensors["self_distillation_mask"].tolist()) == [1.0, 0.0]
@@ -450,6 +458,112 @@ def test_patched_distillation_hook_builds_teacher_tensors_on_swe_batches(
     assert "self_distillation/teacher_attention_valid_token_ratio" in metrics
     assert "self_distillation/supervised_token_ratio" in metrics
     assert "self_distillation/invalid_supervised_overlap_count" in metrics
+
+
+def test_patched_distillation_hook_forwards_include_teacher_memory_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+    trainer_cls = _build_swe_trainer_class()
+
+    class _FakeDataProto:
+        def __init__(self, *, tensors):
+            self.tensors = tensors
+
+        @classmethod
+        def from_dict(cls, *, tensors):
+            return cls(tensors=tensors)
+
+    fake_module = SimpleNamespace(
+        RayPPOTrainer=trainer_cls,
+        DataProto=_FakeDataProto,
+        compute_position_id_with_mask=lambda mask: mask.cumsum(dim=1) - 1,
+    )
+    assert apply_small_swe_sdpo_runtime_patch(ray_trainer_module=fake_module) is True
+
+    captured: dict[str, Any] = {}
+
+    def _fake_rows(batch, tokenizer):
+        _ = batch, tokenizer
+        return [{"_raw_prompt_messages": [{"role": "user", "content": "u"}], "_response_mask": [1, 1]}]
+
+    def _fake_build_self_distillation_batch(
+        rows,
+        *,
+        include_student_attempt_for_teacher,
+        include_teacher_memory_blocks,
+        max_reprompt_len,
+        num_recent_raw_blocks,
+        turn_supervision_mode,
+        verifier_feedback_mode,
+        legacy_distillation_gating_policy,
+    ):
+        _ = (
+            rows,
+            include_student_attempt_for_teacher,
+            max_reprompt_len,
+            num_recent_raw_blocks,
+            turn_supervision_mode,
+            verifier_feedback_mode,
+            legacy_distillation_gating_policy,
+        )
+        captured["include_teacher_memory_blocks"] = include_teacher_memory_blocks
+        return {
+            "teacher_prompts": ["teacher"],
+            "self_distillation_mask": [True],
+            "prompt_truncated": [False],
+        }
+
+    monkeypatch.setattr(runtime_patch, "dataproto_to_rows", _fake_rows)
+    monkeypatch.setattr(runtime_patch, "build_self_distillation_batch", _fake_build_self_distillation_batch)
+
+    trainer = trainer_cls()
+    trainer.config.actor_rollout_ref.actor.self_distillation["include_teacher_memory_blocks"] = "off"
+
+    class _FakeTokenizer:
+        def apply_chat_template(
+            self,
+            messages,
+            *,
+            tokenize,
+            return_tensors,
+            return_dict,
+            continue_final_message,
+            add_generation_prompt,
+            max_length,
+            padding,
+            truncation,
+        ):
+            _ = (
+                messages,
+                tokenize,
+                return_tensors,
+                return_dict,
+                continue_final_message,
+                add_generation_prompt,
+                max_length,
+                padding,
+                truncation,
+            )
+            return {
+                "input_ids": torch.tensor([[10, 11]], dtype=torch.long),
+                "attention_mask": torch.tensor([[1, 1]], dtype=torch.long),
+            }
+
+    trainer.tokenizer = _FakeTokenizer()
+    batch = SimpleNamespace(
+        batch={
+            "responses": torch.tensor([[1, 2]], dtype=torch.long),
+            "response_mask": torch.tensor([[1, 1]], dtype=torch.long),
+        },
+        non_tensor_batch={"trajectory_steps": [[]]},
+    )
+    reward_tensor = torch.tensor([[0.0, 1.0]], dtype=torch.float32)
+
+    output = trainer._maybe_build_self_distillation_batch(batch, reward_tensor, {"feedback": ["x"]})
+
+    assert output is not None
+    assert captured["include_teacher_memory_blocks"] is False
 
 
 def test_patched_distillation_hook_clamps_max_reprompt_len_to_sequence_budget(
@@ -483,6 +597,7 @@ def test_patched_distillation_hook_clamps_max_reprompt_len_to_sequence_budget(
         rows,
         *,
         include_student_attempt_for_teacher,
+        include_teacher_memory_blocks,
         max_reprompt_len,
         num_recent_raw_blocks,
         turn_supervision_mode,
@@ -492,6 +607,7 @@ def test_patched_distillation_hook_clamps_max_reprompt_len_to_sequence_budget(
         _ = (
             rows,
             include_student_attempt_for_teacher,
+            include_teacher_memory_blocks,
             num_recent_raw_blocks,
             turn_supervision_mode,
             verifier_feedback_mode,
@@ -808,6 +924,7 @@ def test_patched_distillation_hook_emits_turn_level_tensors(
         rows,
         *,
         include_student_attempt_for_teacher,
+        include_teacher_memory_blocks,
         max_reprompt_len,
         num_recent_raw_blocks,
         turn_supervision_mode,
@@ -817,6 +934,7 @@ def test_patched_distillation_hook_emits_turn_level_tensors(
         _ = (
             rows,
             include_student_attempt_for_teacher,
+            include_teacher_memory_blocks,
             max_reprompt_len,
             num_recent_raw_blocks,
             turn_supervision_mode,

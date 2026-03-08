@@ -278,6 +278,9 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             include_student_attempt = bool(
                 _cfg_get(self_distillation_cfg, "include_student_attempt_for_teacher", True)
             )
+            include_teacher_memory_blocks = _coerce_bool(
+                _cfg_get(self_distillation_cfg, "include_teacher_memory_blocks", True)
+            )
             max_reprompt_len = int(_cfg_get(self_distillation_cfg, "max_reprompt_len", DEFAULT_MAX_REPROMPT_LEN))
             num_recent_raw_blocks = int(_cfg_get(self_distillation_cfg, "num_recent_raw_blocks", 3))
             responses = batch.batch["responses"]
@@ -306,6 +309,7 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             reprompt_batch = build_self_distillation_batch(
                 rows,
                 include_student_attempt_for_teacher=include_student_attempt,
+                include_teacher_memory_blocks=include_teacher_memory_blocks,
                 max_reprompt_len=max_reprompt_len,
                 num_recent_raw_blocks=num_recent_raw_blocks,
                 turn_supervision_mode=turn_supervision_mode,

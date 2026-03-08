@@ -17,7 +17,9 @@ from prompts.runtime_messages import (
 from prompts.teacher_messages import build_teacher_output_contract_block
 from schemas import (
     ALLOWED_TOOLS,
+    FILE_SEARCH_TOOL_NAME,
     TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME,
+    TEXT_SEARCH_TOOL_NAME,
     TOOL_SCHEMAS,
     ToolCall,
     validate_tool_call,
@@ -27,6 +29,8 @@ from schemas import (
 def test_terminal_tool_is_supported_by_schema() -> None:
     assert config.TERMINAL_TOOL_NAME in ALLOWED_TOOLS
     assert config.TERMINAL_TOOL_NAME == SCHEMA_TERMINAL_TOOL_NAME
+    assert FILE_SEARCH_TOOL_NAME == "file_search"
+    assert TEXT_SEARCH_TOOL_NAME == "text_search"
 
 
 def test_output_contract_exports_match_runtime_defaults() -> None:
@@ -89,6 +93,11 @@ def test_prompt_contract_uses_centralized_terminal_tool_default() -> None:
     assert f"Required args by tool: {required_args_text}." in prompt
     assert "read" in ALLOWED_TOOLS
     assert "read" in TOOL_SCHEMAS
+    assert "file_search" in ALLOWED_TOOLS
+    assert "text_search" in ALLOWED_TOOLS
+    assert "file_search" in TOOL_SCHEMAS
+    assert "text_search" in TOOL_SCHEMAS
+    assert "search" not in ALLOWED_TOOLS
 
 
 def test_prompt_contract_includes_read_and_direct_tool_call_rule() -> None:
@@ -96,9 +105,17 @@ def test_prompt_contract_includes_read_and_direct_tool_call_rule() -> None:
 
     assert "Begin with a tool-call block. Do not emit prose before the first tool call." in prompt
     assert "read args: required {path:str" in prompt
+    assert "file_search args: required {query:str" in prompt
+    assert "text_search args: required {query:str" in prompt
     assert "start_line:int" in prompt
     assert "end_line:int" in prompt
     assert "read.path" in prompt
+    assert "Tool usage guardrails:" in prompt
+    assert "Use 'file_search' to discover likely repo-relative file paths" in prompt
+    assert "Use 'text_search' for exact fixed-string matches" in prompt
+    assert "both 'path' and 'patch' in normal use." in prompt
+    assert "Prefer using 'apply_patch' for file edits instead of bash heredocs, cat >, or sed -i." in prompt
+    assert "use 'search'" not in prompt
 
 
 def test_onpolicy_system_prompt_requires_repo_driven_validation_workflow() -> None:
@@ -126,8 +143,14 @@ def test_teacher_output_contract_block_wraps_shared_contract() -> None:
     )
     assert "Assistant output contract:" in prompt
     assert f"Terminal tool is '{config.TERMINAL_TOOL_NAME}'" in prompt
+    assert "Teacher-specific tool guidance:" in prompt
+    assert "Normal tool flow: use file_search to locate likely files" in prompt
+    assert "use text_search to locate exact strings or symbols inside a known scope" in prompt
+    assert "always include both args.path and args.patch" in prompt
+    assert "You may reuse an exact repo-relative path the student already found" in prompt
     assert "Now correctly solve the original issue, focus only on what to do best in the next turn." in prompt
     assert "Do not repeat an identical previously-failed command without a new hypothesis." not in prompt
+    assert "ls/search" not in prompt
 
 
 def test_prompt_contract_renders_tool_examples_from_tool_schemas() -> None:
@@ -144,14 +167,14 @@ def test_prompt_contract_renders_tool_examples_from_tool_schemas() -> None:
 
 
 def test_prompt_contract_schema_text_is_rendered_from_tool_schemas(monkeypatch: pytest.MonkeyPatch) -> None:
-    search_schema = dict(TOOL_SCHEMAS["search"])
+    search_schema = dict(TOOL_SCHEMAS["file_search"])
     constraints = dict(search_schema["constraints"])
     constraints["query"] = {"min_length": 7}
     search_schema["constraints"] = constraints
-    monkeypatch.setitem(TOOL_SCHEMAS, "search", search_schema)
+    monkeypatch.setitem(TOOL_SCHEMAS, "file_search", search_schema)
 
     prompt = build_assistant_contract_prompt()
-    assert "search args: required {query:str(min_len=7)}" in prompt
+    assert "file_search args: required {query:str(min_len=7)}" in prompt
 
 
 def test_prompt_contract_examples_are_environment_neutral() -> None:
@@ -173,6 +196,8 @@ def test_sdpo_followup_message_uses_canonical_tool_names() -> None:
     message = build_sdpo_rollout_followup_user_message()
 
     assert "read" in message
+    assert "file_search" in message
+    assert "text_search" in message
     assert "apply_patch" in message
     assert "edit" not in message
 

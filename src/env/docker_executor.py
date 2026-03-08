@@ -6,7 +6,7 @@ import subprocess
 import textwrap
 from typing import Any
 
-from .command_runner import CommandRunner, default_command_runner
+from .command_runner import CommandResult, CommandRunner, default_command_runner
 from .runtime_protocol import ToolRequest, ToolResponse
 
 _BASH_TIMEOUT_MIN = 1
@@ -15,10 +15,15 @@ _READ_LINE_NUMBER_MIN = 1
 _READ_LINE_NUMBER_MAX = 1_000_000_000
 _READ_MAX_LINES = 200
 _READ_MAX_STDOUT_CHARS = 8192
-_SEARCH_TOP_K_DEFAULT = 10
-_SEARCH_TOP_K_MIN = 1
-_SEARCH_TOP_K_MAX = 50
+_FILE_SEARCH_TOP_K_DEFAULT = 10
+_FILE_SEARCH_TOP_K_MIN = 1
+_FILE_SEARCH_TOP_K_MAX = 50
+_TEXT_SEARCH_TOP_K_DEFAULT = 10
+_TEXT_SEARCH_TOP_K_MIN = 1
+_TEXT_SEARCH_TOP_K_MAX = 50
 _APPLY_PATCH_BEGIN_MARKER = "*** Begin Patch"
+_FILE_SEARCH_ENGINE = "fuzzy_path"
+_TEXT_SEARCH_ENGINE = "grep"
 _PREFER_BASH_LOGIN_SHELL_WRAPPER = (
     'if command -v bash >/dev/null 2>&1; then '
     'exec bash -lc "$1"; '
@@ -37,9 +42,185 @@ _PYTHON_INTERPRETER_DISCOVERY_SNIPPET = (
     "exit 127; "
     "fi; "
 )
-_SEARCH_PYTHON_SCRIPT = textwrap.dedent(
+_FILE_SEARCH_PYTHON_SCRIPT = textwrap.dedent(
     """\
     import os
+    import sys
+
+    CANDIDATES = ("/testbed", "/workspace", "/repo", "/app")
+    IGNORED_DIRS = {
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".venv",
+        "venv",
+        "node_modules",
+        "build",
+        "dist",
+        ".tox",
+    }
+
+
+    def discover_repo_root() -> str:
+        for value in (os.environ.get("TASK_REPO_ROOT"), os.environ.get("SMALL_SWE_REPO_ROOT")):
+            if value and os.path.exists(value):
+                return os.path.abspath(value)
+        for candidate in CANDIDATES:
+            if os.path.isdir(os.path.join(candidate, ".git")):
+                return candidate
+        for candidate in CANDIDATES:
+            if os.path.isdir(candidate):
+                return candidate
+        return ""
+
+
+    def is_within_repo(candidate: str, repo_root: str) -> bool:
+        try:
+            return os.path.commonpath([os.path.abspath(candidate), repo_root]) == repo_root
+        except ValueError:
+            return False
+
+
+    def resolve_search_root(root: str, repo_root: str) -> str:
+        if not repo_root:
+            raise ValueError("file_search could not determine repo root")
+        candidate = repo_root
+        if root:
+            if os.path.isabs(root):
+                candidate = os.path.abspath(root)
+            else:
+                candidate = os.path.abspath(os.path.join(repo_root, root))
+        if not os.path.exists(candidate):
+            raise ValueError(f"file_search root not found: {root or repo_root}")
+        if not is_within_repo(candidate, repo_root):
+            raise ValueError(f"file_search root must resolve inside repo root: {root}")
+        return candidate
+
+
+    def iter_files(search_root: str):
+        if os.path.isfile(search_root):
+            if os.path.isfile(search_root):
+                yield search_root
+            return
+        for root, dirnames, filenames in os.walk(search_root):
+            dirnames[:] = sorted(
+                dirname
+                for dirname in dirnames
+                if dirname not in IGNORED_DIRS
+            )
+            filenames.sort()
+            for filename in filenames:
+                yield os.path.join(root, filename)
+
+
+    def is_subsequence(needle: str, haystack: str) -> bool:
+        if not needle:
+            return False
+        index = 0
+        for char in haystack:
+            if char == needle[index]:
+                index += 1
+                if index == len(needle):
+                    return True
+        return False
+
+
+    def score_path(relative_path: str, query: str) -> int | None:
+        lowered_query = query.lower().strip()
+        relative_lower = relative_path.lower()
+        basename_lower = os.path.basename(relative_path).lower()
+        tokens = [token for token in lowered_query.split() if token]
+        compact_query = "".join(tokens) if tokens else lowered_query.replace(" ", "")
+
+        matched = False
+        score = 0
+
+        if basename_lower == lowered_query:
+            score += 4000
+            matched = True
+        elif basename_lower.startswith(lowered_query):
+            score += 2600
+            matched = True
+        elif lowered_query in basename_lower:
+            score += 1800
+            matched = True
+
+        if relative_lower == lowered_query:
+            score += 3200
+            matched = True
+        elif relative_lower.startswith(lowered_query):
+            score += 1400
+            matched = True
+        elif lowered_query in relative_lower:
+            score += 900
+            matched = True
+
+        token_hits = 0
+        for token in tokens:
+            if token in basename_lower:
+                token_hits += 1
+                matched = True
+                if basename_lower == token:
+                    score += 900
+                elif basename_lower.startswith(token):
+                    score += 600
+                else:
+                    score += 350
+            elif token in relative_lower:
+                token_hits += 1
+                matched = True
+                score += 180
+
+        if tokens and token_hits == len(tokens):
+            score += 500
+
+        if compact_query and compact_query != lowered_query and compact_query in basename_lower:
+            matched = True
+            score += 220
+        elif compact_query and is_subsequence(compact_query, basename_lower):
+            matched = True
+            score += 140
+        elif compact_query and is_subsequence(compact_query, relative_lower):
+            matched = True
+            score += 80
+
+        if not matched:
+            return None
+
+        depth = relative_path.count("/")
+        score -= depth * 25
+        score -= len(relative_path)
+        return score
+
+
+    query = os.environ["QUERY"].strip()
+    top_k_plus_one = int(os.environ["TOP_K_PLUS_ONE"])
+    repo_root = discover_repo_root()
+    try:
+        search_root = resolve_search_root(os.environ.get("SEARCH_ROOT", ""), repo_root)
+    except ValueError as exc:
+        sys.stderr.write(str(exc) + "\\n")
+        raise SystemExit(1)
+
+    ranked_paths: list[tuple[int, str]] = []
+    for file_path in iter_files(search_root):
+        relative_path = os.path.relpath(file_path, repo_root).replace(os.sep, "/")
+        score = score_path(relative_path, query)
+        if score is None:
+            continue
+        ranked_paths.append((score, relative_path))
+
+    ranked_paths.sort(key=lambda item: (-item[0], item[1]))
+    for _score, relative_path in ranked_paths[:top_k_plus_one]:
+        sys.stdout.write(relative_path + "\\n")
+    raise SystemExit(0)
+    """
+)
+_TEXT_SEARCH_PYTHON_SCRIPT = textwrap.dedent(
+    """\
+    import os
+    import subprocess
     import sys
 
     CANDIDATES = ("/testbed", "/workspace", "/repo", "/app")
@@ -58,56 +239,104 @@ _SEARCH_PYTHON_SCRIPT = textwrap.dedent(
         return ""
 
 
-    def resolve_search_path(path_hint: str, repo_root: str) -> tuple[str, str | None]:
-        fallback = repo_root or "."
+    def resolve_path_hint(path_hint: str, repo_root: str) -> str:
         if not path_hint:
-            return fallback, None
+            if not repo_root:
+                raise ValueError("text_search could not determine repo root")
+            return repo_root
         if os.path.isabs(path_hint):
-            candidate = path_hint
-        elif repo_root:
-            candidate = os.path.join(repo_root, path_hint)
-        else:
-            candidate = path_hint
-        if os.path.exists(candidate):
-            return candidate, None
-        return fallback, f"search path_hint not found: {path_hint}; falling back to {fallback}"
+            return os.path.abspath(path_hint)
+        if repo_root:
+            return os.path.abspath(os.path.join(repo_root, path_hint))
+        return os.path.abspath(path_hint)
 
 
-    def iter_files(search_path: str):
-        if os.path.isfile(search_path):
-            yield search_path
-            return
-        for root, dirnames, filenames in os.walk(search_path):
-            dirnames.sort()
-            filenames.sort()
-            for filename in filenames:
-                yield os.path.join(root, filename)
+    def normalize_match_line(raw_line: str, repo_root: str) -> str | None:
+        stripped = raw_line.rstrip("\\n").rstrip("\\r")
+        parts = stripped.split(":", 2)
+        if len(parts) != 3:
+            return None
+        raw_path, line_number, snippet = parts
+        if not line_number.isdigit():
+            return None
+
+        absolute_path = os.path.abspath(raw_path)
+        normalized_path = absolute_path
+        if repo_root:
+            try:
+                in_repo = os.path.commonpath([absolute_path, repo_root]) == repo_root
+            except ValueError:
+                in_repo = False
+            if in_repo:
+                normalized_path = os.path.relpath(absolute_path, repo_root).replace(os.sep, "/")
+        return f"{normalized_path}:{line_number}:{snippet}"
 
 
     query = os.environ["QUERY"]
-    top_k = int(os.environ["TOP_K"])
+    top_k_plus_one = int(os.environ["TOP_K_PLUS_ONE"])
     repo_root = discover_repo_root()
-    search_path, warning = resolve_search_path(os.environ.get("PATH_HINT", ""), repo_root)
-    if warning:
-        sys.stderr.write(warning + "\\n")
+    path_hint = os.environ.get("PATH_HINT", "")
+    try:
+        search_target = resolve_path_hint(path_hint, repo_root)
+    except ValueError as exc:
+        sys.stderr.write(str(exc) + "\\n")
+        raise SystemExit(1)
 
-    errors = 0
-    matches = 0
-    for file_path in iter_files(search_path):
+    if not os.path.exists(search_target):
+        sys.stderr.write(f"text_search path_hint not found: {path_hint or search_target}\\n")
+        raise SystemExit(1)
+
+    if os.path.isdir(search_target):
+        command = ["grep", "-RInH", "-I", "-F", "--", query, search_target]
+    else:
+        command = ["grep", "-Hn", "-I", "-F", "--", query, search_target]
+
+    normalized_lines: list[str] = []
+    stderr_text = ""
+    stopped_early = False
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    try:
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            normalized = normalize_match_line(raw_line, repo_root)
+            if normalized is None:
+                continue
+            normalized_lines.append(normalized)
+            if len(normalized_lines) >= top_k_plus_one:
+                stopped_early = True
+                process.terminate()
+                break
         try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
-                for line_number, line in enumerate(handle, start=1):
-                    if query not in line:
-                        continue
-                    sys.stdout.write(f"{file_path}:{line_number}:{line.rstrip(chr(10))}\\n")
-                    matches += 1
-                    if matches >= top_k:
-                        raise SystemExit(errors)
-        except OSError as exc:
-            sys.stderr.write(f"{file_path}: {exc}\\n")
-            errors = 2
+            _unused_stdout, stderr_text = process.communicate(timeout=1 if stopped_early else None)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            _unused_stdout, stderr_text = process.communicate()
+    except Exception:
+        process.kill()
+        process.communicate()
+        raise
 
-    raise SystemExit(errors)
+    process_returncode = process.returncode
+    if stopped_early and process_returncode == -15:
+        process_returncode = 0
+    if process_returncode not in (0, 1):
+        if normalized_lines:
+            sys.stdout.write("\\n".join(normalized_lines) + "\\n")
+        if stderr_text:
+            sys.stderr.write(stderr_text)
+        raise SystemExit(process_returncode)
+
+    if normalized_lines:
+        sys.stdout.write("\\n".join(normalized_lines) + "\\n")
+    if stderr_text:
+        sys.stderr.write(stderr_text)
+    raise SystemExit(0)
     """
 )
 _READ_PYTHON_SCRIPT = textwrap.dedent(
@@ -235,8 +464,10 @@ class DockerToolExecutor:
             return self._run_bash(request.args)
         if request.tool == "read":
             return self._run_read(request.args)
-        if request.tool == "search":
-            return self._run_search(request.args)
+        if request.tool == "file_search":
+            return self._run_file_search(request.args)
+        if request.tool == "text_search":
+            return self._run_text_search(request.args)
         if request.tool in {"apply_patch", "edit"}:
             return self._run_apply_patch(request.args)
 
@@ -291,45 +522,105 @@ class DockerToolExecutor:
             stdin_text=stdin_payload,
         )
 
-    def _run_search(self, args: dict[str, Any]) -> ToolResponse:
+    def _run_file_search(self, args: dict[str, Any]) -> ToolResponse:
         errors: list[str] = []
         self._reject_unknown_args(
             args,
-            allowed={"query", "path_hint", "top_k"},
-            tool_name="search",
+            allowed={"query", "root", "top_k"},
+            tool_name="file_search",
             errors=errors,
         )
-        query = self._require_non_empty_str(args, key="query", tool_name="search", errors=errors)
-        path_hint = self._optional_str(args, key="path_hint", tool_name="search", errors=errors)
+        query = self._require_non_empty_str(args, key="query", tool_name="file_search", errors=errors)
+        root = self._optional_non_empty_str(args, key="root", tool_name="file_search", errors=errors)
         top_k = self._optional_int_in_range(
             args,
             key="top_k",
-            tool_name="search",
-            minimum=_SEARCH_TOP_K_MIN,
-            maximum=_SEARCH_TOP_K_MAX,
-            default=_SEARCH_TOP_K_DEFAULT,
+            tool_name="file_search",
+            minimum=_FILE_SEARCH_TOP_K_MIN,
+            maximum=_FILE_SEARCH_TOP_K_MAX,
+            default=_FILE_SEARCH_TOP_K_DEFAULT,
             errors=errors,
         )
         if errors:
             return self._validation_error(errors)
 
-        resolved_path = path_hint if path_hint else ""
-        search_cmd = _build_container_python_shell(_SEARCH_PYTHON_SCRIPT)
+        search_cmd = _build_container_python_shell(_FILE_SEARCH_PYTHON_SCRIPT)
         docker_cmd = [
             "docker",
             "exec",
             "-e",
             f"QUERY={query or ''}",
             "-e",
-            f"PATH_HINT={resolved_path}",
+            f"SEARCH_ROOT={root or ''}",
             "-e",
-            f"TOP_K={top_k or _SEARCH_TOP_K_DEFAULT}",
+            f"TOP_K_PLUS_ONE={(top_k or _FILE_SEARCH_TOP_K_DEFAULT) + 1}",
             self._container_id,
             "sh",
             "-lc",
             search_cmd,
         ]
-        return self._run_command(docker_cmd, timeout_sec=self._tool_timeout_sec)
+        return self._run_compact_search_command(
+            docker_cmd,
+            timeout_sec=self._tool_timeout_sec,
+            top_k=top_k or _FILE_SEARCH_TOP_K_DEFAULT,
+            engine=_FILE_SEARCH_ENGINE,
+        )
+
+    def _run_text_search(self, args: dict[str, Any]) -> ToolResponse:
+        errors: list[str] = []
+        self._reject_unknown_args(
+            args,
+            allowed={"query", "path_hint", "top_k"},
+            tool_name="text_search",
+            errors=errors,
+        )
+        query = self._require_non_empty_str(args, key="query", tool_name="text_search", errors=errors)
+        path_hint = self._optional_non_empty_str(
+            args,
+            key="path_hint",
+            tool_name="text_search",
+            errors=errors,
+        )
+        top_k = self._optional_int_in_range(
+            args,
+            key="top_k",
+            tool_name="text_search",
+            minimum=_TEXT_SEARCH_TOP_K_MIN,
+            maximum=_TEXT_SEARCH_TOP_K_MAX,
+            default=_TEXT_SEARCH_TOP_K_DEFAULT,
+            errors=errors,
+        )
+        if errors:
+            return self._validation_error(errors)
+
+        search_cmd = (
+            "set -eu; "
+            "if ! command -v grep >/dev/null 2>&1; then "
+            'printf "grep is required for text_search but was not found.\\n" >&2; '
+            "exit 127; "
+            "fi; "
+            + _build_container_python_shell(_TEXT_SEARCH_PYTHON_SCRIPT)
+        )
+        docker_cmd = [
+            "docker",
+            "exec",
+            "-e",
+            f"QUERY={query or ''}",
+            "-e",
+            f"PATH_HINT={path_hint or ''}",
+            "-e",
+            f"TOP_K_PLUS_ONE={(top_k or _TEXT_SEARCH_TOP_K_DEFAULT) + 1}",
+            self._container_id,
+            "sh",
+            "-lc",
+            search_cmd,
+        ]
+        return self._run_compact_search_command(
+            docker_cmd,
+            timeout_sec=self._tool_timeout_sec,
+            top_k=top_k or _TEXT_SEARCH_TOP_K_DEFAULT,
+            engine=_TEXT_SEARCH_ENGINE,
+        )
 
     def _run_read(self, args: dict[str, Any]) -> ToolResponse:
         errors: list[str] = []
@@ -480,13 +771,13 @@ class DockerToolExecutor:
         ]
         return self._run_command(docker_cmd, timeout_sec=timeout_sec, stdin_text=patch_text)
 
-    def _run_command(
+    def _invoke_runner(
         self,
         command: list[str],
         *,
         timeout_sec: int,
         stdin_text: str | None = None,
-    ) -> ToolResponse:
+    ) -> CommandResult | ToolResponse:
         try:
             if stdin_text is None:
                 result = self._runner(command, timeout_sec=timeout_sec)
@@ -510,11 +801,52 @@ class DockerToolExecutor:
                 exit_code=127,
                 metadata={"container_id": self._container_id},
             )
+        return result
+
+    def _run_command(
+        self,
+        command: list[str],
+        *,
+        timeout_sec: int,
+        stdin_text: str | None = None,
+    ) -> ToolResponse:
+        result = self._invoke_runner(command, timeout_sec=timeout_sec, stdin_text=stdin_text)
+        if isinstance(result, ToolResponse):
+            return result
         return ToolResponse(
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.returncode,
             metadata={"container_id": self._container_id},
+        )
+
+    def _run_compact_search_command(
+        self,
+        command: list[str],
+        *,
+        timeout_sec: int,
+        top_k: int,
+        engine: str,
+    ) -> ToolResponse:
+        result = self._invoke_runner(command, timeout_sec=timeout_sec)
+        if isinstance(result, ToolResponse):
+            return result
+
+        output_lines = result.stdout.splitlines()
+        truncated = len(output_lines) > top_k
+        returned_lines = output_lines[:top_k]
+        stdout = "\n".join(returned_lines)
+        if stdout:
+            stdout += "\n"
+        return ToolResponse(
+            stdout=stdout,
+            stderr=result.stderr,
+            exit_code=result.returncode,
+            metadata={
+                "engine": engine,
+                "returned_count": len(returned_lines),
+                "truncated": truncated,
+            },
         )
 
     def _validation_error(self, errors: list[str]) -> ToolResponse:

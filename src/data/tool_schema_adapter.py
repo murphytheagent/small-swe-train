@@ -52,12 +52,6 @@ def adapt_external_tool_call(tool_name: str, args: Mapping[str, Any]) -> ToolCal
                 read_args["end_line"] = end_line
         return ToolCall(tool="read", args=read_args)
 
-    if canonical_tool == "search":
-        query = args.get("path") or args.get("query") or args.get("target")
-        if not isinstance(query, str) or not query.strip():
-            raise ValueError("search adapter requires a query/path-like source field")
-        return ToolCall(tool="search", args={"query": query, "path_hint": args.get("path", "")})
-
     if canonical_tool == "apply_patch":
         path = args.get("path")
         if not isinstance(path, str) or not path.strip():

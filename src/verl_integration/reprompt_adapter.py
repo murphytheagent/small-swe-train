@@ -13,11 +13,10 @@ from teacher.prompt_builder import TeacherPromptInputs, build_teacher_prompt
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 DEFAULT_NUM_RECENT_RAW_BLOCKS = 3
-DEFAULT_MAX_REPROMPT_LEN = 12288
+DEFAULT_MAX_REPROMPT_LEN = 16384
 _TURN_SUPERVISION_NEXT = "next_turn"
 _TURN_SUPERVISION_CURRENT = "current_turn"
 _TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
-_CURRENT_TURN_ATTEMPT_PLACEHOLDER = "<omitted_current_turn_target_text>"
 LOGGER = logging.getLogger(__name__)
 _VERIFIER_FEEDBACK_NONE = "none"
 _VERIFIER_FEEDBACK_FINAL_TURN_ONLY = "final_turn_only"
@@ -189,8 +188,6 @@ def _compact_teacher_prompt(
         sections=sections,
         max_reprompt_len=max_reprompt_len,
         reduction_order=(
-            "critical_facts_block",
-            "compressed_memory_block",
             "recent_raw_block",
             "feedback_main",
         ),
@@ -204,6 +201,8 @@ def _compact_teacher_prompt(
     protected_token_floors = {
         "initial_prompt_block": min(_token_count(sections["initial_prompt_block"]), 24),
         "current_attempt_block": min(_token_count(sections["current_attempt_block"]), 16),
+        "compressed_memory_block": min(_token_count(sections["compressed_memory_block"]), 16),
+        "critical_facts_block": min(_token_count(sections["critical_facts_block"]), 24),
         "verifier_feedback_block": min(_token_count(sections["verifier_feedback_block"]), 32),
         "output_contract_block": min(_token_count(sections["output_contract_block"]), 32),
     }
@@ -213,6 +212,8 @@ def _compact_teacher_prompt(
         reduction_order=(
             "initial_prompt_block",
             "current_attempt_block",
+            "compressed_memory_block",
+            "critical_facts_block",
             "verifier_feedback_block",
             "output_contract_block",
         ),
@@ -463,22 +464,14 @@ def _normalize_turn_tool_blocks(
 
 def _build_current_attempt_block(
     *,
-    supervision_mode: str,
     current_turn_index: int,
     turn_blocks: Sequence[str],
-    turn_tool_blocks: Sequence[Sequence[str]],
     include_student_attempt_for_teacher: bool,
 ) -> str:
     if not include_student_attempt_for_teacher:
         return ""
-    if supervision_mode != _TURN_SUPERVISION_CURRENT:
-        return turn_blocks[current_turn_index]
-    # Avoid target-token leakage while preserving same-turn tool-response context.
-    return _format_turn_block(
-        turn_index=current_turn_index,
-        assistant_text=_CURRENT_TURN_ATTEMPT_PLACEHOLDER,
-        tool_response_blocks=turn_tool_blocks[current_turn_index],
-    )
+    # Current-turn SDPO intentionally keeps the student's raw assistant text in prompt context.
+    return turn_blocks[current_turn_index]
 
 
 def _build_recent_raw_block(
@@ -716,6 +709,7 @@ def _build_turn_prompt(
     turn_blocks: Sequence[str],
     turn_tool_blocks: Sequence[Sequence[str]],
     include_student_attempt_for_teacher: bool,
+    include_teacher_memory_blocks: bool,
     include_canonicalized_feedback_in_additional_feedback: bool,
     max_reprompt_len: int,
     num_recent_raw_blocks: int,
@@ -729,7 +723,12 @@ def _build_turn_prompt(
         include_student_attempt_for_teacher=include_student_attempt_for_teacher,
     )
 
-    memory_blocks = build_teacher_memory_blocks(sample, current_turn_index=current_turn_index)
+    memory_blocks = build_teacher_memory_blocks(
+        sample,
+        current_turn_index=current_turn_index,
+        include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+        include_teacher_memory_blocks=include_teacher_memory_blocks,
+    )
     recent_raw_block = _build_recent_raw_block(
         turn_blocks,
         current_turn_index=current_turn_index,
@@ -737,10 +736,8 @@ def _build_turn_prompt(
     )
 
     current_attempt_block = _build_current_attempt_block(
-        supervision_mode=supervision_mode,
         current_turn_index=current_turn_index,
         turn_blocks=turn_blocks,
-        turn_tool_blocks=turn_tool_blocks,
         include_student_attempt_for_teacher=include_student_attempt_for_teacher,
     )
 
@@ -788,6 +785,7 @@ def _build_legacy_prompt_for_sample(
     step_index: int,
     supervision_mode: str,
     include_student_attempt_for_teacher: bool,
+    include_teacher_memory_blocks: bool,
     include_canonicalized_feedback_in_additional_feedback: bool,
     max_reprompt_len: int,
     verifier_feedback_mode: str,
@@ -827,7 +825,12 @@ def _build_legacy_prompt_for_sample(
         else:
             combined_feedback_block = verifier_feedback_block
 
-    memory_blocks = build_teacher_memory_blocks(sample, current_turn_index=step_index)
+    memory_blocks = build_teacher_memory_blocks(
+        sample,
+        current_turn_index=step_index,
+        include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+        include_teacher_memory_blocks=include_teacher_memory_blocks,
+    )
     truncated_prompt, was_truncated = _compact_teacher_prompt(
         initial_prompt_block=_format_initial_prompt_block(sample),
         recent_raw_block=str(sample.get("recent_raw_block", "")),
@@ -853,6 +856,7 @@ def build_self_distillation_batch(
     samples: Sequence[Mapping[str, Any]],
     *,
     include_student_attempt_for_teacher: bool = True,
+    include_teacher_memory_blocks: bool = True,
     max_reprompt_len: int = DEFAULT_MAX_REPROMPT_LEN,
     num_recent_raw_blocks: int = DEFAULT_NUM_RECENT_RAW_BLOCKS,
     turn_supervision_mode: str = _TURN_SUPERVISION_CURRENT,
@@ -865,6 +869,10 @@ def build_self_distillation_batch(
     normalized_verifier_feedback_mode = _normalize_verifier_feedback_mode(verifier_feedback_mode)
     normalized_legacy_gating_policy = _normalize_legacy_gating_policy(
         legacy_distillation_gating_policy
+    )
+    normalized_include_teacher_memory_blocks = _coerce_bool_flag(
+        include_teacher_memory_blocks,
+        fallback=True,
     )
 
     teacher_prompts: list[str] = []
@@ -932,6 +940,7 @@ def build_self_distillation_batch(
                     turn_blocks=turn_blocks,
                     turn_tool_blocks=per_turn_tool_blocks,
                     include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+                    include_teacher_memory_blocks=normalized_include_teacher_memory_blocks,
                     include_canonicalized_feedback_in_additional_feedback=(
                         include_canonicalized_feedback_in_additional_feedback
                     ),
@@ -975,6 +984,7 @@ def build_self_distillation_batch(
             step_index=step_index,
             supervision_mode=normalized_turn_supervision_mode,
             include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+            include_teacher_memory_blocks=normalized_include_teacher_memory_blocks,
             include_canonicalized_feedback_in_additional_feedback=(
                 include_canonicalized_feedback_in_additional_feedback
             ),

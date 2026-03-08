@@ -164,8 +164,7 @@ def test_build_multiturn_dataset_records_uses_reward_ground_truth_test_targets_w
     assert records[0]["reward_model"]["ground_truth"]["pass_to_pass"] == [
         "tests/test_ok.py::test_regression"
     ]
-    assert "tests/test_bug.py::test_bugfix" in records[0]["messages"][0]["content"]
-    assert "tests/test_ok.py::test_regression" in records[0]["messages"][0]["content"]
+    assert "Task objective:" in records[0]["messages"][0]["content"]
 
 
 def test_build_multiturn_dataset_records_requires_image_name() -> None:

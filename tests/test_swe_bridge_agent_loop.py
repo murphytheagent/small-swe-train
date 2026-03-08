@@ -222,7 +222,7 @@ def test_build_agent_loop_messages_adds_system_prompt_and_trailing_user_nudge() 
         {
             "raw_prompt": [
                 {"role": "user", "content": "Investigate the failing test."},
-                {"role": "assistant", "content": "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"test\"}}</tool_call>"},
+                {"role": "assistant", "content": "<tool_call>{\"tool\":\"text_search\",\"args\":{\"query\":\"test\"}}</tool_call>"},
             ]
         }
     )

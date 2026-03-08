@@ -21,14 +21,14 @@ def test_run_env_bridge_step_executes_tool_calls_in_order() -> None:
     executor = FakeExecutor(requests=[])
     assistant_text = """
 <think>inspect then patch</think>
-<tool_call>{"tool":"search","args":{"query":"a"}}</tool_call>
+<tool_call>{"tool":"text_search","args":{"query":"a"}}</tool_call>
 <tool_call>{"tool":"apply_patch","args":{"path":"x.py","patch":"+x"}}</tool_call>
 """
 
     result = run_env_bridge_step(assistant_text, executor=executor, max_tool_calls=3)
 
     assert result.is_terminal is False
-    assert [request.tool for request in executor.requests] == ["search", "apply_patch"]
+    assert [request.tool for request in executor.requests] == ["text_search", "apply_patch"]
     assert len(result.steps) == 2
     assert all("<tool_response>" in block for block in result.tool_response_blocks)
 
@@ -90,7 +90,7 @@ def test_run_env_bridge_step_truncates_long_tool_response_payloads() -> None:
             return ToolResponse(stdout=long_stdout, stderr="", exit_code=0)
 
     executor = LongOutputExecutor(requests=[])
-    assistant_text = '<tool_call>{"tool":"search","args":{"query":"long output"}}</tool_call>'
+    assistant_text = '<tool_call>{"tool":"text_search","args":{"query":"long output"}}</tool_call>'
 
     result = run_env_bridge_step(assistant_text, executor=executor, max_tool_calls=3)
 

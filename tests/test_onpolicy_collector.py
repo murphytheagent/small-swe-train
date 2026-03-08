@@ -200,7 +200,7 @@ def test_onpolicy_collector_collects_terminal_attempt_rows() -> None:
     def turn_generator(**kwargs: object) -> str:
         turn_index = int(kwargs["turn_index"])
         if turn_index == 0:
-            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+            return '<tool_call>{"tool":"text_search","args":{"query":"foo"}}</tool_call>'
         return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
 
     collector = OnPolicyRolloutCollector(
@@ -249,7 +249,7 @@ def test_onpolicy_collector_truncates_tool_output_payload_fields() -> None:
     def turn_generator(**kwargs: object) -> str:
         turn_index = int(kwargs["turn_index"])
         if turn_index == 0:
-            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+            return '<tool_call>{"tool":"text_search","args":{"query":"foo"}}</tool_call>'
         return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
 
     collector = OnPolicyRolloutCollector(
@@ -334,7 +334,7 @@ def test_onpolicy_collector_resolver_sees_full_attempt_history() -> None:
     def turn_generator(**kwargs: object) -> str:
         turn_index = int(kwargs["turn_index"])
         if turn_index == 0:
-            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+            return '<tool_call>{"tool":"text_search","args":{"query":"foo"}}</tool_call>'
         if turn_index == 1:
             return '<tool_call>{"tool":"bash","args":{"command":"echo ok"}}</tool_call>'
         return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
@@ -574,7 +574,7 @@ def test_onpolicy_collector_applies_task_patch_before_rollout_turns() -> None:
     def turn_generator(**kwargs: object) -> str:
         turn_index = int(kwargs["turn_index"])
         if turn_index == 0:
-            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+            return '<tool_call>{"tool":"text_search","args":{"query":"foo"}}</tool_call>'
         return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
 
     collector = OnPolicyRolloutCollector(
@@ -606,7 +606,7 @@ def test_onpolicy_collector_applies_task_patch_before_rollout_turns() -> None:
     assert "git apply --3way" in str(executor.requests[0].args.get("command", ""))
     assert "patch --batch --forward -p1" in str(executor.requests[0].args.get("command", ""))
     assert "git apply --reverse --check" in str(executor.requests[0].args.get("command", ""))
-    assert executor.requests[1].tool == "search"
+    assert executor.requests[1].tool == "text_search"
     assert rows[0]["resolved"] is True
     assert rows[0]["task_patch_applied"] is True
     assert rows[0]["container_init_succeeded"] is True
@@ -622,7 +622,7 @@ def test_onpolicy_collector_retries_task_patch_init_once_on_transient_executor_e
     def turn_generator(**kwargs: object) -> str:
         turn_index = int(kwargs["turn_index"])
         if turn_index == 0:
-            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+            return '<tool_call>{"tool":"text_search","args":{"query":"foo"}}</tool_call>'
         return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
 
     collector = OnPolicyRolloutCollector(
@@ -651,7 +651,7 @@ def test_onpolicy_collector_retries_task_patch_init_once_on_transient_executor_e
     assert rows[0]["container_init_succeeded"] is True
     assert "executor_error" not in rows[0]
     assert [request.tool for request in flaky_executor.requests[:2]] == ["bash", "bash"]
-    assert flaky_executor.requests[2].tool == "search"
+    assert flaky_executor.requests[2].tool == "text_search"
 
 
 def test_onpolicy_collector_keeps_batch_running_when_patch_init_executor_raises() -> None:
@@ -723,7 +723,7 @@ def test_onpolicy_collector_keeps_tool_output_aligned_with_first_tool_call() -> 
         turn_index = int(kwargs["turn_index"])
         if turn_index == 0:
             return (
-                '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+                '<tool_call>{"tool":"text_search","args":{"query":"foo"}}</tool_call>'
                 '\n<tool_call>{"tool":"bash","args":{"command":"echo second"}}</tool_call>'
             )
         return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
@@ -741,11 +741,11 @@ def test_onpolicy_collector_keeps_tool_output_aligned_with_first_tool_call() -> 
     assert len(rows) == 1
     row = rows[0]
     assert row["is_terminal"] is True
-    assert row["tool_name"] == "search"
-    assert row["tool_output"]["stdout"] == "ran:search"
+    assert row["tool_name"] == "text_search"
+    assert row["tool_output"]["stdout"] == "ran:text_search"
     assert row["turn_index"] == 0
-    assert '"tool":"search"' in row["assistant_response"]
-    assert row["trajectory_steps"][0]["tool"] == "search"
+    assert '"tool":"text_search"' in row["assistant_response"]
+    assert row["trajectory_steps"][0]["tool"] == "text_search"
 
 
 def test_onpolicy_collector_keeps_failed_bridge_turn_in_trajectory_history(
@@ -821,7 +821,7 @@ def test_onpolicy_collector_continues_after_nonzero_tool_exit_until_submit() -> 
 
         def run(self, request: ToolRequest) -> ToolResponse:
             self.requests.append(request)
-            if request.tool == "search":
+            if request.tool == "text_search":
                 return ToolResponse(
                     stdout="",
                     stderr="simulated lookup failure",
@@ -834,7 +834,7 @@ def test_onpolicy_collector_continues_after_nonzero_tool_exit_until_submit() -> 
     def turn_generator(**kwargs: object) -> str:
         turn_index = int(kwargs["turn_index"])
         if turn_index == 0:
-            return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+            return '<tool_call>{"tool":"text_search","args":{"query":"foo"}}</tool_call>'
         return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
 
     collector = OnPolicyRolloutCollector(
@@ -856,5 +856,5 @@ def test_onpolicy_collector_continues_after_nonzero_tool_exit_until_submit() -> 
     assert "executor_error" in row
     assert "simulated lookup failure" in str(row["executor_error"])
     assert len(row["trajectory_steps"]) == 1
-    assert row["trajectory_steps"][0]["tool"] == "search"
-    assert [request.tool for request in executor.requests] == ["search"]
+    assert row["trajectory_steps"][0]["tool"] == "text_search"
+    assert [request.tool for request in executor.requests] == ["text_search"]

@@ -28,6 +28,8 @@ def test_build_self_distillation_batch_contains_contract_blocks() -> None:
     assert "Below is the current turn in the student's attempt:" in prompt
     assert "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:" in prompt
     assert "Assistant output contract:" in prompt
+    assert "Teacher-specific tool guidance:" in prompt
+    assert "You may reuse an exact repo-relative path the student already found" in prompt
     assert batch["self_distillation_mask"] == [False]
 
 
@@ -275,6 +277,7 @@ def test_build_self_distillation_batch_treats_false_string_as_unresolved(monkeyp
         step_index,
         supervision_mode,
         include_student_attempt_for_teacher,
+        include_teacher_memory_blocks,
         include_canonicalized_feedback_in_additional_feedback,
         max_reprompt_len,
         verifier_feedback_mode,
@@ -284,6 +287,7 @@ def test_build_self_distillation_batch_treats_false_string_as_unresolved(monkeyp
             step_index,
             supervision_mode,
             include_student_attempt_for_teacher,
+            include_teacher_memory_blocks,
             include_canonicalized_feedback_in_additional_feedback,
             max_reprompt_len,
             verifier_feedback_mode,
@@ -307,13 +311,13 @@ def test_build_self_distillation_batch_emits_turn_level_pairs() -> None:
             "prompt": "Fix issue",
             "_response_mask": [1, 1, 0, 0, 1, 1, 0, 1, 1],
             "trajectory_assistant_turns": [
-                "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"x\"}}</tool_call>",
+                "<tool_call>{\"tool\":\"text_search\",\"args\":{\"query\":\"x\"}}</tool_call>",
                 "<tool_call>{\"tool\":\"bash\",\"args\":{\"command\":\"pytest -q\"}}</tool_call>",
                 "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>",
             ],
             "trajectory_assistant_turn_token_lengths": [2, 2, 2],
             "trajectory_turn_tool_response_blocks": [
-                ["<tool_response>search output</tool_response>"],
+                ["<tool_response>text_search output</tool_response>"],
                 ["<tool_response>pytest failed</tool_response>"],
                 [],
             ],
@@ -583,7 +587,7 @@ def test_invalid_legacy_gating_policy_raises() -> None:
         build_self_distillation_batch([], legacy_distillation_gating_policy="bad_policy")
 
 
-def test_current_turn_mode_omits_target_turn_attempt_text_when_enabled() -> None:
+def test_current_turn_mode_keeps_target_turn_attempt_text_when_enabled() -> None:
     samples = [
         {
             "prompt": "Fix issue",
@@ -608,10 +612,8 @@ def test_current_turn_mode_omits_target_turn_attempt_text_when_enabled() -> None
 
     prompt_turn_0 = batch["turn_teacher_prompts"][0][0]
     prompt_turn_1 = batch["turn_teacher_prompts"][0][1]
-    assert "TURN0_SECRET_STUDENT_ATTEMPT" not in prompt_turn_0
-    assert "TURN1_SECRET_STUDENT_ATTEMPT" not in prompt_turn_1
-    assert "<omitted_current_turn_target_text>" in prompt_turn_0
-    assert "<omitted_current_turn_target_text>" in prompt_turn_1
+    assert "TURN0_SECRET_STUDENT_ATTEMPT" in prompt_turn_0
+    assert "TURN1_SECRET_STUDENT_ATTEMPT" in prompt_turn_1
     assert "Produce the best corrected action for the current turn." in prompt_turn_0
 
 

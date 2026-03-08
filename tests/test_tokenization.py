@@ -50,7 +50,7 @@ def test_build_labeled_spans_from_envelope() -> None:
 
 def test_build_labeled_spans_no_thinking() -> None:
     envelope = ActionEnvelope(
-        tool_calls=(ToolCall(tool="search", args={"query": "bug"}),),
+        tool_calls=(ToolCall(tool="text_search", args={"query": "bug"}),),
     )
 
     text, spans = build_labeled_spans(envelope)
@@ -162,7 +162,7 @@ def test_tokenize_batch_with_labels_prefers_batched_tokenization() -> None:
     )
     second_text, second_spans = build_labeled_spans(
         ActionEnvelope(
-            tool_calls=(ToolCall(tool="search", args={"query": "bug"}),),
+            tool_calls=(ToolCall(tool="text_search", args={"query": "bug"}),),
             thinking="inspect",
         )
     )
@@ -192,7 +192,7 @@ def test_tokenize_batch_with_labels_falls_back_to_sequential() -> None:
     )
     second_text, second_spans = build_labeled_spans(
         ActionEnvelope(
-            tool_calls=(ToolCall(tool="search", args={"query": "bug"}),),
+            tool_calls=(ToolCall(tool="text_search", args={"query": "bug"}),),
             thinking="inspect",
         )
     )

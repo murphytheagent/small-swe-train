@@ -357,7 +357,7 @@ def test_collect_rft_sft_batch_for_steps_filters_failed_attempts(tmp_path: Path)
         turn_index = int(kwargs["turn_index"])
         if attempt_index == 0:
             if turn_index == 0:
-                return '<tool_call>{"tool":"search","args":{"query":"foo"}}</tool_call>'
+                return '<tool_call>{"tool":"text_search","args":{"query":"foo"}}</tool_call>'
             return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
         return '<tool_call>{"tool":"submit","args":{}}</tool_call>'
 

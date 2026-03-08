@@ -54,7 +54,7 @@ sbatch \
   --gres="gpu:${GPUS}" \
   --cpus-per-task="${CPUS}" \
   --mem="${MEM}" \
-  --time=6:00:00 \
+  --time=24:00:00 \
   --job-name=small-swe-rft \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
@@ -269,7 +269,8 @@ This launcher starts a local vLLM OpenAI endpoint and runs
 requesting `--gres=gpu:x` yields `tensor-parallel-size=x`. For ablations, set
 `PILOT_VLLM_TP_SIZE=${GPUS}` explicitly.
 If `PILOT_TEACHER_TURN_INDEX=-1` is provided, the launcher auto-normalizes to
-`--teacher-reprompt-turn-index-mode dynamic_middle`.
+`--teacher-reprompt-turn-index-mode dynamic_middle`, which now samples one
+eligible student turn uniformly at random.
 
 RFT checkpoint selection is resolved via `run_teacher_reprompt_pilot.py` and
 applied everywhere in the launcher (`--model`, `--served-model-name`, and pilot
@@ -346,7 +347,7 @@ below are the intended ones. For RFT artifacts, swap `RFT_SELECTOR` between
 Comprehensive RFT-checkpoint submit:
 
 ```bash
-GPUS=2
+GPUS=8
 CPUS=$((GPUS * 16))
 MEM="$((GPUS * 48))G"
 RFT_SELECTOR="--load-latest-rft-checkpoint"
@@ -369,16 +370,16 @@ sbatch \
     && export PILOT_TEACHER_TURN_INDEX_MODE=dynamic_middle \
     && export PILOT_TEACHER_TURN_INDEX=-1 \
     && export PILOT_TURN_SUPERVISION_MODE=current_turn \
-    && export PILOT_VERIFIER_FEEDBACK_MODE=all_turns \
+    && export PILOT_VERIFIER_FEEDBACK_MODE=none \
     && export PILOT_MAX_MODEL_LEN=32768 \
-    && export PILOT_GPU_MEMORY_UTILIZATION=0.90 \
+    && export PILOT_GPU_MEMORY_UTILIZATION=0.85 \
     && bash scripts/run_teacher_reprompt_pilot_slurm.sh ${RFT_SELECTOR}"
 ```
 
 Comprehensive HF-model submit:
 
 ```bash
-GPUS=8
+GPUS=4
 CPUS=$((GPUS * 16))
 MEM="$((GPUS * 48))G"
 
@@ -398,14 +399,14 @@ sbatch \
     && export PILOT_MODEL_PATH=Qwen/Qwen3.5-9B \
     && export PILOT_SERVED_MODEL=Qwen/Qwen3.5-9B \
     && export PILOT_STUDENT_TEMPERATURE=0.6 \
-    && export PILOT_TEACHER_TEMPERATURE=0.3 \
+    && export PILOT_TEACHER_TEMPERATURE=0.6 \
     && export HF_TOKEN=\${HF_TOKEN:-} \
     && export PILOT_TEACHER_TURN_INDEX_MODE=dynamic_middle \
     && export PILOT_TEACHER_TURN_INDEX=-1 \
     && export PILOT_TURN_SUPERVISION_MODE=current_turn \
     && export PILOT_VERIFIER_FEEDBACK_MODE=all_turns \
-    && export PILOT_MAX_MODEL_LEN=16384 \
-    && export PILOT_GPU_MEMORY_UTILIZATION=0.75 \
+    && export PILOT_MAX_MODEL_LEN=32768 \
+    && export PILOT_GPU_MEMORY_UTILIZATION=0.60 \
     && bash scripts/run_teacher_reprompt_pilot_slurm.sh"
 ```
 

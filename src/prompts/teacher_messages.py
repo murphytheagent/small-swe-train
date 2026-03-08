@@ -9,6 +9,11 @@ from .runtime_messages import build_assistant_contract_prompt
 
 _TURN_SUPERVISION_NEXT = "next_turn"
 _TURN_SUPERVISION_CURRENT = "current_turn"
+_TEACHER_TOOL_USAGE_GUIDANCE = (
+    "Teacher-specific tool guidance:\n"
+    "- Normal tool flow: use file_search to locate likely files, use text_search to locate exact strings or symbols inside a known scope, use read to inspect contents, and use apply_patch to edit; for apply_patch always include both args.path and args.patch.\n"
+    "- You may reuse an exact repo-relative path the student already found for your own read, text_search, or apply_patch calls; do not guess new prefixes or repeat file_search unless needed.\n"
+)
 
 
 def _normalize_supervision_mode(value: str | None) -> str:
@@ -41,10 +46,12 @@ def build_teacher_output_contract_block(
         return (
             "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:\n"
             f"{base_contract}\n"
+            f"{_TEACHER_TOOL_USAGE_GUIDANCE}"
             "Produce the best corrected action for the current turn.\n"
         )
     return (
         "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:\n"
         f"{base_contract}\n"
+        f"{_TEACHER_TOOL_USAGE_GUIDANCE}"
         "Now correctly solve the original issue, focus only on what to do best in the next turn.\n"
     )

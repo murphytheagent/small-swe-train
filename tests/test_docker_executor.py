@@ -245,7 +245,7 @@ def test_docker_executor_apply_patch_requires_path_for_legacy_payload() -> None:
     assert "Missing required arg 'path'" in response.stderr
 
 
-def test_docker_executor_search_command_does_not_suppress_errors() -> None:
+def test_docker_executor_file_search_command_uses_repo_rooted_fuzzy_ranker() -> None:
     commands: list[list[str]] = []
 
     def runner(command: list[str], *, timeout_sec: int) -> CommandResult:
@@ -258,15 +258,42 @@ def test_docker_executor_search_command_does_not_suppress_errors() -> None:
         tool_timeout_sec=30,
         runner=runner,
     )
-    response = executor.run(ToolRequest(tool="search", args={"query": "needle", "top_k": 5}))
+    response = executor.run(ToolRequest(tool="file_search", args={"query": "needle", "top_k": 5}))
 
     assert response.exit_code == 0
     script = commands[0][-1]
     assert "2>/dev/null" not in script
     assert "|| true" not in script
     assert 'for candidate in python3 python; do ' in script
-    assert 'search path_hint not found: ' in script
-    assert "matches >= top_k" in script
+    assert "IGNORED_DIRS" in script
+    assert "file_search root must resolve inside repo root" in script
+    assert response.metadata == {"engine": "fuzzy_path", "returned_count": 0, "truncated": False}
+
+
+def test_docker_executor_text_search_command_uses_grep_without_suppressing_errors() -> None:
+    commands: list[list[str]] = []
+
+    def runner(command: list[str], *, timeout_sec: int) -> CommandResult:
+        del timeout_sec
+        commands.append(list(command))
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=runner,
+    )
+    response = executor.run(ToolRequest(tool="text_search", args={"query": "needle", "top_k": 5}))
+
+    assert response.exit_code == 0
+    script = commands[0][-1]
+    assert "2>/dev/null" not in script
+    assert "|| true" not in script
+    assert "command -v grep" in script
+    assert "grep is required for text_search but was not found." in script
+    assert '"grep", "-RInH", "-I", "-F"' in script
+    assert "text_search path_hint not found:" in script
+    assert response.metadata == {"engine": "grep", "returned_count": 0, "truncated": False}
 
 
 def test_docker_executor_rejects_out_of_range_bash_timeout() -> None:
@@ -279,9 +306,17 @@ def test_docker_executor_rejects_out_of_range_bash_timeout() -> None:
     assert "timeout_sec" in response.stderr
 
 
-def test_docker_executor_rejects_out_of_range_search_top_k() -> None:
+def test_docker_executor_rejects_out_of_range_file_search_top_k() -> None:
     executor = DockerToolExecutor(container_id="container-1", tool_timeout_sec=30)
-    response = executor.run(ToolRequest(tool="search", args={"query": "x", "top_k": 51}))
+    response = executor.run(ToolRequest(tool="file_search", args={"query": "x", "top_k": 51}))
+
+    assert response.exit_code == 2
+    assert "top_k" in response.stderr
+
+
+def test_docker_executor_rejects_out_of_range_text_search_top_k() -> None:
+    executor = DockerToolExecutor(container_id="container-1", tool_timeout_sec=30)
+    response = executor.run(ToolRequest(tool="text_search", args={"query": "x", "top_k": 51}))
 
     assert response.exit_code == 2
     assert "top_k" in response.stderr
@@ -491,14 +526,16 @@ def test_docker_executor_read_handles_unicode_without_decode_failures(
     assert "é" in response.stdout
 
 
-def test_docker_executor_search_applies_top_k_globally(
+def test_docker_executor_file_search_returns_ranked_repo_relative_paths(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    (repo_root / "a.txt").write_text("needle\nneedle\n", encoding="utf-8")
-    (repo_root / "b.txt").write_text("needle\nneedle\n", encoding="utf-8")
+    (repo_root / "src").mkdir(parents=True)
+    (repo_root / "tests").mkdir()
+    (repo_root / "src" / "docker_executor.py").write_text("", encoding="utf-8")
+    (repo_root / "tests" / "test_docker_executor.py").write_text("", encoding="utf-8")
+    (repo_root / "README.md").write_text("", encoding="utf-8")
     monkeypatch.setenv("TASK_REPO_ROOT", str(repo_root))
 
     executor = DockerToolExecutor(
@@ -506,10 +543,229 @@ def test_docker_executor_search_applies_top_k_globally(
         tool_timeout_sec=30,
         runner=_run_local_docker_exec_script,
     )
-    response = executor.run(ToolRequest(tool="search", args={"query": "needle", "top_k": 1}))
+    response = executor.run(
+        ToolRequest(tool="file_search", args={"query": "docker executor", "top_k": 2})
+    )
 
     assert response.exit_code == 0
-    assert response.stdout.splitlines() == [f"{repo_root / 'a.txt'}:1:needle"]
+    assert response.stdout.splitlines() == [
+        "src/docker_executor.py",
+        "tests/test_docker_executor.py",
+    ]
+    assert response.metadata == {"engine": "fuzzy_path", "returned_count": 2, "truncated": False}
+
+
+def test_docker_executor_file_search_rejects_missing_root(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    monkeypatch.setenv("TASK_REPO_ROOT", str(repo_root))
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=_run_local_docker_exec_script,
+    )
+    response = executor.run(ToolRequest(tool="file_search", args={"query": "needle", "root": "missing"}))
+
+    assert response.exit_code == 1
+    assert "file_search root not found" in response.stderr
+    assert set(response.metadata) == {"engine", "returned_count", "truncated"}
+
+
+def test_docker_executor_file_search_rejects_out_of_repo_absolute_root(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    outside_root = tmp_path / "outside"
+    repo_root.mkdir()
+    outside_root.mkdir()
+    monkeypatch.setenv("TASK_REPO_ROOT", str(repo_root))
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=_run_local_docker_exec_script,
+    )
+    response = executor.run(
+        ToolRequest(tool="file_search", args={"query": "needle", "root": str(outside_root)})
+    )
+
+    assert response.exit_code == 1
+    assert "file_search root must resolve inside repo root" in response.stderr
+    assert set(response.metadata) == {"engine", "returned_count", "truncated"}
+
+
+def test_docker_executor_file_search_respects_top_k_and_compact_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    (repo_root / "src").mkdir(parents=True)
+    (repo_root / "tests").mkdir()
+    (repo_root / "src" / "config.py").write_text("", encoding="utf-8")
+    (repo_root / "src" / "config_loader.py").write_text("", encoding="utf-8")
+    (repo_root / "tests" / "test_config.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("TASK_REPO_ROOT", str(repo_root))
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=_run_local_docker_exec_script,
+    )
+    response = executor.run(ToolRequest(tool="file_search", args={"query": "config", "top_k": 2}))
+
+    assert response.exit_code == 0
+    assert len(response.stdout.splitlines()) == 2
+    assert response.metadata == {"engine": "fuzzy_path", "returned_count": 2, "truncated": True}
+
+
+def test_docker_executor_text_search_returns_fixed_string_matches_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    target_path = repo_root / "src" / "sample.txt"
+    target_path.parent.mkdir(parents=True)
+    target_path.write_text("foo.bar\nfooxbar\nfoo-bar\n", encoding="utf-8")
+    monkeypatch.setenv("TASK_REPO_ROOT", str(repo_root))
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=_run_local_docker_exec_script,
+    )
+    response = executor.run(
+        ToolRequest(tool="text_search", args={"query": "foo.bar", "path_hint": "src/sample.txt"})
+    )
+
+    assert response.exit_code == 0
+    assert response.stdout.splitlines() == ["src/sample.txt:1:foo.bar"]
+    assert response.metadata == {"engine": "grep", "returned_count": 1, "truncated": False}
+
+
+def test_docker_executor_text_search_rejects_missing_path_hint(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    monkeypatch.setenv("TASK_REPO_ROOT", str(repo_root))
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=_run_local_docker_exec_script,
+    )
+    response = executor.run(
+        ToolRequest(tool="text_search", args={"query": "needle", "path_hint": "missing.txt"})
+    )
+
+    assert response.exit_code == 1
+    assert "text_search path_hint not found" in response.stderr
+    assert set(response.metadata) == {"engine", "returned_count", "truncated"}
+
+
+def test_docker_executor_text_search_supports_absolute_out_of_repo_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    external_path = tmp_path / "external" / "proof.txt"
+    external_path.parent.mkdir(parents=True)
+    external_path.write_text("needle\n", encoding="utf-8")
+    monkeypatch.setenv("TASK_REPO_ROOT", str(repo_root))
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=_run_local_docker_exec_script,
+    )
+    response = executor.run(
+        ToolRequest(
+            tool="text_search",
+            args={"query": "needle", "path_hint": str(external_path), "top_k": 5},
+        )
+    )
+
+    assert response.exit_code == 0
+    assert response.stdout.splitlines() == [f"{external_path}:1:needle"]
+    assert response.metadata == {"engine": "grep", "returned_count": 1, "truncated": False}
+
+
+def test_docker_executor_text_search_treats_no_match_as_empty_success_without_broadening_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    target_path = repo_root / "src" / "target.txt"
+    other_path = repo_root / "src" / "other.txt"
+    target_path.parent.mkdir(parents=True)
+    target_path.write_text("not here\n", encoding="utf-8")
+    other_path.write_text("needle\n", encoding="utf-8")
+    monkeypatch.setenv("TASK_REPO_ROOT", str(repo_root))
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=_run_local_docker_exec_script,
+    )
+    response = executor.run(
+        ToolRequest(tool="text_search", args={"query": "needle", "path_hint": "src/target.txt"})
+    )
+
+    assert response.exit_code == 0
+    assert response.stdout == ""
+    assert response.metadata == {"engine": "grep", "returned_count": 0, "truncated": False}
+
+
+def test_docker_executor_text_search_stops_directory_grep_after_top_k(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    search_root = repo_root / "src"
+    search_root.mkdir(parents=True)
+    (search_root / "placeholder.txt").write_text("placeholder\n", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_grep_log = tmp_path / "fake_grep.log"
+    fake_grep_log.write_text("", encoding="utf-8")
+    fake_grep_path = fake_bin / "grep"
+    fake_grep_path.write_text(
+        "#!/bin/sh\n"
+        "log_file=\"${FAKE_GREP_LOG:?}\"\n"
+        "last_arg=\"\"\n"
+        "for arg in \"$@\"; do\n"
+        "  last_arg=\"$arg\"\n"
+        "done\n"
+        "i=1\n"
+        "while [ \"$i\" -le 30 ]; do\n"
+        "  printf '%s\\n' \"$i\" >> \"$log_file\"\n"
+        "  printf '%s/file-%02d.txt:%d:needle\\n' \"$last_arg\" \"$i\" \"$i\"\n"
+        "  sleep 0.02\n"
+        "  i=$((i + 1))\n"
+        "done\n",
+        encoding="utf-8",
+    )
+    fake_grep_path.chmod(0o755)
+
+    monkeypatch.setenv("TASK_REPO_ROOT", str(repo_root))
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("FAKE_GREP_LOG", str(fake_grep_log))
+
+    executor = DockerToolExecutor(
+        container_id="container-1",
+        tool_timeout_sec=30,
+        runner=_run_local_docker_exec_script,
+    )
+    response = executor.run(
+        ToolRequest(tool="text_search", args={"query": "needle", "path_hint": "src", "top_k": 2})
+    )
+
+    emitted_line_count = len(fake_grep_log.read_text(encoding="utf-8").splitlines())
+    assert response.exit_code == 0
+    assert response.stdout.splitlines() == [
+        "src/file-01.txt:1:needle",
+        "src/file-02.txt:2:needle",
+    ]
+    assert response.metadata == {"engine": "grep", "returned_count": 2, "truncated": True}
+    assert emitted_line_count <= 6
 
 
 def test_docker_executor_read_rejects_descending_ranges() -> None:

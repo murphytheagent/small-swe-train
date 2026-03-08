@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import mean
@@ -14,6 +15,7 @@ from typing import Any, Mapping, Sequence
 try:
     from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME, resolve_on_policy_settings
     from rollout.onpolicy_collector import OnPolicyRolloutCollector
+    from rollout.turn_parser import parse_assistant_turn_payload
     from rollout.vllm_turn_generator import (
         VLLMTurnGeneratorConfig,
         _extract_assistant_content,
@@ -33,6 +35,7 @@ except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME, resolve_on_policy_settings
     from rollout.onpolicy_collector import OnPolicyRolloutCollector
+    from rollout.turn_parser import parse_assistant_turn_payload
     from rollout.vllm_turn_generator import (
         VLLMTurnGeneratorConfig,
         _extract_assistant_content,
@@ -74,21 +77,22 @@ class BaselineTrace:
     verification_feedback: str
     verification_error: str
     resolved: bool
+    trajectory_steps: tuple[Mapping[str, Any], ...] = ()
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--step-index", type=int, default=0)
-    parser.add_argument("--task-batch-size", type=int, default=128)
+    parser.add_argument("--task-batch-size", type=int, default=1024)
     parser.add_argument("--attempts-per-task", type=int, default=8)
     parser.add_argument("--max-turns-per-attempt", type=int, default=16)
     parser.add_argument("--max-in-flight-tasks", type=int, default=32)
     parser.add_argument("--data-config-name", default=DEFAULT_ON_POLICY_DATA_CONFIG_NAME)
-    parser.add_argument("--teacher-reprompt-turn-index", type=int, default=1)
+    parser.add_argument("--teacher-reprompt-turn-index", type=int, default=-1)
     parser.add_argument(
         "--teacher-reprompt-turn-index-mode",
-        default=_TURN_INDEX_MODE_FIXED,
+        default=_TURN_INDEX_MODE_DYNAMIC_MIDDLE,
         choices=sorted(_TEACHER_REPROMPT_TURN_INDEX_MODES),
     )
     parser.add_argument(
@@ -205,6 +209,28 @@ def _coerce_message_list(value: Any) -> list[dict[str, str]]:
     return rows
 
 
+def _coerce_mapping_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(dict(item))
+    return rows
+
+
+def _assistant_turn_has_terminal_submit(turn_text: str) -> bool:
+    text = str(turn_text).strip()
+    if not text:
+        return False
+    try:
+        envelope = parse_assistant_turn_payload(text)
+    except Exception:
+        return False
+    return any(getattr(tool_call, "tool", "") == "submit" for tool_call in envelope.tool_calls)
+
+
 def _resolve_temperature_override(*, env_var_name: str, fallback: float) -> float:
     raw_value = os.environ.get(env_var_name)
     if raw_value is None:
@@ -279,6 +305,7 @@ def _build_baseline_trace_map(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[s
             verification_feedback=str(row.get("verification_feedback", "")),
             verification_error=str(row.get("verification_error", "")),
             resolved=bool(row.get("resolved", False)),
+            trajectory_steps=tuple(_coerce_mapping_list(row.get("trajectory_steps"))),
         )
     return trace_map
 
@@ -288,13 +315,38 @@ def _resolve_teacher_reprompt_turn_index(
     trace: BaselineTrace,
     teacher_reprompt_turn_index: int,
     teacher_reprompt_turn_index_mode: str,
+    resolved_turn_index_cache: dict[tuple[str, int], int] | None = None,
 ) -> int:
     mode = str(teacher_reprompt_turn_index_mode).strip().lower()
     if mode == _TURN_INDEX_MODE_DYNAMIC_MIDDLE:
+        cache_key = (trace.task_id, trace.attempt_index)
+        if resolved_turn_index_cache is not None and cache_key in resolved_turn_index_cache:
+            return resolved_turn_index_cache[cache_key]
+        eligible_turn_indices = [
+            index
+            for index, tool_blocks in enumerate(trace.turn_tool_response_blocks)
+            if index < len(trace.assistant_turns)
+            and trace.assistant_turns[index].strip()
+            and tool_blocks
+            and not _assistant_turn_has_terminal_submit(trace.assistant_turns[index])
+        ]
+        injectable_turn_indices = [
+            index
+            for index, assistant_turn in enumerate(trace.assistant_turns)
+            if assistant_turn.strip() and not _assistant_turn_has_terminal_submit(assistant_turn)
+        ]
         turn_count = len(trace.assistant_turns)
-        if turn_count <= 0:
-            return max(0, int(teacher_reprompt_turn_index))
-        return (turn_count - 1) // 2
+        if eligible_turn_indices:
+            resolved_turn_index = random.choice(eligible_turn_indices)
+        elif injectable_turn_indices:
+            resolved_turn_index = injectable_turn_indices[(len(injectable_turn_indices) - 1) // 2]
+        elif turn_count <= 0:
+            resolved_turn_index = max(0, int(teacher_reprompt_turn_index))
+        else:
+            resolved_turn_index = (turn_count - 1) // 2
+        if resolved_turn_index_cache is not None:
+            resolved_turn_index_cache[cache_key] = resolved_turn_index
+        return resolved_turn_index
     return max(0, int(teacher_reprompt_turn_index))
 
 
@@ -315,6 +367,7 @@ def _build_teacher_turn_generator(
         raise ValueError(
             "Teacher-reprompt pilot only supports --turn-supervision-mode=current_turn."
         )
+    resolved_turn_index_cache: dict[tuple[str, int], int] = {}
 
     def _generate(
         *,
@@ -338,6 +391,7 @@ def _build_teacher_turn_generator(
             trace=trace,
             teacher_reprompt_turn_index=teacher_reprompt_turn_index,
             teacher_reprompt_turn_index_mode=teacher_reprompt_turn_index_mode,
+            resolved_turn_index_cache=resolved_turn_index_cache,
         )
         turn_count = len(trace.assistant_turns)
         if turn_count <= 0:
@@ -392,6 +446,7 @@ def _build_teacher_turn_generator(
             "_raw_prompt_messages": [dict(message) for message in trace.raw_prompt_messages],
             "trajectory_assistant_turns": list(history_assistant_turns),
             "trajectory_turn_tool_response_blocks": [list(items) for items in history_turn_tool_blocks],
+            "trajectory_steps": [dict(step) for step in trace.trajectory_steps],
             "verification_feedback": trace.verification_feedback,
             "verification_error": trace.verification_error,
             "resolved": trace.resolved,

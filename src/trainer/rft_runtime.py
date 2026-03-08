@@ -182,7 +182,7 @@ def _proof_tool_chain_turn_generator(
     if turn_index == 1:
         return (
             "<tool_call>"
-            '{"tool":"search","args":{"query":"proof_seed","path_hint":"/tmp","top_k":5}}'
+            '{"tool":"text_search","args":{"query":"proof_seed","path_hint":"/tmp","top_k":5}}'
             "</tool_call>"
         )
     if turn_index == 2:
@@ -196,7 +196,7 @@ def _proof_tool_chain_turn_generator(
     if turn_index == 3:
         return (
             "<tool_call>"
-            '{"tool":"search","args":{"query":"proof_patch","path_hint":"/tmp","top_k":5}}'
+            '{"tool":"text_search","args":{"query":"proof_patch","path_hint":"/tmp","top_k":5}}'
             "</tool_call>"
         )
     return (

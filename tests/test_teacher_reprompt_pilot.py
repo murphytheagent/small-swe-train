@@ -91,6 +91,14 @@ def test_extract_format_metrics_uses_reward_fn_contract_payload() -> None:
     }
 
 
+def test_pilot_parser_max_reprompt_len_inherits_adapter_default() -> None:
+    pilot = _load_pilot_module()
+
+    args = pilot._build_parser().parse_args([])
+
+    assert args.max_reprompt_len == pilot.DEFAULT_MAX_REPROMPT_LEN == 16384
+
+
 def test_discover_latest_rft_manifest_prefers_newest_across_slurm_and_default_roots(tmp_path: Path) -> None:
     pilot = _load_pilot_module()
     local_manifest = tmp_path / "outputs" / "rft_runtime" / "run-local" / "rft_runtime_loop_manifest.json"
@@ -266,7 +274,7 @@ def test_resolve_teacher_reprompt_turn_index_supports_dynamic_middle() -> None:
         problem_statement="Fix issue",
         raw_prompt_messages=(),
         assistant_turns=("turn-0", "turn-1", "turn-2", "turn-3"),
-        turn_tool_response_blocks=((), (), (), ()),
+        turn_tool_response_blocks=((), ('<tool_response>{"stdout":"turn-1"}</tool_response>',), (), ('<tool_response>{"stdout":"turn-3"}</tool_response>',)),
         verification_feedback="",
         verification_error="",
         resolved=False,
@@ -291,14 +299,19 @@ def test_resolve_teacher_reprompt_turn_index_supports_dynamic_middle() -> None:
         )
         == 1
     )
-    assert (
-        pilot._resolve_teacher_reprompt_turn_index(
-            trace=trace,
-            teacher_reprompt_turn_index=-1,
-            teacher_reprompt_turn_index_mode="dynamic_middle",
+    original_choice = pilot.random.choice
+    pilot.random.choice = lambda values: values[-1]
+    try:
+        assert (
+            pilot._resolve_teacher_reprompt_turn_index(
+                trace=trace,
+                teacher_reprompt_turn_index=-1,
+                teacher_reprompt_turn_index_mode="dynamic_middle",
+            )
+            == 3
         )
-        == 1
-    )
+    finally:
+        pilot.random.choice = original_choice
     assert (
         pilot._resolve_teacher_reprompt_turn_index(
             trace=empty_trace,
@@ -307,6 +320,41 @@ def test_resolve_teacher_reprompt_turn_index_supports_dynamic_middle() -> None:
         )
         == 0
     )
+
+
+def test_resolve_teacher_reprompt_turn_index_dynamic_middle_skips_terminal_submit_turns() -> None:
+    pilot = _load_pilot_module()
+    trace = pilot.BaselineTrace(
+        task_id="task-1",
+        attempt_index=0,
+        problem_statement="Fix issue",
+        raw_prompt_messages=(),
+        assistant_turns=(
+            '<tool_call>{"tool":"text_search","args":{"query":"turn-0"}}</tool_call>',
+            '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
+        ),
+        turn_tool_response_blocks=(
+            ('<tool_response>{"stdout":"turn-0"}</tool_response>',),
+            ('<tool_response>{"stdout":"turn-1"}</tool_response>',),
+        ),
+        verification_feedback="",
+        verification_error="",
+        resolved=False,
+    )
+
+    original_choice = pilot.random.choice
+    pilot.random.choice = lambda values: values[-1]
+    try:
+        assert (
+            pilot._resolve_teacher_reprompt_turn_index(
+                trace=trace,
+                teacher_reprompt_turn_index=-1,
+                teacher_reprompt_turn_index_mode="dynamic_middle",
+            )
+            == 0
+        )
+    finally:
+        pilot.random.choice = original_choice
 
 
 def test_resolve_pilot_vllm_configs_supports_distinct_temperature_env_overrides(
@@ -558,7 +606,7 @@ def test_teacher_generator_rejects_next_turn_mode() -> None:
         )
 
 
-def test_teacher_generator_dynamic_middle_mode_injects_at_middle_turn(monkeypatch) -> None:
+def test_teacher_generator_dynamic_middle_mode_injects_at_random_eligible_turn(monkeypatch) -> None:
     pilot = _load_pilot_module()
     trace = pilot.BaselineTrace(
         task_id="task-1",
@@ -566,7 +614,7 @@ def test_teacher_generator_dynamic_middle_mode_injects_at_middle_turn(monkeypatc
         problem_statement="Fix issue",
         raw_prompt_messages=(),
         assistant_turns=("turn-0", "turn-1", "turn-2", "turn-3"),
-        turn_tool_response_blocks=((), (), (), ()),
+        turn_tool_response_blocks=((), ('<tool_response>{"stdout":"turn-1"}</tool_response>',), (), ()),
         verification_feedback="",
         verification_error="",
         resolved=False,
@@ -589,6 +637,7 @@ def test_teacher_generator_dynamic_middle_mode_injects_at_middle_turn(monkeypatc
     monkeypatch.setattr(pilot, "build_self_distillation_batch", _fake_build_self_distillation_batch)
     monkeypatch.setattr(pilot, "_post_chat_completion", _fake_post_chat_completion)
     monkeypatch.setattr(pilot, "_extract_assistant_content", lambda payload: payload["choices"][0]["message"]["content"])
+    monkeypatch.setattr(pilot.random, "choice", lambda values: values[0])
 
     generator = pilot._build_teacher_turn_generator(
         baseline_trace_map={("task-1", 0): trace},
@@ -639,6 +688,15 @@ def test_teacher_generator_builds_reprompt_from_runtime_history_tool_blocks(monk
         verification_feedback="",
         verification_error="",
         resolved=False,
+        trajectory_steps=(
+            {
+                "tool": "text_search",
+                "args": {"query": "RUNTIME_ONLY", "path_hint": "src"},
+                "stdout": "src/example.py:1:RUNTIME_ONLY\n",
+                "stderr": "",
+                "exit_code": 0,
+            },
+        ),
     )
     captured: dict[str, Any] = {}
 
@@ -697,6 +755,15 @@ def test_teacher_generator_builds_reprompt_from_runtime_history_tool_blocks(monk
     assert sample["trajectory_turn_tool_response_blocks"] == [
         ['<tool_response>{"stdout":"RUNTIME_ONLY"}</tool_response>'],
         ['<tool_response>{"stdout":"RUNTIME_TURN_1"}</tool_response>'],
+    ]
+    assert sample["trajectory_steps"] == [
+        {
+            "tool": "text_search",
+            "args": {"query": "RUNTIME_ONLY", "path_hint": "src"},
+            "stdout": "src/example.py:1:RUNTIME_ONLY\n",
+            "stderr": "",
+            "exit_code": 0,
+        },
     ]
 
 

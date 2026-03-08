@@ -30,7 +30,7 @@ def test_compute_score_uses_project_reward_logic() -> None:
 def test_compute_score_applies_terminal_penalty_without_submit() -> None:
     result = compute_score(
         data_source="dummy/dataset",
-        solution_str='<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
+        solution_str='<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
         ground_truth={
             "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
             "pass_to_pass": ["tests/test_ok.py::test_regression"],
