@@ -7,25 +7,51 @@ from config import MAX_TOOL_CALLS_PER_TURN, TERMINAL_TOOL_NAME
 from .model_delimiters import ModelDelimiters
 from .runtime_messages import build_assistant_contract_prompt
 
+_TURN_SUPERVISION_NEXT = "next_turn"
+_TURN_SUPERVISION_CURRENT = "current_turn"
+_TEACHER_TOOL_USAGE_GUIDANCE = (
+    "Teacher-specific tool guidance:\n"
+    "- Normal tool flow: use file_search to locate likely files, use text_search to locate exact strings or symbols inside a known scope, use read to inspect contents, and use apply_patch to edit; for apply_patch always include both args.path and args.patch.\n"
+    "- You may reuse an exact repo-relative path the student already found for your own read, text_search, or apply_patch calls; do not guess new prefixes or repeat file_search unless needed.\n"
+)
+
+
+def _normalize_supervision_mode(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return _TURN_SUPERVISION_NEXT
+    if normalized in {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}:
+        return normalized
+    return _TURN_SUPERVISION_NEXT
+
 
 def build_teacher_output_contract_block(
     *,
     delimiters: ModelDelimiters | None = None,
     max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
     terminal_tool: str = TERMINAL_TOOL_NAME,
+    supervision_mode: str = _TURN_SUPERVISION_NEXT,
 ) -> str:
     """Build OUTPUT_CONTRACT_BLOCK text that steers teacher policy improvement."""
+    normalized_mode = _normalize_supervision_mode(supervision_mode)
     base_contract = build_assistant_contract_prompt(
         delimiters=delimiters,
         max_tool_calls=max_tool_calls,
         terminal_tool=terminal_tool,
+        include_tool_schema=False,
+        include_examples=False,
+        include_repeat_warning=False,
     )
+    if normalized_mode == _TURN_SUPERVISION_CURRENT:
+        return (
+            "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:\n"
+            f"{base_contract}\n"
+            f"{_TEACHER_TOOL_USAGE_GUIDANCE}"
+            "Produce the best corrected action for the current turn.\n"
+        )
     return (
-        "Teacher objective (turn-level SDPO):\n"
-        "1) The multi-turn conversation above is a previous attempt at fixing the issue stated in the task statement.\n"
-        "2) This attempt is not complete, it can be on the right track or completely wrong.\n"
-        "3) Learn from the interactions from this attempt, correct mistakes, and take correct actions in the next turn.\n"
-        "4) All tools in this attempt have been executed already, so assume you are working potentially modified repo.\n"
+        "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:\n"
         f"{base_contract}\n"
+        f"{_TEACHER_TOOL_USAGE_GUIDANCE}"
         "Now correctly solve the original issue, focus only on what to do best in the next turn.\n"
     )

@@ -10,6 +10,7 @@ This note covers GPU-using scripts under `scripts/` and the resource requests th
 | `run_rft_onpolicy_rollout_proof.sh` | Variable (recommend 8) | `8 x GPUs` | `64G x GPUs` | `08:00:00` | Direct proof path, also keyed by GPU count. |
 | `run_sdpo.sh` | **8 required** | 64 | 512G | `24:00:00` | `configs/verl/sdpo_swe.yaml` is 8-GPU tuned (`fsdp_size=8`, rollout TP/DP layout). |
 | `run_sdft.sh` | **8 required** | 64 | 512G | `24:00:00` | Same base config and parallel layout as SDPO. |
+| `run_teacher_reprompt_pilot_slurm.sh` | Variable (recommend 8) | `8 x GPUs` | `32G x GPUs` | `12:00:00` | Pilot ablations run with vLLM tensor parallel; set `PILOT_VLLM_TP_SIZE == requested GPUs`. |
 | `run_flash_attn_rebuild.sh` | 0 (default) | 8 | 128G | `03:00:00` | Build job defaults to no GPU request; override if your site requires one. |
 
 ## Shared Setup
@@ -53,7 +54,7 @@ sbatch \
   --gres="gpu:${GPUS}" \
   --cpus-per-task="${CPUS}" \
   --mem="${MEM}" \
-  --time=6:00:00 \
+  --time=24:00:00 \
   --job-name=small-swe-rft \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
@@ -260,26 +261,153 @@ Dry-run (prints resolved command including auto-overrides; does not start Ray):
 bash scripts/run_sdpo.sh --dry-run trainer.total_training_steps=1
 ```
 
-## 4) `scripts/run_sdft.sh` (8 GPUs required)
+## 4) `scripts/run_teacher_reprompt_pilot_slurm.sh` (variable GPU count)
+
+This launcher starts a local vLLM OpenAI endpoint and runs
+`scripts/run_teacher_reprompt_pilot.py` against it. By default it maps
+`--tensor-parallel-size` to the Slurm GPU allocation (`SLURM_GPUS_ON_NODE`), so
+requesting `--gres=gpu:x` yields `tensor-parallel-size=x`. For ablations, set
+`PILOT_VLLM_TP_SIZE=${GPUS}` explicitly.
+If `PILOT_TEACHER_TURN_INDEX=-1` is provided, the launcher auto-normalizes to
+`--teacher-reprompt-turn-index-mode dynamic_middle`, which now samples one
+eligible student turn uniformly at random.
+
+RFT checkpoint selection is resolved via `run_teacher_reprompt_pilot.py` and
+applied everywhere in the launcher (`--model`, `--served-model-name`, and pilot
+`--rft-checkpoint`), overriding `PILOT_MODEL_PATH`/`PILOT_SERVED_MODEL` when set:
+- `--load-latest-rft-checkpoint` discovers the newest
+  `rft_runtime_loop_manifest.json` from `outputs/slurm/rft_runtime/*` (or
+  `outputs/rft_runtime/*`) and uses the resolved checkpoint as the vLLM model.
+- `--rft-manifest <path>` uses an explicit manifest.
+- `--rft-checkpoint <path>` directly overrides the RFT checkpoint/export path.
+- If none of those flags are passed, the launcher falls back to
+  `PILOT_MODEL_PATH` (default `/data/scratch/$USER/models/Qwen3-4B-Instruct-2507`).
+
+Arbitrary HF model selection is controlled separately from RFT checkpoint flags:
+- Set `PILOT_MODEL_PATH=<repo-id-or-local-path>` for the model passed to vLLM
+  `--model`.
+- Set `PILOT_SERVED_MODEL=<name>` for the request-side model id used by
+  `SMALL_SWE_VLLM_MODEL` and vLLM `--served-model-name`.
+- Keep `--rft-checkpoint` / `--rft-manifest` / `--load-latest-rft-checkpoint`
+  for actual RFT artifacts only.
+
+HF model id behavior:
+- `PILOT_MODEL_PATH` may be a Hugging Face repo id such as `Qwen/Qwen3.5-9B`.
+- For repo ids, vLLM downloads the model into the standard Hugging Face/vLLM
+  caches exported by the launcher (`HF_HOME`, `HUGGINGFACE_HUB_CACHE`,
+  `TRANSFORMERS_CACHE`, `VLLM_CACHE_ROOT`).
+- First launch is slower because weights must be fetched. For private repos,
+  export `HF_TOKEN` before launch.
+- `Qwen/Qwen3.5-9B` currently requires a nightly `vllm` build in this repo
+  environment: `uv pip install --python "$PWD/.venv/bin/python" --upgrade vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly`
+- Qwen instruct/chat models are the most drop-in-friendly case in the current
+  call chain. The pilot uses standard OpenAI-compatible chat completions and
+  accepts either assistant text or OpenAI `tool_calls`, but the model still
+  needs a usable chat template and must follow the repo's `<tool_call>...`
+  output contract. Base models and models that need extra vLLM flags are not
+  guaranteed drop-in.
+
+VRAM control knobs for the pilot launcher:
+- `PILOT_VLLM_TP_SIZE` controls vLLM tensor parallel size. Increasing it spreads
+  model weights and KV cache across more GPUs, reducing per-GPU VRAM pressure.
+- `PILOT_GPU_MEMORY_UTILIZATION` passes through to vLLM
+  `--gpu-memory-utilization` (default `0.90`). Lower it to leave more headroom
+  for graph capture, NCCL, and other CUDA allocations.
+- `PILOT_MAX_MODEL_LEN` passes through to vLLM `--max-model-len` (default
+  `32768`). Lowering it is the highest-leverage way to reduce KV-cache usage.
+- `PILOT_VLLM_KV_CACHE_MEMORY_BYTES` sets an explicit KV-cache memory budget.
+  Use this when you want a hard cap instead of the `gpu-memory-utilization`
+  heuristic.
+- `PILOT_VLLM_NUM_GPU_BLOCKS_OVERRIDE` manually overrides vLLM's GPU block
+  count. This is an advanced escape hatch for tight fits and debugging, not the
+  first knob to reach for.
+
+Sampling knobs for the pilot launcher:
+- `PILOT_STUDENT_TEMPERATURE` overrides the baseline/student rollout sampling
+  temperature.
+- `PILOT_TEACHER_TEMPERATURE` overrides the teacher-reprompt sampling
+  temperature.
+- If either is unset, that side falls back to the shared
+  `SMALL_SWE_VLLM_TEMPERATURE` override or the default
+  `rft_runtime.vllm.temperature` config value.
+
+Practical order for OOM reduction:
+1. Lower `PILOT_MAX_MODEL_LEN`.
+2. Lower `PILOT_GPU_MEMORY_UTILIZATION`.
+3. Increase `PILOT_VLLM_TP_SIZE` if you can allocate more GPUs.
+4. Only then try `PILOT_VLLM_KV_CACHE_MEMORY_BYTES` or
+   `PILOT_VLLM_NUM_GPU_BLOCKS_OVERRIDE`.
+
+Use only Slurm submissions for this launcher. The two canonical launch patterns
+below are the intended ones. For RFT artifacts, swap `RFT_SELECTOR` between
+`--load-latest-rft-checkpoint`, `--rft-manifest "$MANIFEST"`, and
+`--rft-checkpoint "$CHECKPOINT"` as needed. For dry-run validation, add
+`--dry-run` at the end of the wrapped launcher command.
+
+Comprehensive RFT-checkpoint submit:
 
 ```bash
+GPUS=8
+CPUS=$((GPUS * 16))
+MEM="$((GPUS * 48))G"
+RFT_SELECTOR="--load-latest-rft-checkpoint"
+
 sbatch \
   --partition=gpu \
   --nodes=1 \
-  --gres=gpu:8 \
-  --cpus-per-task=64 \
-  --mem=512G \
-  --time=24:00:00 \
-  --job-name=small-swe-sdft \
+  --gres="gpu:${GPUS}" \
+  --cpus-per-task="${CPUS}" \
+  --mem="${MEM}" \
+  --time=12:00:00 \
+  --job-name=teacher-reprompt-pilot \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
-  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && export WANDB_MODE=offline && export EXPERIMENT=small-swe-sdft_job\$SLURM_JOB_ID_\$(date -u +%Y%m%dT%H%M%SZ) && bash scripts/run_sdft.sh <hydra-overrides>"
+  --wrap "cd $PWD \
+    && export PYTHON_BIN=$PWD/.venv/bin/python \
+    && export PILOT_VLLM_TP_SIZE=${GPUS} \
+    && export PILOT_STUDENT_TEMPERATURE=0.6 \
+    && export PILOT_TEACHER_TEMPERATURE=0.6 \
+    && export PILOT_TEACHER_TURN_INDEX_MODE=dynamic_middle \
+    && export PILOT_TEACHER_TURN_INDEX=-1 \
+    && export PILOT_TURN_SUPERVISION_MODE=current_turn \
+    && export PILOT_VERIFIER_FEEDBACK_MODE=none \
+    && export PILOT_MAX_MODEL_LEN=32768 \
+    && export PILOT_GPU_MEMORY_UTILIZATION=0.85 \
+    && bash scripts/run_teacher_reprompt_pilot_slurm.sh ${RFT_SELECTOR}"
 ```
 
-Dry-run:
+Comprehensive HF-model submit:
 
 ```bash
-bash scripts/run_sdft.sh --dry-run <hydra-overrides>
+GPUS=4
+CPUS=$((GPUS * 16))
+MEM="$((GPUS * 48))G"
+
+sbatch \
+  --partition=gpu \
+  --nodes=1 \
+  --gres="gpu:${GPUS}" \
+  --cpus-per-task="${CPUS}" \
+  --mem="${MEM}" \
+  --time=12:00:00 \
+  --job-name=teacher-reprompt-qwen35 \
+  --output="$PWD/outputs/slurm/%x-%j.out" \
+  --error="$PWD/outputs/slurm/%x-%j.err" \
+  --wrap "cd $PWD \
+    && export PYTHON_BIN=$PWD/.venv/bin/python \
+    && export PILOT_VLLM_TP_SIZE=${GPUS} \
+    && export PILOT_MODEL_PATH=Qwen/Qwen3.5-9B \
+    && export PILOT_SERVED_MODEL=Qwen/Qwen3.5-9B \
+    && export PILOT_STUDENT_TEMPERATURE=0.6 \
+    && export PILOT_TEACHER_TEMPERATURE=0.6 \
+    && export HF_TOKEN=\${HF_TOKEN:-} \
+    && export PILOT_TEACHER_TURN_INDEX_MODE=dynamic_middle \
+    && export PILOT_TEACHER_TURN_INDEX=-1 \
+    && export PILOT_TURN_SUPERVISION_MODE=current_turn \
+    && export PILOT_VERIFIER_FEEDBACK_MODE=all_turns \
+    && export PILOT_MAX_MODEL_LEN=32768 \
+    && export PILOT_GPU_MEMORY_UTILIZATION=0.60 \
+    && bash scripts/run_teacher_reprompt_pilot_slurm.sh"
 ```
 
 ## 5) `scripts/run_flash_attn_rebuild.sh` (resources handled by script)
@@ -321,7 +449,8 @@ bash scripts/run_flash_attn_rebuild.sh --dry-run
 
 ## Notes
 
-- `run_step_sdpo_scaffold.py`, `eval_swebench_lite.py`, and `eval_swebench_lite.sh` are not GPU launch scripts.
+- `eval_swebench_lite.py` and `eval_swebench_lite.sh` are not GPU launch scripts.
 - If your cluster policy differs, keep the GPU count contract intact:
   - `run_rft.sh`: `NPROC_PER_NODE == requested GPUs`
   - `run_rft_onpolicy_rollout_proof.sh`: `ON_POLICY_PROOF_NPROC_PER_NODE == requested GPUs`
+  - `run_teacher_reprompt_pilot_slurm.sh`: `PILOT_VLLM_TP_SIZE == requested GPUs`

@@ -34,7 +34,11 @@ actor_rollout_ref:
     use_remove_padding: true
     trust_remote_code: false
     external_lib: null
-    override_config: {}
+    # Ensure vLLM inherits the same sequence cap as max_model_len.
+    # verl overwrites rollout max_model_len with HF config max_position_embeddings.
+    override_config:
+      max_position_embeddings: ${max_model_len}
+      max_seq_len: ${max_model_len}
     # Mirror LoRA knobs into legacy HFModelConfig fields consumed by verl
     # workers, so runtime always receives explicit adapter parameters.
     lora_rank: 16
@@ -67,8 +71,12 @@ actor_rollout_ref:
       distillation_topk: 100                  # top-k logit distillation
       distillation_add_tail: true             # tail-bucket for residual mass
       is_clip: 2.0                            # importance-sampling ratio clip
-      max_reprompt_len: 10240                 # teacher prompt token budget
+      max_reprompt_len: 16384                 # teacher prompt token budget (raised for protected-section retention)
       num_recent_raw_blocks: 3                # number of preceding turn blocks in RECENT_RAW_BLOCK
+      include_teacher_memory_blocks: true     # include teacher memory blocks in SDPO reprompts by default
+      turn_supervision_mode: current_turn     # default to current-turn supervision for teacher reprompt distillation
+      verifier_feedback_mode: all_turns       # inject verifier feedback on every distilled turn
+      legacy_distillation_gating_policy: feedback_present  # activate unresolved rows when feedback exists
       reprompt_truncation: right
       dont_reprompt_on_self_success: true      # always include student attempt (§9.2.4)
       remove_thinking_from_demonstration: true

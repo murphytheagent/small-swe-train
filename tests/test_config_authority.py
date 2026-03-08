@@ -9,14 +9,28 @@ import pytest
 import yaml
 
 import config
-from prompts.runtime_messages import build_assistant_contract_prompt
+from prompts.runtime_messages import (
+    build_assistant_contract_prompt,
+    build_onpolicy_system_prompt,
+    build_sdpo_rollout_followup_user_message,
+)
 from prompts.teacher_messages import build_teacher_output_contract_block
-from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME, TOOL_SCHEMAS
+from schemas import (
+    ALLOWED_TOOLS,
+    FILE_SEARCH_TOOL_NAME,
+    TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME,
+    TEXT_SEARCH_TOOL_NAME,
+    TOOL_SCHEMAS,
+    ToolCall,
+    validate_tool_call,
+)
 
 
 def test_terminal_tool_is_supported_by_schema() -> None:
     assert config.TERMINAL_TOOL_NAME in ALLOWED_TOOLS
     assert config.TERMINAL_TOOL_NAME == SCHEMA_TERMINAL_TOOL_NAME
+    assert FILE_SEARCH_TOOL_NAME == "file_search"
+    assert TEXT_SEARCH_TOOL_NAME == "text_search"
 
 
 def test_output_contract_exports_match_runtime_defaults() -> None:
@@ -42,10 +56,17 @@ def test_sdpo_task_cache_default_is_centralized() -> None:
     assert config.resolve_sdpo_task_cache_dir(project_root=repo_root) == repo_root / "data" / "sdpo_task_cache"
 
 
+def test_on_policy_bad_task_cache_default_is_centralized() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    assert config.DEFAULT_ON_POLICY_BAD_TASK_CACHE_RELATIVE_DIR == Path("data") / "on_policy_bad_task_cache"
+    assert config.resolve_on_policy_bad_task_cache_dir(project_root=repo_root) == repo_root / "data" / "on_policy_bad_task_cache"
+
+
 def test_phase_transition_gates_defaults_load() -> None:
     gates = config.phase_transition_gates_defaults()
     assert "entry_gate_for_main_sdpo" in gates
     assert "terminal_submission_rate_min" in gates["entry_gate_for_main_sdpo"]
+    assert "thinking_delimiter_balance_rate_min" not in gates["entry_gate_for_main_sdpo"]
 
 
 def test_tool_call_bounds_are_valid() -> None:
@@ -56,7 +77,7 @@ def test_tool_call_bounds_are_valid() -> None:
 def test_prompt_contract_uses_centralized_terminal_tool_default() -> None:
     prompt = build_assistant_contract_prompt()
     assert f"Terminal tool is '{config.TERMINAL_TOOL_NAME}'" in prompt
-    assert f"4) Allowed tools: {', '.join(ALLOWED_TOOLS)}." in prompt
+    assert f"Allowed tools: {', '.join(ALLOWED_TOOLS)}." in prompt
     required_fields: list[str] = []
     for tool_name in ALLOWED_TOOLS:
         schema = TOOL_SCHEMAS.get(tool_name)
@@ -69,20 +90,72 @@ def test_prompt_contract_uses_centralized_terminal_tool_default() -> None:
             if isinstance(field_name, str):
                 required_fields.append(f"{tool_name}.{field_name}")
     required_args_text = ", ".join(required_fields) if required_fields else "-"
-    assert f"5) Required args by tool: {required_args_text}." in prompt
+    assert f"Required args by tool: {required_args_text}." in prompt
+    assert "read" in ALLOWED_TOOLS
+    assert "read" in TOOL_SCHEMAS
+    assert "file_search" in ALLOWED_TOOLS
+    assert "text_search" in ALLOWED_TOOLS
+    assert "file_search" in TOOL_SCHEMAS
+    assert "text_search" in TOOL_SCHEMAS
+    assert "search" not in ALLOWED_TOOLS
+
+
+def test_prompt_contract_includes_read_and_direct_tool_call_rule() -> None:
+    prompt = build_assistant_contract_prompt()
+
+    assert "Begin with a tool-call block. Do not emit prose before the first tool call." in prompt
+    assert "read args: required {path:str" in prompt
+    assert "file_search args: required {query:str" in prompt
+    assert "text_search args: required {query:str" in prompt
+    assert "start_line:int" in prompt
+    assert "end_line:int" in prompt
+    assert "read.path" in prompt
+    assert "Tool usage guardrails:" in prompt
+    assert "Use 'file_search' to discover likely repo-relative file paths" in prompt
+    assert "Use 'text_search' for exact fixed-string matches" in prompt
+    assert "both 'path' and 'patch' in normal use." in prompt
+    assert "Prefer using 'apply_patch' for file edits instead of bash heredocs, cat >, or sed -i." in prompt
+    assert "use 'search'" not in prompt
+
+
+def test_onpolicy_system_prompt_requires_repo_driven_validation_workflow() -> None:
+    prompt = build_onpolicy_system_prompt()
+    assert "First inspect surrounding code, related tests, and project configuration" in prompt
+    assert "understand the root cause and broader context before editing" in prompt
+    assert "do not wait for complete understanding before making progress." in prompt
+    assert "Make focused, minimal changes that address the issue" in prompt
+    assert "Use the bash tool to run repository-specific validation commands." in prompt
+    assert "Do not assume a standard test command; infer the correct commands from this codebase." in prompt
+    assert "If applicable and feasible, verify your changes with the repository's own tests, build, lint" in prompt
+    assert "Start with the most specific relevant validation" in prompt
+    assert "broaden to more general checks as confidence grows." in prompt
+    assert "run a lightweight related validation instead of skipping validation entirely." in prompt
+    assert "If the environment prevents validation, state that limitation briefly" in prompt
+    assert "FAIL_TO_PASS" not in prompt
+    assert "PASS_TO_PASS" not in prompt
 
 
 def test_teacher_output_contract_block_wraps_shared_contract() -> None:
     prompt = build_teacher_output_contract_block()
-    assert "Teacher objective (turn-level SDPO):" in prompt
+    assert (
+        "Now that you have seen the student's attempt, adhere to following contracts in your revised attempt:"
+        in prompt
+    )
     assert "Assistant output contract:" in prompt
     assert f"Terminal tool is '{config.TERMINAL_TOOL_NAME}'" in prompt
-    assert "Do not repeat an identical previously-failed command without a new hypothesis." in prompt
+    assert "Teacher-specific tool guidance:" in prompt
+    assert "Normal tool flow: use file_search to locate likely files" in prompt
+    assert "use text_search to locate exact strings or symbols inside a known scope" in prompt
+    assert "always include both args.path and args.patch" in prompt
+    assert "You may reuse an exact repo-relative path the student already found" in prompt
+    assert "Now correctly solve the original issue, focus only on what to do best in the next turn." in prompt
+    assert "Do not repeat an identical previously-failed command without a new hypothesis." not in prompt
+    assert "ls/search" not in prompt
 
 
 def test_prompt_contract_renders_tool_examples_from_tool_schemas() -> None:
     prompt = build_assistant_contract_prompt()
-    assert "9) Realistic examples (one tool call each):" in prompt
+    assert "Realistic examples (one tool call each):" in prompt
     for tool_name in ALLOWED_TOOLS:
         schema = TOOL_SCHEMAS.get(tool_name)
         if not isinstance(schema, Mapping):
@@ -94,14 +167,39 @@ def test_prompt_contract_renders_tool_examples_from_tool_schemas() -> None:
 
 
 def test_prompt_contract_schema_text_is_rendered_from_tool_schemas(monkeypatch: pytest.MonkeyPatch) -> None:
-    search_schema = dict(TOOL_SCHEMAS["search"])
+    search_schema = dict(TOOL_SCHEMAS["file_search"])
     constraints = dict(search_schema["constraints"])
     constraints["query"] = {"min_length": 7}
     search_schema["constraints"] = constraints
-    monkeypatch.setitem(TOOL_SCHEMAS, "search", search_schema)
+    monkeypatch.setitem(TOOL_SCHEMAS, "file_search", search_schema)
 
     prompt = build_assistant_contract_prompt()
-    assert "search args: required {query:str(min_len=7)}" in prompt
+    assert "file_search args: required {query:str(min_len=7)}" in prompt
+
+
+def test_prompt_contract_examples_are_environment_neutral() -> None:
+    prompt = build_assistant_contract_prompt()
+
+    assert "/workspace/project" not in prompt
+    assert "python -m pytest -q" not in prompt
+
+
+def test_read_cross_field_validation_rejects_descending_range() -> None:
+    errors = validate_tool_call(
+        ToolCall(tool="read", args={"path": "src/app.py", "start_line": 10, "end_line": 9})
+    )
+
+    assert "Arg 'end_line': must be >= start_line" in errors
+
+
+def test_sdpo_followup_message_uses_canonical_tool_names() -> None:
+    message = build_sdpo_rollout_followup_user_message()
+
+    assert "read" in message
+    assert "file_search" in message
+    assert "text_search" in message
+    assert "apply_patch" in message
+    assert "edit" not in message
 
 
 def test_terminal_tool_validator_rejects_unknown_name() -> None:

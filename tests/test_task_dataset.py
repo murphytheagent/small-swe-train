@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -11,10 +12,12 @@ from env.task_dataset import (
     load_task_batch,
     preload_sdpo_task_rows_to_parquet,
     preload_sdpo_task_rows_split_to_parquet,
+    resolve_on_policy_bad_task_cache_path,
     resolve_sdpo_task_rows_cache_path,
     resolve_sdpo_task_split_cache_paths,
     split_sdpo_task_rows_for_eval,
 )
+from prompts.runtime_messages import build_onpolicy_initial_user_message
 
 
 def _config() -> OnPolicyDataConfig:
@@ -168,6 +171,103 @@ def test_load_task_batch_skips_rows_with_empty_verifier_targets() -> None:
     assert [sample.task_id for sample in batch] == ["task-1"]
 
 
+def test_load_task_batch_skips_rows_marked_bad_in_cache(tmp_path: Path, monkeypatch) -> None:
+    rows = [
+        {
+            "task_id": "task-0",
+            "image_name": "img:0",
+            "problem_statement": "p0",
+            "FAIL_TO_PASS": ["a"],
+            "PASS_TO_PASS": ["b"],
+        },
+        {
+            "task_id": "task-1",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["c"],
+            "PASS_TO_PASS": ["d"],
+        },
+        {
+            "task_id": "task-2",
+            "image_name": "img:2",
+            "problem_statement": "p2",
+            "FAIL_TO_PASS": ["e"],
+            "PASS_TO_PASS": ["f"],
+        },
+        {
+            "task_id": "task-3",
+            "image_name": "img:3",
+            "problem_statement": "p3",
+            "FAIL_TO_PASS": ["g"],
+            "PASS_TO_PASS": ["h"],
+        },
+    ]
+    cache_path = tmp_path / "bad_tasks.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "bad_task_ids": ["task-1"],
+                "bad_image_names": ["img:2"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SMALL_SWE_BAD_TASK_CACHE_PATH", str(cache_path))
+
+    batch = load_task_batch(
+        step_index=0,
+        batch_size=2,
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+    )
+
+    assert [sample.task_id for sample in batch] == ["task-0", "task-3"]
+
+
+def test_load_task_batch_steps_walk_filtered_task_pool(tmp_path: Path, monkeypatch) -> None:
+    rows = [
+        {
+            "task_id": "task-0",
+            "image_name": "img:0",
+            "problem_statement": "p0",
+            "FAIL_TO_PASS": ["a"],
+            "PASS_TO_PASS": ["b"],
+        },
+        {
+            "task_id": "task-1",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["c"],
+            "PASS_TO_PASS": ["d"],
+        },
+        {
+            "task_id": "task-2",
+            "image_name": "img:2",
+            "problem_statement": "p2",
+            "FAIL_TO_PASS": ["e"],
+            "PASS_TO_PASS": ["f"],
+        },
+    ]
+    cache_path = tmp_path / "bad_tasks.json"
+    cache_path.write_text(
+        json.dumps({"bad_task_ids": ["task-1"]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SMALL_SWE_BAD_TASK_CACHE_PATH", str(cache_path))
+
+    observed = [
+        load_task_batch(
+            step_index=step_index,
+            batch_size=1,
+            config=_config(),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )[0].task_id
+        for step_index in range(4)
+    ]
+
+    assert observed == ["task-0", "task-2", "task-0", "task-2"]
+
+
 def test_build_sdpo_task_rows_uses_full_split_with_prompt_metadata() -> None:
     rows = [
         {
@@ -199,12 +299,73 @@ def test_build_sdpo_task_rows_uses_full_split_with_prompt_metadata() -> None:
     )
 
     assert [row["task_id"] for row in sdpo_rows] == ["task-0", "task-2"]
-    assert sdpo_rows[0]["prompt"] == [{"role": "user", "content": "fix bug 0"}]
+    expected_prompt = build_onpolicy_initial_user_message(
+        problem_statement="fix bug 0",
+    )
+    assert sdpo_rows[0]["prompt"] == [{"role": "user", "content": expected_prompt}]
     assert sdpo_rows[0]["image_name"] == "img:0"
     assert sdpo_rows[0]["data_source"] == "dummy/dataset"
     assert sdpo_rows[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
     assert sdpo_rows[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
     assert sdpo_rows[0]["reward_model"]["ground_truth"]["data_source"] == "dummy/dataset"
+
+
+def test_build_sdpo_task_rows_skips_rows_marked_bad_in_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "task_id": "task-0",
+            "image_name": "img:0",
+            "problem_statement": "fix bug 0",
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+            "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
+        },
+        {
+            "task_id": "task-1",
+            "image_name": "img:1",
+            "problem_statement": "fix bug 1",
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix_1"],
+            "PASS_TO_PASS": ["tests/test_ok.py::test_regression_1"],
+        },
+        {
+            "task_id": "task-2",
+            "image_name": "img:2",
+            "problem_statement": "fix bug 2",
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix_2"],
+            "PASS_TO_PASS": ["tests/test_ok.py::test_regression_2"],
+        },
+    ]
+    cache_path = tmp_path / "bad_tasks.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "bad_task_ids": ["task-1"],
+                "bad_image_names": ["img:2"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SMALL_SWE_BAD_TASK_CACHE_PATH", str(cache_path))
+
+    sdpo_rows = build_sdpo_task_rows(
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+    )
+
+    assert [row["task_id"] for row in sdpo_rows] == ["task-0"]
+
+
+def test_resolve_on_policy_bad_task_cache_path_is_deterministic(tmp_path: Path) -> None:
+    resolved = resolve_on_policy_bad_task_cache_path(
+        config=_config(),
+        cache_dir=tmp_path,
+    )
+
+    assert resolved.parent == tmp_path
+    assert resolved.name.startswith("bad_tasks_dummy_dataset_train_")
+    assert resolved.suffix == ".json"
 
 
 def test_build_sdpo_task_rows_filters_problem_statement_length_under_4k() -> None:
@@ -288,6 +449,59 @@ def test_preload_sdpo_task_rows_to_parquet_builds_and_writes_when_missing(
     assert output_path.read_text(encoding="utf-8") == "parquet"
     assert isinstance(captured["records"], list)
     assert captured["records"][0]["task_id"] == "task-0"
+
+
+def test_resolve_sdpo_cache_paths_include_bad_task_filter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_path = tmp_path / "bad_tasks.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "bad_task_ids": ["task-1"],
+                "bad_image_names": ["img:1"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SMALL_SWE_BAD_TASK_CACHE_PATH", str(cache_path))
+
+    rows_path_a = resolve_sdpo_task_rows_cache_path(
+        config=_config(),
+        cache_dir=tmp_path,
+    )
+    train_path_a, val_path_a = resolve_sdpo_task_split_cache_paths(
+        config=_config(),
+        cache_dir=tmp_path,
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    cache_path.write_text(
+        json.dumps(
+            {
+                "bad_task_ids": ["task-2"],
+                "bad_image_names": ["img:2"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows_path_b = resolve_sdpo_task_rows_cache_path(
+        config=_config(),
+        cache_dir=tmp_path,
+    )
+    train_path_b, val_path_b = resolve_sdpo_task_split_cache_paths(
+        config=_config(),
+        cache_dir=tmp_path,
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    assert rows_path_a != rows_path_b
+    assert train_path_a != train_path_b
+    assert val_path_a != val_path_b
 
 
 def test_split_sdpo_task_rows_for_eval_is_deterministic_and_non_empty() -> None:

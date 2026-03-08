@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping, Sequence
 
 from data.feedback_canonicalizer import build_feedback_packet
@@ -12,19 +13,42 @@ from teacher.prompt_builder import TeacherPromptInputs, build_teacher_prompt
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 DEFAULT_NUM_RECENT_RAW_BLOCKS = 3
-_DEFAULT_OUTPUT_CONTRACT_BLOCK = build_teacher_output_contract_block()
+DEFAULT_MAX_REPROMPT_LEN = 16384
+_TURN_SUPERVISION_NEXT = "next_turn"
+_TURN_SUPERVISION_CURRENT = "current_turn"
+_TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
+LOGGER = logging.getLogger(__name__)
+_VERIFIER_FEEDBACK_NONE = "none"
+_VERIFIER_FEEDBACK_FINAL_TURN_ONLY = "final_turn_only"
+_VERIFIER_FEEDBACK_ALL_TURNS = "all_turns"
+_VERIFIER_FEEDBACK_MODES = {
+    _VERIFIER_FEEDBACK_NONE,
+    _VERIFIER_FEEDBACK_FINAL_TURN_ONLY,
+    _VERIFIER_FEEDBACK_ALL_TURNS,
+}
+_VERIFIER_FEEDBACK_HEADING = "Here is the final verifier response for the student's attempt:"
+_LEGACY_GATING_RESOLVED_ONLY = "resolved_only"
+_LEGACY_GATING_FEEDBACK_PRESENT = "feedback_present"
+_LEGACY_GATING_ALWAYS = "always"
+_LEGACY_GATING_POLICIES = {
+    _LEGACY_GATING_RESOLVED_ONLY,
+    _LEGACY_GATING_FEEDBACK_PRESENT,
+    _LEGACY_GATING_ALWAYS,
+}
+_NON_ACTIONABLE_EXIT_CODE_KEYS = {"exit_code", "return_code", "returncode"}
 
 
-def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str, bool]:
-    if max_reprompt_len <= 0:
-        raise ValueError("max_reprompt_len must be > 0")
+def _token_count(text: str) -> int:
+    return len(str(text).split())
 
-    if len(prompt.split()) <= max_reprompt_len:
-        return prompt, False
 
-    lines = prompt.split("\n")
+def _truncate_text_to_token_budget(text: str, *, token_budget: int) -> str:
+    if token_budget <= 0:
+        return ""
+
+    lines = str(text).split("\n")
     kept_lines: list[str] = []
-    budget = max_reprompt_len
+    budget = token_budget
 
     for line in lines:
         words = line.split()
@@ -38,10 +62,170 @@ def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str,
         else:
             if budget > 0:
                 kept_lines.append(" ".join(words[:budget]))
-            budget = 0
             break
 
-    return "\n".join(kept_lines), True
+    return "\n".join(kept_lines)
+
+
+def _truncate_prompt_tokens(prompt: str, *, max_reprompt_len: int) -> tuple[str, bool]:
+    if max_reprompt_len <= 0:
+        raise ValueError("max_reprompt_len must be > 0")
+
+    if _token_count(prompt) <= max_reprompt_len:
+        return prompt, False
+
+    return _truncate_text_to_token_budget(prompt, token_budget=max_reprompt_len), True
+
+
+def _split_feedback_block(feedback_block: str) -> tuple[str, str]:
+    rendered = str(feedback_block).strip()
+    if not rendered:
+        return "", ""
+    marker_index = rendered.find(_VERIFIER_FEEDBACK_HEADING)
+    if marker_index < 0:
+        return rendered, ""
+    feedback_main = rendered[:marker_index].rstrip()
+    verifier_feedback = rendered[marker_index:].strip()
+    return feedback_main, verifier_feedback
+
+
+def _combine_feedback_sections(*, feedback_main: str, verifier_feedback_block: str) -> str:
+    sections: list[str] = []
+    main = str(feedback_main).strip()
+    verifier = str(verifier_feedback_block).strip()
+    if main:
+        sections.append(main)
+    if verifier:
+        sections.append(verifier)
+    return "\n\n".join(sections)
+
+
+def _render_prompt_from_sections(sections: Mapping[str, str]) -> str:
+    return build_teacher_prompt(
+        TeacherPromptInputs(
+            initial_prompt_block=sections["initial_prompt_block"],
+            recent_raw_block=sections["recent_raw_block"],
+            compressed_memory_block=sections["compressed_memory_block"],
+            critical_facts_block=sections["critical_facts_block"],
+            current_attempt_block=sections["current_attempt_block"],
+            feedback_block=_combine_feedback_sections(
+                feedback_main=sections["feedback_main"],
+                verifier_feedback_block=sections["verifier_feedback_block"],
+            ),
+            output_contract_block=sections["output_contract_block"],
+        )
+    )
+
+
+def _reduce_sections_to_budget(
+    *,
+    sections: dict[str, str],
+    max_reprompt_len: int,
+    reduction_order: Sequence[str],
+    min_token_budget: Mapping[str, int],
+) -> bool:
+    changed = False
+    prompt = _render_prompt_from_sections(sections)
+    overage = _token_count(prompt) - max_reprompt_len
+    if overage <= 0:
+        return changed
+
+    for key in reduction_order:
+        if overage <= 0:
+            break
+        value = sections.get(key, "")
+        current_tokens = _token_count(value)
+        keep_floor = max(int(min_token_budget.get(key, 0)), 0)
+        removable = max(current_tokens - keep_floor, 0)
+        if removable <= 0:
+            continue
+
+        drop = min(removable, overage)
+        keep = current_tokens - drop
+        reduced = _truncate_text_to_token_budget(value, token_budget=keep)
+        if reduced != value:
+            sections[key] = reduced
+            changed = True
+
+        prompt = _render_prompt_from_sections(sections)
+        overage = _token_count(prompt) - max_reprompt_len
+
+    return changed
+
+
+def _compact_teacher_prompt(
+    *,
+    initial_prompt_block: str,
+    recent_raw_block: str,
+    compressed_memory_block: str,
+    critical_facts_block: str,
+    current_attempt_block: str,
+    feedback_block: str,
+    output_contract_block: str,
+    max_reprompt_len: int,
+) -> tuple[str, bool]:
+    if max_reprompt_len <= 0:
+        raise ValueError("max_reprompt_len must be > 0")
+
+    feedback_main, verifier_feedback_block = _split_feedback_block(feedback_block)
+    sections: dict[str, str] = {
+        "initial_prompt_block": str(initial_prompt_block),
+        "recent_raw_block": str(recent_raw_block),
+        "compressed_memory_block": str(compressed_memory_block),
+        "critical_facts_block": str(critical_facts_block),
+        "current_attempt_block": str(current_attempt_block),
+        "feedback_main": str(feedback_main),
+        "verifier_feedback_block": str(verifier_feedback_block),
+        "output_contract_block": str(output_contract_block),
+    }
+
+    full_prompt = _render_prompt_from_sections(sections)
+    if _token_count(full_prompt) <= max_reprompt_len:
+        return full_prompt, False
+
+    was_truncated = False
+    optional_changed = _reduce_sections_to_budget(
+        sections=sections,
+        max_reprompt_len=max_reprompt_len,
+        reduction_order=(
+            "recent_raw_block",
+            "feedback_main",
+        ),
+        min_token_budget={},
+    )
+    was_truncated = was_truncated or optional_changed
+    prompt = _render_prompt_from_sections(sections)
+    if _token_count(prompt) <= max_reprompt_len:
+        return prompt, True
+
+    protected_token_floors = {
+        "initial_prompt_block": min(_token_count(sections["initial_prompt_block"]), 24),
+        "current_attempt_block": min(_token_count(sections["current_attempt_block"]), 16),
+        "compressed_memory_block": min(_token_count(sections["compressed_memory_block"]), 16),
+        "critical_facts_block": min(_token_count(sections["critical_facts_block"]), 24),
+        "verifier_feedback_block": min(_token_count(sections["verifier_feedback_block"]), 32),
+        "output_contract_block": min(_token_count(sections["output_contract_block"]), 32),
+    }
+    protected_changed = _reduce_sections_to_budget(
+        sections=sections,
+        max_reprompt_len=max_reprompt_len,
+        reduction_order=(
+            "initial_prompt_block",
+            "current_attempt_block",
+            "compressed_memory_block",
+            "critical_facts_block",
+            "verifier_feedback_block",
+            "output_contract_block",
+        ),
+        min_token_budget=protected_token_floors,
+    )
+    was_truncated = was_truncated or protected_changed
+    prompt = _render_prompt_from_sections(sections)
+    if _token_count(prompt) <= max_reprompt_len:
+        return prompt, True
+
+    hard_capped, hard_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
+    return hard_capped, bool(was_truncated or hard_truncated)
 
 
 def _coerce_step_index(value: Any, *, fallback: int) -> int:
@@ -89,6 +273,46 @@ def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
     return fallback
 
 
+def _coerce_optional_bool_flag(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, float):
+        return value != 0.0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+    return None
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    return None
+
+
 def _coerce_text_list(value: Any) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return []
@@ -130,13 +354,52 @@ def _coerce_binary_mask(value: Any) -> list[int]:
     return [1 if item else 0 for item in rows]
 
 
-def _resolve_output_contract_block(sample: Mapping[str, Any]) -> str:
+def _normalize_turn_supervision_mode(value: Any) -> str:
+    if value is None:
+        return _TURN_SUPERVISION_CURRENT
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _TURN_SUPERVISION_CURRENT
+    if normalized not in _TURN_SUPERVISION_MODES:
+        supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
+        raise ValueError(f"turn_supervision_mode must be one of: {supported}")
+    return normalized
+
+def _normalize_verifier_feedback_mode(value: Any) -> str:
+    if value is None:
+        return _VERIFIER_FEEDBACK_NONE
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _VERIFIER_FEEDBACK_NONE
+    if normalized not in _VERIFIER_FEEDBACK_MODES:
+        supported = ", ".join(sorted(_VERIFIER_FEEDBACK_MODES))
+        raise ValueError(f"verifier_feedback_mode must be one of: {supported}")
+    return normalized
+
+
+def _normalize_legacy_gating_policy(value: Any) -> str:
+    if value is None:
+        return _LEGACY_GATING_RESOLVED_ONLY
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _LEGACY_GATING_RESOLVED_ONLY
+    if normalized not in _LEGACY_GATING_POLICIES:
+        supported = ", ".join(sorted(_LEGACY_GATING_POLICIES))
+        raise ValueError(f"legacy_distillation_gating_policy must be one of: {supported}")
+    return normalized
+
+
+def _resolve_output_contract_block(
+    sample: Mapping[str, Any],
+    *,
+    supervision_mode: str,
+) -> str:
     explicit = sample.get("output_contract_block")
     if explicit is None:
-        return _DEFAULT_OUTPUT_CONTRACT_BLOCK
+        return build_teacher_output_contract_block(supervision_mode=supervision_mode)
     rendered = str(explicit).strip()
     if not rendered:
-        return _DEFAULT_OUTPUT_CONTRACT_BLOCK
+        return build_teacher_output_contract_block(supervision_mode=supervision_mode)
     return rendered
 
 
@@ -152,6 +415,8 @@ def _format_initial_prompt_block(sample: Mapping[str, Any]) -> str:
             if not isinstance(item, Mapping):
                 continue
             role = str(item.get("role", "")).strip().upper()
+            if role == "SYSTEM":
+                continue
             content = str(item.get("content", "")).strip()
             if not role or not content:
                 continue
@@ -197,6 +462,18 @@ def _normalize_turn_tool_blocks(
     return normalized
 
 
+def _build_current_attempt_block(
+    *,
+    current_turn_index: int,
+    turn_blocks: Sequence[str],
+    include_student_attempt_for_teacher: bool,
+) -> str:
+    if not include_student_attempt_for_teacher:
+        return ""
+    # Current-turn SDPO intentionally keeps the student's raw assistant text in prompt context.
+    return turn_blocks[current_turn_index]
+
+
 def _build_recent_raw_block(
     turn_blocks: Sequence[str],
     *,
@@ -222,6 +499,7 @@ def _build_assistant_turn_spans(
     generated_positions = [index for index, flag in enumerate(response_mask) if int(flag) != 0]
     if len(turn_token_lengths) >= turn_count and generated_positions:
         spans: list[tuple[int, int] | None] = []
+        had_non_contiguous = False
         cursor = 0
         for turn_index in range(turn_count):
             token_length = max(int(turn_token_lengths[turn_index]), 0)
@@ -232,10 +510,25 @@ def _build_assistant_turn_spans(
             if not selected:
                 spans.append(None)
                 continue
+            if any((left + 1) != right for left, right in zip(selected, selected[1:])):
+                LOGGER.warning(
+                    "Detected non-contiguous generated token positions for turn %s; disabling supervision for that turn.",
+                    turn_index,
+                )
+                had_non_contiguous = True
+                spans.append(None)
+                cursor += len(selected)
+                continue
             spans.append((selected[0], selected[-1] + 1))
             cursor += len(selected)
-        if any(span is not None for span in spans):
-            return spans
+        if any(span is not None for span in spans) or had_non_contiguous:
+            if cursor >= len(generated_positions):
+                return spans
+            LOGGER.warning(
+                "Turn token-length metadata covered %s/%s generated tokens; falling back to contiguous spans.",
+                cursor,
+                len(generated_positions),
+            )
 
     spans = []
     current_start: int | None = None
@@ -290,58 +583,199 @@ def _build_feedback_for_turn(
         tool_output=tool_output,
         include_student_attempt_for_teacher=include_student_attempt_for_teacher,
     )
-    feedback_block = (
-        feedback_packet.canonical_feedback.actionable_error_text
-        or feedback_packet.canonical_feedback.normalized_text
-    )
+    feedback_block = feedback_packet.canonical_feedback.actionable_error_text or ""
     has_teacher_signal = feedback_packet.self_containment_checks.has_actionable_error_text
     return feedback_block, has_teacher_signal, feedback_packet.to_dict()
+
+
+def _extract_verifier_feedback_block(sample: Mapping[str, Any]) -> str:
+    verification_feedback = str(sample.get("verification_feedback", "")).strip()
+    verification_error = str(sample.get("verification_error", "")).strip()
+    resolved = _coerce_optional_bool_flag(sample.get("resolved"))
+    verification_missing = _coerce_optional_bool_flag(sample.get("verification_missing"))
+    final_turn_has_submit = _coerce_optional_bool_flag(sample.get("final_turn_has_submit"))
+    final_submit_format_valid = _coerce_optional_bool_flag(sample.get("final_submit_format_valid"))
+
+    sections: list[str] = []
+    if verification_missing is True:
+        sections.append("No verifier tests were configured for this task.")
+    elif verification_error:
+        sections.append(
+            "The final verifier did not complete cleanly, so the attempt is not verified as passing "
+            "all required tests."
+        )
+    elif resolved is True:
+        sections.append("All required verifier tests passed.")
+    elif resolved is False:
+        sections.append("Not all required verifier tests passed.")
+
+    if final_turn_has_submit is False:
+        sections.append("The student did not make a final submit call.")
+    elif final_turn_has_submit is True and final_submit_format_valid is False:
+        sections.append("The student made a final submit call, but its format was invalid.")
+    elif final_turn_has_submit is True and final_submit_format_valid is True:
+        sections.append("The student made a valid final submit call.")
+
+    if verification_error:
+        sections.append(f"Verifier error: {verification_error}")
+
+    if not sections and verification_feedback:
+        sections.append(f"The final verifier reported: {verification_feedback}")
+
+    if not sections:
+        return ""
+    return f"{_VERIFIER_FEEDBACK_HEADING}\n" + "\n".join(sections)
+
+
+def _should_include_verifier_feedback(
+    *,
+    verifier_feedback_mode: str,
+    current_turn_index: int,
+    total_turn_count: int,
+    turn_supervision_mode: str,
+) -> bool:
+    if verifier_feedback_mode == _VERIFIER_FEEDBACK_NONE:
+        return False
+    if verifier_feedback_mode == _VERIFIER_FEEDBACK_ALL_TURNS:
+        return True
+    if total_turn_count <= 0:
+        return False
+
+    if turn_supervision_mode == _TURN_SUPERVISION_CURRENT:
+        final_prompt_turn_index = total_turn_count - 1
+    else:
+        final_prompt_turn_index = total_turn_count - 2
+
+    return final_prompt_turn_index >= 0 and current_turn_index == final_prompt_turn_index
+
+
+def _has_feedback_signal(
+    sample: Mapping[str, Any],
+    *,
+    has_teacher_signal: bool,
+    verifier_feedback_mode: str,
+) -> bool:
+    if has_teacher_signal:
+        return True
+    if verifier_feedback_mode != _VERIFIER_FEEDBACK_NONE and _extract_verifier_feedback_block(sample):
+        return True
+    tool_output = sample.get("tool_output")
+    if isinstance(tool_output, Mapping):
+        if str(tool_output.get("stdout", "")).strip() or str(tool_output.get("stderr", "")).strip():
+            return True
+        for key, value in tool_output.items():
+            if key in {"stdout", "stderr"}:
+                continue
+            if key in _NON_ACTIONABLE_EXIT_CODE_KEYS:
+                parsed_exit_code = _coerce_optional_int(value)
+                if parsed_exit_code == 0:
+                    continue
+                if parsed_exit_code is not None:
+                    return True
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, Mapping) and not value:
+                continue
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and not value:
+                continue
+            return True
+    tool_blocks = _coerce_text_list(sample.get("tool_response_blocks"))
+    if tool_blocks:
+        return True
+    return False
+
+
+def _resolve_legacy_distillation_active(
+    *,
+    policy: str,
+    sample_resolved: bool,
+    has_feedback_signal: bool,
+) -> bool:
+    if policy == _LEGACY_GATING_ALWAYS:
+        return True
+    if policy == _LEGACY_GATING_FEEDBACK_PRESENT:
+        return sample_resolved or has_feedback_signal
+    return sample_resolved
 
 
 def _build_turn_prompt(
     sample: Mapping[str, Any],
     *,
     current_turn_index: int,
+    supervision_mode: str,
+    total_turn_count: int,
     turn_blocks: Sequence[str],
     turn_tool_blocks: Sequence[Sequence[str]],
     include_student_attempt_for_teacher: bool,
+    include_teacher_memory_blocks: bool,
+    include_canonicalized_feedback_in_additional_feedback: bool,
     max_reprompt_len: int,
     num_recent_raw_blocks: int,
+    verifier_feedback_mode: str,
 ) -> tuple[str, bool, dict[str, Any]]:
     tool = str(sample.get("feedback_tool", "bash"))
-    feedback_block, has_teacher_signal, feedback_packet = _build_feedback_for_turn(
+    canonical_feedback_block, has_teacher_signal, feedback_packet = _build_feedback_for_turn(
         tool=tool,
         turn_index=current_turn_index,
         tool_response_blocks=turn_tool_blocks[current_turn_index],
         include_student_attempt_for_teacher=include_student_attempt_for_teacher,
     )
 
-    memory_blocks = build_teacher_memory_blocks(sample, current_turn_index=current_turn_index)
+    memory_blocks = build_teacher_memory_blocks(
+        sample,
+        current_turn_index=current_turn_index,
+        include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+        include_teacher_memory_blocks=include_teacher_memory_blocks,
+    )
     recent_raw_block = _build_recent_raw_block(
         turn_blocks,
         current_turn_index=current_turn_index,
         num_recent_raw_blocks=num_recent_raw_blocks,
     )
 
-    current_attempt_block = turn_blocks[current_turn_index]
-    if not include_student_attempt_for_teacher:
-        current_attempt_block = ""
-
-    prompt = build_teacher_prompt(
-        TeacherPromptInputs(
-            initial_prompt_block=_format_initial_prompt_block(sample),
-            recent_raw_block=recent_raw_block,
-            compressed_memory_block=memory_blocks.compressed_memory_block,
-            critical_facts_block=memory_blocks.critical_facts_block,
-            current_attempt_block=current_attempt_block,
-            feedback_block=feedback_block,
-            output_contract_block=_resolve_output_contract_block(sample),
-        )
+    current_attempt_block = _build_current_attempt_block(
+        current_turn_index=current_turn_index,
+        turn_blocks=turn_blocks,
+        include_student_attempt_for_teacher=include_student_attempt_for_teacher,
     )
-    truncated_prompt, was_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
+
+    verifier_feedback_block = ""
+    if _should_include_verifier_feedback(
+        verifier_feedback_mode=verifier_feedback_mode,
+        current_turn_index=current_turn_index,
+        total_turn_count=total_turn_count,
+        turn_supervision_mode=supervision_mode,
+    ):
+        verifier_feedback_block = _extract_verifier_feedback_block(sample)
+    combined_feedback_block = (
+        canonical_feedback_block if include_canonicalized_feedback_in_additional_feedback else ""
+    )
+    if verifier_feedback_block:
+        if combined_feedback_block:
+            combined_feedback_block = f"{combined_feedback_block}\n\n{verifier_feedback_block}"
+        else:
+            combined_feedback_block = verifier_feedback_block
+        has_teacher_signal = True
+
+    truncated_prompt, was_truncated = _compact_teacher_prompt(
+        initial_prompt_block=_format_initial_prompt_block(sample),
+        recent_raw_block=recent_raw_block,
+        compressed_memory_block=memory_blocks.compressed_memory_block,
+        critical_facts_block=memory_blocks.critical_facts_block,
+        current_attempt_block=current_attempt_block,
+        feedback_block=combined_feedback_block,
+        output_contract_block=_resolve_output_contract_block(
+            sample,
+            supervision_mode=supervision_mode,
+        ),
+        max_reprompt_len=max_reprompt_len,
+    )
     return truncated_prompt, has_teacher_signal, {
         "feedback_packet": feedback_packet,
         "prompt_truncated": was_truncated,
+        "verifier_feedback_injected": bool(verifier_feedback_block),
     }
 
 
@@ -349,8 +783,12 @@ def _build_legacy_prompt_for_sample(
     sample: Mapping[str, Any],
     *,
     step_index: int,
+    supervision_mode: str,
     include_student_attempt_for_teacher: bool,
+    include_teacher_memory_blocks: bool,
+    include_canonicalized_feedback_in_additional_feedback: bool,
     max_reprompt_len: int,
+    verifier_feedback_mode: str,
 ) -> tuple[str, bool, dict[str, Any]]:
     tool = str(sample.get("feedback_tool", "bash"))
     tool_input = sample.get("feedback_tool_input", {})
@@ -367,7 +805,7 @@ def _build_legacy_prompt_for_sample(
         tool_output=tool_output,
         include_student_attempt_for_teacher=include_student_attempt_for_teacher,
     )
-    feedback_block = (
+    canonical_feedback_block = (
         feedback_packet.canonical_feedback.actionable_error_text
         or feedback_packet.canonical_feedback.normalized_text
     )
@@ -375,23 +813,42 @@ def _build_legacy_prompt_for_sample(
     if not include_student_attempt_for_teacher:
         current_attempt_block = ""
 
-    memory_blocks = build_teacher_memory_blocks(sample, current_turn_index=step_index)
-    prompt = build_teacher_prompt(
-        TeacherPromptInputs(
-            initial_prompt_block=_format_initial_prompt_block(sample),
-            recent_raw_block=str(sample.get("recent_raw_block", "")),
-            compressed_memory_block=memory_blocks.compressed_memory_block,
-            critical_facts_block=memory_blocks.critical_facts_block,
-            current_attempt_block=current_attempt_block,
-            feedback_block=feedback_block,
-            output_contract_block=_resolve_output_contract_block(sample),
-        )
+    verifier_feedback_block = ""
+    if verifier_feedback_mode != _VERIFIER_FEEDBACK_NONE:
+        verifier_feedback_block = _extract_verifier_feedback_block(sample)
+    combined_feedback_block = (
+        canonical_feedback_block if include_canonicalized_feedback_in_additional_feedback else ""
     )
-    truncated_prompt, was_truncated = _truncate_prompt_tokens(prompt, max_reprompt_len=max_reprompt_len)
+    if verifier_feedback_block:
+        if combined_feedback_block:
+            combined_feedback_block = f"{combined_feedback_block}\n\n{verifier_feedback_block}"
+        else:
+            combined_feedback_block = verifier_feedback_block
+
+    memory_blocks = build_teacher_memory_blocks(
+        sample,
+        current_turn_index=step_index,
+        include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+        include_teacher_memory_blocks=include_teacher_memory_blocks,
+    )
+    truncated_prompt, was_truncated = _compact_teacher_prompt(
+        initial_prompt_block=_format_initial_prompt_block(sample),
+        recent_raw_block=str(sample.get("recent_raw_block", "")),
+        compressed_memory_block=memory_blocks.compressed_memory_block,
+        critical_facts_block=memory_blocks.critical_facts_block,
+        current_attempt_block=current_attempt_block,
+        feedback_block=combined_feedback_block,
+        output_contract_block=_resolve_output_contract_block(
+            sample,
+            supervision_mode=supervision_mode,
+        ),
+        max_reprompt_len=max_reprompt_len,
+    )
     has_teacher_signal = feedback_packet.self_containment_checks.has_actionable_error_text
     return truncated_prompt, has_teacher_signal, {
         "feedback_packet": feedback_packet.to_dict(),
         "prompt_truncated": was_truncated,
+        "verifier_feedback_injected": bool(verifier_feedback_block),
     }
 
 
@@ -399,10 +856,25 @@ def build_self_distillation_batch(
     samples: Sequence[Mapping[str, Any]],
     *,
     include_student_attempt_for_teacher: bool = True,
-    max_reprompt_len: int = 10240,
+    include_teacher_memory_blocks: bool = True,
+    max_reprompt_len: int = DEFAULT_MAX_REPROMPT_LEN,
     num_recent_raw_blocks: int = DEFAULT_NUM_RECENT_RAW_BLOCKS,
+    turn_supervision_mode: str = _TURN_SUPERVISION_CURRENT,
+    verifier_feedback_mode: str = _VERIFIER_FEEDBACK_NONE,
+    legacy_distillation_gating_policy: str = _LEGACY_GATING_RESOLVED_ONLY,
+    include_canonicalized_feedback_in_additional_feedback: bool = False,
 ) -> dict[str, Any]:
     """Build deterministic teacher prompts and mask fields for verl hooks."""
+    normalized_turn_supervision_mode = _normalize_turn_supervision_mode(turn_supervision_mode)
+    normalized_verifier_feedback_mode = _normalize_verifier_feedback_mode(verifier_feedback_mode)
+    normalized_legacy_gating_policy = _normalize_legacy_gating_policy(
+        legacy_distillation_gating_policy
+    )
+    normalized_include_teacher_memory_blocks = _coerce_bool_flag(
+        include_teacher_memory_blocks,
+        fallback=True,
+    )
+
     teacher_prompts: list[str] = []
     self_distillation_mask: list[bool] = []
     feedback_packets: list[dict[str, Any]] = []
@@ -438,7 +910,9 @@ def build_self_distillation_batch(
         sample_turn_feedback_packets: list[dict[str, Any]] = []
         sample_turn_prompt_truncated: list[bool] = []
 
-        if len(assistant_turns) >= 2:
+        if assistant_turns and (
+            normalized_turn_supervision_mode == _TURN_SUPERVISION_CURRENT or len(assistant_turns) >= 2
+        ):
             turn_blocks = [
                 _format_turn_block(
                     turn_index=turn_index,
@@ -452,19 +926,37 @@ def build_self_distillation_batch(
                 turn_count=len(assistant_turns),
                 turn_token_lengths=turn_token_lengths,
             )
-            for current_turn_index in range(len(assistant_turns) - 1):
+            if normalized_turn_supervision_mode == _TURN_SUPERVISION_CURRENT:
+                turn_indices = range(len(assistant_turns))
+            else:
+                turn_indices = range(len(assistant_turns) - 1)
+
+            for current_turn_index in turn_indices:
                 prompt, _has_teacher_signal, metadata = _build_turn_prompt(
                     sample,
                     current_turn_index=current_turn_index,
+                    supervision_mode=normalized_turn_supervision_mode,
+                    total_turn_count=len(assistant_turns),
                     turn_blocks=turn_blocks,
                     turn_tool_blocks=per_turn_tool_blocks,
                     include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+                    include_teacher_memory_blocks=normalized_include_teacher_memory_blocks,
+                    include_canonicalized_feedback_in_additional_feedback=(
+                        include_canonicalized_feedback_in_additional_feedback
+                    ),
                     max_reprompt_len=max_reprompt_len,
                     num_recent_raw_blocks=num_recent_raw_blocks,
+                    verifier_feedback_mode=normalized_verifier_feedback_mode,
                 )
-                target_span = spans[current_turn_index + 1] if current_turn_index + 1 < len(spans) else None
+                if normalized_turn_supervision_mode == _TURN_SUPERVISION_CURRENT:
+                    target_span = spans[current_turn_index] if current_turn_index < len(spans) else None
+                else:
+                    target_span = spans[current_turn_index + 1] if current_turn_index + 1 < len(spans) else None
                 target_mask = _build_mask_from_span(width=len(response_mask), span=target_span)
-                is_active = any(target_mask)
+                # Turn-level SDPO stays feedback-gated even with verifier injection:
+                # only same-turn tool-response feedback activates distillation.
+                has_turn_feedback_signal = bool(per_turn_tool_blocks[current_turn_index])
+                is_active = any(target_mask) and has_turn_feedback_signal
 
                 sample_turn_teacher_prompts.append(prompt)
                 sample_turn_response_masks.append(target_mask)
@@ -490,14 +982,31 @@ def build_self_distillation_batch(
         legacy_prompt, has_teacher_signal, metadata = _build_legacy_prompt_for_sample(
             sample,
             step_index=step_index,
+            supervision_mode=normalized_turn_supervision_mode,
             include_student_attempt_for_teacher=include_student_attempt_for_teacher,
+            include_teacher_memory_blocks=normalized_include_teacher_memory_blocks,
+            include_canonicalized_feedback_in_additional_feedback=(
+                include_canonicalized_feedback_in_additional_feedback
+            ),
             max_reprompt_len=max_reprompt_len,
+            verifier_feedback_mode=normalized_verifier_feedback_mode,
         )
         teacher_prompts.append(legacy_prompt)
 
         # Keep alignment with SDPO batch semantics for non-turn trajectories.
         sample_resolved = _coerce_bool_flag(sample.get("resolved"), fallback=False)
-        self_distillation_mask.append(sample_resolved or has_teacher_signal)
+        has_feedback_signal = _has_feedback_signal(
+            sample,
+            has_teacher_signal=has_teacher_signal,
+            verifier_feedback_mode=normalized_verifier_feedback_mode,
+        )
+        self_distillation_mask.append(
+            _resolve_legacy_distillation_active(
+                policy=normalized_legacy_gating_policy,
+                sample_resolved=sample_resolved,
+                has_feedback_signal=has_feedback_signal,
+            )
+        )
 
         feedback_packets.append(metadata["feedback_packet"])
         prompt_truncated.append(bool(metadata["prompt_truncated"]))

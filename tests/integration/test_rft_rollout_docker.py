@@ -112,7 +112,7 @@ def test_full_episode_rollout_executes_all_tools_in_order() -> None:
             )
         if turn_index == 1:
             return (
-                '<tool_call>{"tool":"search","args":{"query":"from_bash","path_hint":"/tmp","top_k":10}}</tool_call>'
+                '<tool_call>{"tool":"text_search","args":{"query":"from_bash","path_hint":"/tmp","top_k":10}}</tool_call>'
             )
         if turn_index == 2:
             return (
@@ -120,7 +120,7 @@ def test_full_episode_rollout_executes_all_tools_in_order() -> None:
             )
         if turn_index == 3:
             return (
-                '<tool_call>{"tool":"search","args":{"query":"from_edit","path_hint":"/tmp","top_k":10}}</tool_call>'
+                '<tool_call>{"tool":"text_search","args":{"query":"from_edit","path_hint":"/tmp","top_k":10}}</tool_call>'
             )
         return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
 
@@ -137,9 +137,9 @@ def test_full_episode_rollout_executes_all_tools_in_order() -> None:
     row = collected[0]
     assert row["resolved"] is True
     assert row["is_terminal"] is True
-    assert row.get("tool_name") == "search"
+    assert row.get("tool_name") == "text_search"
     assert "from_edit" in row["tool_output"].get("stdout", "")
-    expected_chain = ["bash", "search", "apply_patch", "search"]
+    expected_chain = ["bash", "text_search", "apply_patch", "text_search"]
     trajectory_tools = [step.get("tool") for step in row.get("trajectory_steps", [])]
     assert trajectory_tools == expected_chain
     if row.get("task_patch_applied"):

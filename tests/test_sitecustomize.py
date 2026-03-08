@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import builtins
 import importlib.util
 import os
@@ -142,7 +143,7 @@ def test_sitecustomize_skips_sdpo_patch_until_ray_trainer_class_ready(monkeypatc
     assert calls["count"] == 0
 
 
-def test_sitecustomize_accepts_num_recent_raw_blocks_on_older_verl_config(monkeypatch) -> None:
+def test_sitecustomize_accepts_self_distillation_compat_fields_on_older_verl_config(monkeypatch) -> None:
     class _FakeSelfDistillationConfig:
         def __init__(self, alpha: float = 0.0) -> None:
             self.alpha = alpha
@@ -162,12 +163,134 @@ def test_sitecustomize_accepts_num_recent_raw_blocks_on_older_verl_config(monkey
     original_import = builtins.__import__
     try:
         sitecustomize.apply_small_swe_runtime_patches()
-        cfg = _FakeSelfDistillationConfig(alpha=0.25, num_recent_raw_blocks=7)
+        cfg = _FakeSelfDistillationConfig(
+            alpha=0.25,
+            num_recent_raw_blocks=7,
+            turn_supervision_mode="current_turn",
+            verifier_feedback_mode="all_turns",
+            legacy_distillation_gating_policy="feedback_present",
+            include_teacher_memory_blocks="off",
+        )
     finally:
         builtins.__import__ = original_import
 
     assert cfg.alpha == 0.25
     assert getattr(cfg, "num_recent_raw_blocks") == 7
+    assert getattr(cfg, "turn_supervision_mode") == "current_turn"
+    assert getattr(cfg, "verifier_feedback_mode") == "all_turns"
+    assert getattr(cfg, "legacy_distillation_gating_policy") == "feedback_present"
+    assert getattr(cfg, "include_teacher_memory_blocks") is False
+
+
+def test_sitecustomize_defaults_turn_supervision_mode_to_current_turn_on_older_verl_config(monkeypatch) -> None:
+    class _FakeSelfDistillationConfig:
+        def __init__(self, alpha: float = 0.0) -> None:
+            self.alpha = alpha
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_workers_pkg = types.ModuleType("verl.workers")
+    fake_config_pkg = types.ModuleType("verl.workers.config")
+    fake_actor_module = types.ModuleType("verl.workers.config.actor")
+    fake_actor_module.SelfDistillationConfig = _FakeSelfDistillationConfig
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers", fake_workers_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config", fake_config_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config.actor", fake_actor_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    original_import = builtins.__import__
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+        cfg = _FakeSelfDistillationConfig(alpha=0.25)
+    finally:
+        builtins.__import__ = original_import
+
+    assert getattr(cfg, "turn_supervision_mode") == "current_turn"
+
+
+def test_sitecustomize_defaults_verifier_feedback_mode_to_all_turns_on_older_verl_config(
+    monkeypatch,
+) -> None:
+    class _FakeSelfDistillationConfig:
+        def __init__(self, alpha: float = 0.0) -> None:
+            self.alpha = alpha
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_workers_pkg = types.ModuleType("verl.workers")
+    fake_config_pkg = types.ModuleType("verl.workers.config")
+    fake_actor_module = types.ModuleType("verl.workers.config.actor")
+    fake_actor_module.SelfDistillationConfig = _FakeSelfDistillationConfig
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers", fake_workers_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config", fake_config_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config.actor", fake_actor_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    original_import = builtins.__import__
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+        cfg = _FakeSelfDistillationConfig(alpha=0.25)
+    finally:
+        builtins.__import__ = original_import
+
+    assert getattr(cfg, "verifier_feedback_mode") == "all_turns"
+
+
+def test_sitecustomize_defaults_include_teacher_memory_blocks_to_true_on_older_verl_config(
+    monkeypatch,
+) -> None:
+    class _FakeSelfDistillationConfig:
+        def __init__(self, alpha: float = 0.0) -> None:
+            self.alpha = alpha
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_workers_pkg = types.ModuleType("verl.workers")
+    fake_config_pkg = types.ModuleType("verl.workers.config")
+    fake_actor_module = types.ModuleType("verl.workers.config.actor")
+    fake_actor_module.SelfDistillationConfig = _FakeSelfDistillationConfig
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers", fake_workers_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config", fake_config_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config.actor", fake_actor_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    original_import = builtins.__import__
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+        cfg = _FakeSelfDistillationConfig(alpha=0.25)
+    finally:
+        builtins.__import__ = original_import
+
+    assert getattr(cfg, "include_teacher_memory_blocks") is True
+
+
+def test_sitecustomize_rejects_invalid_turn_supervision_mode_on_older_verl_config(monkeypatch) -> None:
+    class _FakeSelfDistillationConfig:
+        def __init__(self, alpha: float = 0.0) -> None:
+            self.alpha = alpha
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_workers_pkg = types.ModuleType("verl.workers")
+    fake_config_pkg = types.ModuleType("verl.workers.config")
+    fake_actor_module = types.ModuleType("verl.workers.config.actor")
+    fake_actor_module.SelfDistillationConfig = _FakeSelfDistillationConfig
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers", fake_workers_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config", fake_config_pkg)
+    monkeypatch.setitem(sys.modules, "verl.workers.config.actor", fake_actor_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    original_import = builtins.__import__
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+        with pytest.raises(ValueError, match="turn_supervision_mode"):
+            _FakeSelfDistillationConfig(alpha=0.25, turn_supervision_mode="bad_mode")
+    finally:
+        builtins.__import__ = original_import
 
 
 def test_sitecustomize_sets_local_rank_from_rank_in_ray_noset_mode(monkeypatch) -> None:
@@ -344,6 +467,50 @@ def test_sitecustomize_marks_fast_tokenizer_pad_warning_as_handled(monkeypatch, 
     tokenizer = fake_tokenizer_module.hf_tokenizer(str(qwen_dir))
     assert calls["kwargs"][-1]["fix_mistral_regex"] is True
     assert tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] is True
+
+
+def test_sitecustomize_coerces_pad_outputs_to_tensors(monkeypatch) -> None:
+    torch = pytest.importorskip("torch")
+
+    class _FakeTokenizer:
+        def __init__(self) -> None:
+            self.deprecation_warnings: dict[str, bool] = {}
+
+        def pad(self, *args, **kwargs):
+            _ = args, kwargs
+            return {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_utils_pkg = types.ModuleType("verl.utils")
+    fake_utils_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_tokenizer_module = types.ModuleType("verl.utils.tokenizer")
+
+    def _fake_hf_tokenizer(name_or_path, *args, **kwargs):
+        _ = name_or_path, args, kwargs
+        return _FakeTokenizer()
+
+    def _fake_hf_processor(name_or_path, *args, **kwargs):
+        _ = name_or_path, args, kwargs
+        return None
+
+    fake_tokenizer_module.hf_tokenizer = _fake_hf_tokenizer
+    fake_tokenizer_module.hf_processor = _fake_hf_processor
+    fake_utils_pkg.tokenizer = fake_tokenizer_module
+    fake_utils_pkg.hf_tokenizer = _fake_hf_tokenizer
+    fake_utils_pkg.hf_processor = _fake_hf_processor
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.tokenizer", fake_tokenizer_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+    tokenizer = fake_tokenizer_module.hf_tokenizer("/tmp/model")
+    padded = tokenizer.pad({"input_ids": [1, 2, 3]}, return_tensors="pt")
+
+    assert isinstance(padded["input_ids"], torch.Tensor)
+    assert isinstance(padded["attention_mask"], torch.Tensor)
 
 
 def test_sitecustomize_tokenizer_patch_falls_back_when_fix_flag_is_unsupported(monkeypatch) -> None:
@@ -549,3 +716,81 @@ def test_sitecustomize_patches_transformers_torch_dtype_property(monkeypatch) ->
             setattr(PretrainedConfig, "_small_swe_torch_dtype_property_patch", original_marker)
         else:
             delattr(PretrainedConfig, "_small_swe_torch_dtype_property_patch")
+
+
+def test_sitecustomize_patches_reward_loop_valid_response_length_indexing(monkeypatch) -> None:
+    torch = pytest.importorskip("torch")
+
+    class _FakeLoop:
+        async def run_in_executor(self, executor, fn):
+            _ = executor
+            return fn()
+
+    class _FakeNaiveRewardManager:
+        def __init__(self) -> None:
+            self.loop = _FakeLoop()
+            self.is_async_reward_score = False
+            self.reward_router_address = None
+            self.reward_model_tokenizer = None
+            self.compute_score = lambda **kwargs: {"score": 0.25, "solution": kwargs["solution_str"]}
+            self.decoded_ids: list[int] = []
+
+            def _decode(token_ids, skip_special_tokens: bool = True):
+                _ = skip_special_tokens
+                if hasattr(token_ids, "tolist"):
+                    token_ids = token_ids.tolist()
+                self.decoded_ids = [int(item) for item in token_ids]
+                return "decoded"
+
+            self.tokenizer = types.SimpleNamespace(decode=_decode)
+
+        async def run_single(self, data):
+            data_item = data[0]
+            response_ids = data_item.batch["responses"]
+            response_length = response_ids.shape[-1]
+            valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
+            _ = response_ids[:valid_response_length]
+            return {"reward_score": 0.0, "reward_extra_info": {"acc": 0.0}}
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_experimental_pkg = types.ModuleType("verl.experimental")
+    fake_experimental_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_reward_loop_pkg = types.ModuleType("verl.experimental.reward_loop")
+    fake_reward_loop_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_reward_manager_pkg = types.ModuleType("verl.experimental.reward_loop.reward_manager")
+    fake_reward_manager_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_naive_module = types.ModuleType("verl.experimental.reward_loop.reward_manager.naive")
+    fake_naive_module.NaiveRewardManager = _FakeNaiveRewardManager
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.experimental", fake_experimental_pkg)
+    monkeypatch.setitem(sys.modules, "verl.experimental.reward_loop", fake_reward_loop_pkg)
+    monkeypatch.setitem(
+        sys.modules,
+        "verl.experimental.reward_loop.reward_manager",
+        fake_reward_manager_pkg,
+    )
+    monkeypatch.setitem(sys.modules, "verl.experimental.reward_loop.reward_manager.naive", fake_naive_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+
+    manager = _FakeNaiveRewardManager()
+    item = types.SimpleNamespace(
+        batch={
+            # Keep a batch axis to ensure fallback slices the token axis (last dim).
+            "responses": torch.tensor([[11, 22]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
+        },
+        non_tensor_batch={
+            "data_source": "swe-smith",
+            "reward_model": {"ground_truth": {}},
+        },
+    )
+    result = asyncio.run(manager.run_single([item]))
+
+    assert result["reward_score"] == 0.25
+    assert result["reward_extra_info"]["score"] == 0.25
+    assert result["reward_extra_info"]["solution"] == "decoded"
+    assert manager.decoded_ids == [11]

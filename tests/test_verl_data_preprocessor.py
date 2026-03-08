@@ -12,7 +12,7 @@ def test_preprocess_trajectories_from_assistant_response() -> None:
             "assistant_response": (
                 "<|im_start|>assistant\n"
                 "<think>debug quickly</think>\n"
-                "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"tests/test_math.py::test_add\"}}</tool_call>\n"
+                "<tool_call>{\"tool\":\"text_search\",\"args\":{\"query\":\"tests/test_math.py::test_add\"}}</tool_call>\n"
                 "<|im_end|>"
             ),
             "tool_output": {"stdout": "Traceback", "stderr": "", "exit_code": 1},
@@ -144,7 +144,7 @@ def test_preprocess_trajectories_emits_label_blocks_metadata() -> None:
             "assistant_response": (
                 "<|im_start|>assistant\n"
                 "<think>debug quickly</think>\n"
-                "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"tests/test_math.py\"}}</tool_call>\n"
+                "<tool_call>{\"tool\":\"text_search\",\"args\":{\"query\":\"tests/test_math.py\"}}</tool_call>\n"
                 "<|im_end|>"
             ),
         }
@@ -229,7 +229,7 @@ def test_preprocess_trajectories_with_tokenizer_produces_aligned_masks() -> None
             "assistant_response": (
                 "<|im_start|>assistant\n"
                 "<think>debug quickly</think>\n"
-                "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"tests/test_math.py\"}}</tool_call>\n"
+                "<tool_call>{\"tool\":\"text_search\",\"args\":{\"query\":\"tests/test_math.py\"}}</tool_call>\n"
                 "<|im_end|>"
             ),
             "tool_output": {"stdout": "Traceback", "stderr": "", "exit_code": 1},
@@ -256,7 +256,7 @@ def test_preprocess_trajectories_uses_batched_tokenization_when_supported() -> N
             "assistant_response": (
                 "<|im_start|>assistant\n"
                 "<think>debug quickly</think>\n"
-                "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"tests/test_math.py\"}}</tool_call>\n"
+                "<tool_call>{\"tool\":\"text_search\",\"args\":{\"query\":\"tests/test_math.py\"}}</tool_call>\n"
                 "<|im_end|>"
             ),
             "tool_output": {"stdout": "Traceback", "stderr": "", "exit_code": 1},
@@ -292,7 +292,7 @@ def test_preprocess_trajectories_without_tokenizer_omits_input_ids() -> None:
         {
             "prompt": "Fix test",
             "assistant_response": (
-                "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"a\"}}</tool_call>"
+                "<tool_call>{\"tool\":\"text_search\",\"args\":{\"query\":\"a\"}}</tool_call>"
             ),
         }
     ]

@@ -25,7 +25,7 @@ def test_build_multiturn_messages_uses_history_and_maps_tool_responses_to_user()
     messages = build_multiturn_messages(row, row_index=0)
 
     assert [message["role"] for message in messages] == ["user", "assistant", "user", "assistant"]
-    assert messages[0]["content"] == "Fix the failing test."
+    assert "Fix the failing test." in messages[0]["content"]
     assert "1 failed" in messages[2]["content"]
 
 
@@ -37,13 +37,13 @@ def test_build_multiturn_messages_falls_back_to_assistant_response() -> None:
 
     messages = build_multiturn_messages(row, row_index=0)
 
-    assert messages == [
-        {"role": "user", "content": "Write a patch."},
-        {
-            "role": "assistant",
-            "content": '<tool_call>{"tool":"submit","args":{"final_response":"patched"}}</tool_call>',
-        },
-    ]
+    assert len(messages) == 2
+    assert messages[0]["role"] == "user"
+    assert "Write a patch." in messages[0]["content"]
+    assert messages[1] == {
+        "role": "assistant",
+        "content": '<tool_call>{"tool":"submit","args":{"final_response":"patched"}}</tool_call>',
+    }
 
 
 def test_build_multiturn_messages_requires_assistant_turn() -> None:
@@ -97,7 +97,9 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
     assert records[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
     assert records[0]["messages"][0]["role"] == "user"
     assert records[0]["messages"][-1]["role"] == "assistant"
-    assert records[0]["prompt"] == [{"role": "user", "content": "Task prompt"}]
+    prompt_block = records[0]["prompt"][0]
+    assert prompt_block["role"] == "user"
+    assert "Task prompt" in prompt_block["content"]
 
 
 def test_build_multiturn_dataset_records_prompt_uses_preceding_context() -> None:
@@ -162,6 +164,7 @@ def test_build_multiturn_dataset_records_uses_reward_ground_truth_test_targets_w
     assert records[0]["reward_model"]["ground_truth"]["pass_to_pass"] == [
         "tests/test_ok.py::test_regression"
     ]
+    assert "Task objective:" in records[0]["messages"][0]["content"]
 
 
 def test_build_multiturn_dataset_records_requires_image_name() -> None:

@@ -10,7 +10,10 @@ import numbers
 import os
 from typing import Any, Mapping, Sequence
 
-from verl_integration.reprompt_adapter import build_self_distillation_batch
+from verl_integration.reprompt_adapter import (
+    DEFAULT_MAX_REPROMPT_LEN,
+    build_self_distillation_batch,
+)
 from verl_integration.reward_adapter import dataproto_to_rows, rows_to_reward_tensor
 
 LOGGER = logging.getLogger(__name__)
@@ -27,13 +30,35 @@ _ORIGINAL_AGENT_LOOP_GENERATE_ATTR = "_small_swe_original_agent_loop_generate_se
 _AGENT_LOOP_SERVER_PATCH_MARKER_ATTR = "_small_swe_agent_loop_server_patch_applied"
 _ORIGINAL_AGENT_LOOP_CHOOSE_SERVER_ATTR = "_small_swe_original_agent_loop_choose_server"
 _DISTRIBUTED_TURN_LEVEL_EXPANSION_ENV = "SMALL_SWE_ENABLE_DISTRIBUTED_TURN_LEVEL_EXPANSION"
+_TURN_SUPERVISION_NEXT = "next_turn"
+_TURN_SUPERVISION_CURRENT = "current_turn"
+_TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
 _AGENT_LOOP_MAX_IN_FLIGHT_ENV = "SMALL_SWE_SDPO_AGENT_LOOP_MAX_IN_FLIGHT"
+_VERIFIER_FEEDBACK_NONE = "none"
+_VERIFIER_FEEDBACK_FINAL_TURN_ONLY = "final_turn_only"
+_VERIFIER_FEEDBACK_ALL_TURNS = "all_turns"
+_VERIFIER_FEEDBACK_MODES = {
+    _VERIFIER_FEEDBACK_NONE,
+    _VERIFIER_FEEDBACK_FINAL_TURN_ONLY,
+    _VERIFIER_FEEDBACK_ALL_TURNS,
+}
+_LEGACY_GATING_RESOLVED_ONLY = "resolved_only"
+_LEGACY_GATING_FEEDBACK_PRESENT = "feedback_present"
+_LEGACY_GATING_ALWAYS = "always"
+_LEGACY_GATING_POLICIES = {
+    _LEGACY_GATING_RESOLVED_ONLY,
+    _LEGACY_GATING_FEEDBACK_PRESENT,
+    _LEGACY_GATING_ALWAYS,
+}
 _TURN_LEVEL_REQUIRED_KEYS = {
     "turn_teacher_input_ids",
     "turn_teacher_attention_mask",
     "turn_teacher_position_ids",
     "turn_response_mask",
     "turn_self_distillation_mask",
+}
+_NON_RECOVERABLE_REWARD_ERROR_FRAGMENTS = {
+    "SWE rows require non-empty _response_mask",
 }
 
 try:  # pragma: no cover - exercised in train runtime
@@ -47,6 +72,11 @@ def _env_flag_enabled(name: str, *, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _is_non_recoverable_reward_adapter_error(exc: Exception) -> bool:
+    message = str(exc)
+    return any(fragment in message for fragment in _NON_RECOVERABLE_REWARD_ERROR_FRAGMENTS)
 
 
 def _should_skip_turn_level_expansion_for_distributed() -> bool:
@@ -63,6 +93,42 @@ def _should_skip_turn_level_expansion_for_distributed() -> bool:
         return distributed.get_world_size() > 1
     except Exception:
         return True
+
+
+def _normalize_turn_supervision_mode(value: Any) -> str:
+    if value is None:
+        return _TURN_SUPERVISION_CURRENT
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _TURN_SUPERVISION_CURRENT
+    if normalized not in _TURN_SUPERVISION_MODES:
+        supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
+        raise ValueError(f"turn_supervision_mode must be one of: {supported}")
+    return normalized
+
+
+def _normalize_verifier_feedback_mode(value: Any) -> str:
+    if value is None:
+        return _VERIFIER_FEEDBACK_NONE
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _VERIFIER_FEEDBACK_NONE
+    if normalized not in _VERIFIER_FEEDBACK_MODES:
+        supported = ", ".join(sorted(_VERIFIER_FEEDBACK_MODES))
+        raise ValueError(f"verifier_feedback_mode must be one of: {supported}")
+    return normalized
+
+
+def _normalize_legacy_gating_policy(value: Any) -> str:
+    if value is None:
+        return _LEGACY_GATING_RESOLVED_ONLY
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _LEGACY_GATING_RESOLVED_ONLY
+    if normalized not in _LEGACY_GATING_POLICIES:
+        supported = ", ".join(sorted(_LEGACY_GATING_POLICIES))
+        raise ValueError(f"legacy_distillation_gating_policy must be one of: {supported}")
+    return normalized
 
 
 def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) -> bool:
@@ -152,6 +218,8 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
                 expected_len=expected_len,
             )
         except Exception as exc:  # pragma: no cover - fallback path
+            if _is_non_recoverable_reward_adapter_error(exc):
+                raise
             LOGGER.warning(
                 "SWE reward-adapter path failed; falling back to upstream reward computation: %s",
                 exc,
@@ -179,6 +247,20 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
         if self_distillation_cfg is None:
             return None
 
+        turn_supervision_mode = _normalize_turn_supervision_mode(
+            _cfg_get(self_distillation_cfg, "turn_supervision_mode", _TURN_SUPERVISION_CURRENT)
+        )
+        verifier_feedback_mode = _normalize_verifier_feedback_mode(
+            _cfg_get(self_distillation_cfg, "verifier_feedback_mode", _VERIFIER_FEEDBACK_ALL_TURNS)
+        )
+        legacy_distillation_gating_policy = _normalize_legacy_gating_policy(
+            _cfg_get(
+                self_distillation_cfg,
+                "legacy_distillation_gating_policy",
+                _LEGACY_GATING_RESOLVED_ONLY,
+            )
+        )
+
         try:
             if torch is None:
                 raise RuntimeError("torch is required for self-distillation runtime patch.")
@@ -196,19 +278,48 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             include_student_attempt = bool(
                 _cfg_get(self_distillation_cfg, "include_student_attempt_for_teacher", True)
             )
-            max_reprompt_len = int(_cfg_get(self_distillation_cfg, "max_reprompt_len", 10240))
+            include_teacher_memory_blocks = _coerce_bool(
+                _cfg_get(self_distillation_cfg, "include_teacher_memory_blocks", True)
+            )
+            max_reprompt_len = int(_cfg_get(self_distillation_cfg, "max_reprompt_len", DEFAULT_MAX_REPROMPT_LEN))
             num_recent_raw_blocks = int(_cfg_get(self_distillation_cfg, "num_recent_raw_blocks", 3))
+            responses = batch.batch["responses"]
+            response_width = _resolve_response_width(responses) or 0
+            actor_cfg = _cfg_get(_cfg_get(_cfg_get(self, "config"), "actor_rollout_ref"), "actor")
+            ppo_max_token_len_per_gpu = int(_cfg_get(actor_cfg, "ppo_max_token_len_per_gpu", 0) or 0)
+            ulysses_sequence_parallel_size = int(_cfg_get(actor_cfg, "ulysses_sequence_parallel_size", 1) or 1)
+            max_token_len = ppo_max_token_len_per_gpu * max(ulysses_sequence_parallel_size, 1)
+            if response_width > 0 and max_token_len > 0:
+                safe_max_reprompt_len = max_token_len - response_width
+                if safe_max_reprompt_len <= 0:
+                    raise ValueError(
+                        "Invalid SDPO token budget: response width exceeds or equals actor max token length "
+                        f"(response_width={response_width}, max_token_len={max_token_len})."
+                    )
+                if max_reprompt_len > safe_max_reprompt_len:
+                    LOGGER.warning(
+                        "Clipping self_distillation.max_reprompt_len from %s to %s to satisfy "
+                        "teacher sequence budget (response_width=%s, max_token_len=%s).",
+                        max_reprompt_len,
+                        safe_max_reprompt_len,
+                        response_width,
+                        max_token_len,
+                    )
+                    max_reprompt_len = safe_max_reprompt_len
             reprompt_batch = build_self_distillation_batch(
                 rows,
                 include_student_attempt_for_teacher=include_student_attempt,
+                include_teacher_memory_blocks=include_teacher_memory_blocks,
                 max_reprompt_len=max_reprompt_len,
                 num_recent_raw_blocks=num_recent_raw_blocks,
+                turn_supervision_mode=turn_supervision_mode,
+                verifier_feedback_mode=verifier_feedback_mode,
+                legacy_distillation_gating_policy=legacy_distillation_gating_policy,
             )
             teacher_prompts = [str(item) for item in reprompt_batch.get("teacher_prompts", [])]
             if not teacher_prompts:
                 return None
 
-            responses = batch.batch["responses"]
             response_mask = batch.batch["response_mask"]
             response_device = getattr(responses, "device", None)
             teacher_prompt_tensors = _tokenize_teacher_prompts(
@@ -224,9 +335,16 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
                 device=response_device,
                 dtype=teacher_prompt_tensors["attention_mask"].dtype,
             )
+            teacher_response_attention_mask = _build_teacher_response_attention_mask(
+                responses=responses,
+                response_mask=response_mask_tensor,
+                tokenizer=getattr(self, "tokenizer", None),
+                device=response_device,
+                dtype=teacher_prompt_tensors["attention_mask"].dtype,
+            )
             teacher_input_ids = torch.cat([teacher_prompt_tensors["input_ids"], responses], dim=1)
             teacher_attention_mask = torch.cat(
-                [teacher_prompt_tensors["attention_mask"], response_mask_tensor],
+                [teacher_prompt_tensors["attention_mask"], teacher_response_attention_mask],
                 dim=1,
             )
             teacher_position_ids = compute_position_id_with_mask(teacher_attention_mask)
@@ -267,6 +385,27 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
             active_count = int(sum(self_distillation_mask_values))
             batch_size = max(len(rows), 1)
             turn_pair_count = int(sum(turn_pair_count_per_sample))
+            supervised_token_ratio = float(response_mask_tensor.float().mean().item())
+            teacher_attention_valid_token_ratio = float(
+                teacher_response_attention_mask.float().mean().item()
+            )
+            invalid_supervised_overlap_count = int(
+                ((response_mask_tensor > 0) & (teacher_response_attention_mask == 0))
+                .sum()
+                .item()
+            )
+            response_width = _resolve_response_width(responses) or 0
+            if (
+                response_width > 0
+                and turn_teacher_attention_mask is not None
+                and turn_response_mask is not None
+            ):
+                turn_teacher_response_attention_mask = turn_teacher_attention_mask[..., -response_width:]
+                invalid_supervised_overlap_count += int(
+                    ((turn_response_mask > 0) & (turn_teacher_response_attention_mask == 0))
+                    .sum()
+                    .item()
+                )
 
             metrics = {
                 "self_distillation/success_sample_fraction": resolved_count / batch_size,
@@ -275,7 +414,54 @@ def apply_small_swe_sdpo_runtime_patch(ray_trainer_module: Any | None = None) ->
                 "self_distillation/prompt_truncated_fraction": sum(prompt_truncated) / batch_size,
                 "self_distillation/empty_target_batch": 1.0 if active_count == 0 else 0.0,
                 "self_distillation/turn_pair_count_per_sample": turn_pair_count / batch_size,
+                "self_distillation/teacher_attention_valid_token_ratio": (
+                    teacher_attention_valid_token_ratio
+                ),
+                "self_distillation/supervised_token_ratio": supervised_token_ratio,
+                "self_distillation/invalid_supervised_overlap_count": float(
+                    invalid_supervised_overlap_count
+                ),
+                "self_distillation/turn_supervision_mode_next_turn": (
+                    1.0 if turn_supervision_mode == _TURN_SUPERVISION_NEXT else 0.0
+                ),
+                "self_distillation/turn_supervision_mode_current_turn": (
+                    1.0 if turn_supervision_mode == _TURN_SUPERVISION_CURRENT else 0.0
+                ),
+                "self_distillation/verifier_feedback_mode_none": (
+                    1.0 if verifier_feedback_mode == _VERIFIER_FEEDBACK_NONE else 0.0
+                ),
+                "self_distillation/verifier_feedback_mode_final_turn_only": (
+                    1.0 if verifier_feedback_mode == _VERIFIER_FEEDBACK_FINAL_TURN_ONLY else 0.0
+                ),
+                "self_distillation/verifier_feedback_mode_all_turns": (
+                    1.0 if verifier_feedback_mode == _VERIFIER_FEEDBACK_ALL_TURNS else 0.0
+                ),
+                "self_distillation/legacy_distillation_gating_policy_resolved_only": (
+                    1.0 if legacy_distillation_gating_policy == _LEGACY_GATING_RESOLVED_ONLY else 0.0
+                ),
+                "self_distillation/legacy_distillation_gating_policy_feedback_present": (
+                    1.0 if legacy_distillation_gating_policy == _LEGACY_GATING_FEEDBACK_PRESENT else 0.0
+                ),
+                "self_distillation/legacy_distillation_gating_policy_always": (
+                    1.0 if legacy_distillation_gating_policy == _LEGACY_GATING_ALWAYS else 0.0
+                ),
             }
+            LOGGER.debug(
+                (
+                    "Built self-distillation batch with turn_supervision_mode=%s, "
+                    "verifier_feedback_mode=%s, legacy_gating=%s "
+                    "(active=%s/%s, turn_pairs=%s, supervised_ratio=%.4f, attention_ratio=%.4f, invalid_overlap=%s)."
+                ),
+                turn_supervision_mode,
+                verifier_feedback_mode,
+                legacy_distillation_gating_policy,
+                active_count,
+                len(rows),
+                turn_pair_count,
+                supervised_token_ratio,
+                teacher_attention_valid_token_ratio,
+                invalid_supervised_overlap_count,
+            )
             tensors = {
                 "teacher_input_ids": teacher_input_ids,
                 "teacher_attention_mask": teacher_attention_mask,
@@ -801,6 +987,26 @@ def _resolve_response_width(responses: Any) -> int | None:
     return None
 
 
+def _build_teacher_response_attention_mask(
+    *,
+    responses: Any,
+    response_mask: Any,
+    tokenizer: Any,
+    device: Any,
+    dtype: Any,
+) -> Any:
+    if torch is None:
+        raise RuntimeError("torch is required for teacher attention-mask construction.")
+    response_mask_tensor = _ensure_tensor_like(response_mask, dtype=dtype, device=device)
+    responses_tensor = _ensure_tensor_like(responses, dtype=torch.long, device=device)
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_token_id is None:
+        return response_mask_tensor
+
+    non_pad_mask = (responses_tensor != int(pad_token_id)).to(dtype=response_mask_tensor.dtype)
+    return ((response_mask_tensor > 0) | (non_pad_mask > 0)).to(dtype=response_mask_tensor.dtype)
+
+
 def _tokenize_teacher_prompts(
     *,
     tokenizer: Any,
@@ -894,7 +1100,6 @@ def _build_turn_level_teacher_tensors(
                 prompts_for_row = [
                     str(item)
                     for item in (turn_teacher_prompts[row_index] or [])
-                    if str(item).strip()
                 ]
         normalized_prompts.append(prompts_for_row)
         max_turn_pairs = max(max_turn_pairs, len(prompts_for_row))
@@ -958,14 +1163,28 @@ def _build_turn_level_teacher_tensors(
 
     responses_tensor = _ensure_tensor_like(responses, dtype=torch.long, device=device)
     response_mask_tensor = _ensure_tensor_like(response_mask, dtype=torch.long, device=device)
+    response_attention_mask_tensor = _build_teacher_response_attention_mask(
+        responses=responses_tensor,
+        response_mask=response_mask_tensor,
+        tokenizer=tokenizer,
+        device=device,
+        dtype=torch.long,
+    )
 
     responses_expanded = responses_tensor.unsqueeze(1).expand(batch_size, max_turn_pairs, response_width)
     responses_flat = responses_expanded.reshape(batch_size * max_turn_pairs, response_width)
-    response_mask_expanded = response_mask_tensor.unsqueeze(1).expand(batch_size, max_turn_pairs, response_width)
-    response_mask_flat = response_mask_expanded.reshape(batch_size * max_turn_pairs, response_width)
+    response_attention_mask_expanded = response_attention_mask_tensor.unsqueeze(1).expand(
+        batch_size,
+        max_turn_pairs,
+        response_width,
+    )
+    response_attention_mask_flat = response_attention_mask_expanded.reshape(
+        batch_size * max_turn_pairs,
+        response_width,
+    )
 
     teacher_input_ids_flat = torch.cat([prompt_input_ids, responses_flat], dim=1)
-    teacher_attention_mask_flat = torch.cat([prompt_attention_mask, response_mask_flat], dim=1)
+    teacher_attention_mask_flat = torch.cat([prompt_attention_mask, response_attention_mask_flat], dim=1)
     teacher_position_ids_flat = compute_position_id_with_mask(teacher_attention_mask_flat)
 
     full_width = prompt_width + response_width
@@ -983,6 +1202,17 @@ def _build_turn_level_teacher_tensors(
         dtype=torch.float32,
         device=device,
     )
+    # Enforce token-level subset semantics against the actual runtime response mask.
+    response_mask_expanded = response_mask_tensor.unsqueeze(1).to(dtype=turn_response_mask_tensor.dtype)
+    turn_response_mask_tensor = turn_response_mask_tensor * (response_mask_expanded > 0).to(
+        dtype=turn_response_mask_tensor.dtype
+    )
+    active_turn_pairs = (turn_response_mask_tensor.sum(dim=-1) > 0).to(dtype=turn_self_distillation_mask_tensor.dtype)
+    turn_self_distillation_mask_tensor = turn_self_distillation_mask_tensor * active_turn_pairs
+    turn_pair_count_per_sample = [
+        int(value)
+        for value in active_turn_pairs.sum(dim=-1).detach().cpu().tolist()
+    ]
     return (
         teacher_input_ids,
         teacher_attention_mask,
@@ -1338,8 +1568,8 @@ def _run_turn_level_sequential_update_policy(
                 max_token_len = actor.config.ppo_max_token_len_per_gpu * actor.ulysses_sequence_parallel_size
                 micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
             else:
-                actor.gradient_accumulation = actor.config.ppo_mini_batch_size // actor.config.ppo_micro_batch_size_per_gpu
                 micro_batches = mini_batch.split(actor.config.ppo_micro_batch_size_per_gpu)
+            actor.gradient_accumulation = max(len(micro_batches), 1)
 
             actor.actor_optimizer.zero_grad()
 
@@ -1358,20 +1588,24 @@ def _run_turn_level_sequential_update_policy(
                 if actor.config.use_dynamic_bsz:
                     loss_scale_factor = response_mask.shape[0] / actor.config.ppo_mini_batch_size
                 else:
-                    loss_scale_factor = 1 / actor.gradient_accumulation
+                    loss_scale_factor = 1.0 / float(actor.gradient_accumulation)
 
                 teacher_regularization = "ema"
                 return_all_logps = False
                 distill_topk = None
                 if self_distillation_enabled:
-                    teacher_regularization = self_distillation_cfg.get("teacher_regularization", "ema")
+                    teacher_regularization = str(
+                        _cfg_get(self_distillation_cfg, "teacher_regularization", "ema")
+                    ).strip().lower() or "ema"
                     if teacher_regularization == "trust-region" and actor.use_fused_kernels:
                         raise ValueError("trust-region teacher requires disabling fused kernels to access logits.")
+                    full_logit_distillation = bool(_cfg_get(self_distillation_cfg, "full_logit_distillation", False))
+                    distillation_topk = _cfg_get(self_distillation_cfg, "distillation_topk", None)
                     return_all_logps = (
-                        self_distillation_cfg.full_logit_distillation and not self_distillation_cfg.distillation_topk
+                        full_logit_distillation and not distillation_topk
                     )
                     distill_topk = (
-                        self_distillation_cfg.distillation_topk if self_distillation_cfg.full_logit_distillation else None
+                        distillation_topk if full_logit_distillation else None
                     )
                 outputs = actor._forward_micro_batch(
                     model_inputs,

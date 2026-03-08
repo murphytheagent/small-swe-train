@@ -116,7 +116,10 @@ class TurnParser:
                 raise TurnParseError(
                     f"Each {d.tool_call_start} payload must decode to a JSON object."
                 )
-            tool_calls.append(make_tool_call(payload_obj))
+            try:
+                tool_calls.append(make_tool_call(payload_obj))
+            except ValueError as exc:
+                raise TurnParseError(str(exc)) from exc
             if len(tool_calls) > max_tool_calls:
                 raise TurnParseError(
                     f"Too many tool calls: got {len(tool_calls)}, max is {max_tool_calls}."

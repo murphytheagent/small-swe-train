@@ -143,6 +143,10 @@ def test_verification_extra_fields_schema_stable_without_metadata() -> None:
     assert fields["verification_feedback"] == ""
     assert fields["fail_to_pass_results"] == {}
     assert fields["pass_to_pass_results"] == {}
+    assert fields["fail_to_pass_failures"] == {}
+    assert fields["pass_to_pass_failures"] == {}
+    assert fields["fail_to_pass_stderr_tail"] == ""
+    assert fields["pass_to_pass_stderr_tail"] == ""
     assert fields["fail_to_pass_all_passed"] is None
     assert fields["pass_to_pass_all_passed"] is None
     assert fields["verification_missing"] is None
@@ -161,6 +165,15 @@ def test_apply_verification_metadata_preserves_schema_and_overrides_values() -> 
         {
             "fail_to_pass_results": {"tests/test_bug.py::test_bugfix": True},
             "pass_to_pass_results": {"tests/test_ok.py::test_regression": True},
+            "fail_to_pass_failures": {},
+            "pass_to_pass_failures": {
+                "tests/test_ok.py::test_regression": {
+                    "returncode": 1,
+                    "command": ["python3", "-m", "pytest", "-q", "tests/test_ok.py::test_regression"],
+                }
+            },
+            "fail_to_pass_stderr_tail": "",
+            "pass_to_pass_stderr_tail": "assert 0",
             "verification_feedback": "all tests passed",
             "fail_to_pass_all_passed": True,
             "pass_to_pass_all_passed": True,
@@ -176,6 +189,7 @@ def test_apply_verification_metadata_preserves_schema_and_overrides_values() -> 
     assert set(fields.keys()) == baseline_keys
     assert fields["fail_to_pass_results"] == {"tests/test_bug.py::test_bugfix": True}
     assert fields["pass_to_pass_results"] == {"tests/test_ok.py::test_regression": True}
+    assert fields["pass_to_pass_failures"]["tests/test_ok.py::test_regression"]["returncode"] == 1
     assert fields["verification_feedback"] == "all tests passed"
     assert fields["verification_missing"] is False
     assert fields["resolved"] is True
@@ -208,7 +222,7 @@ def test_build_agent_loop_messages_adds_system_prompt_and_trailing_user_nudge() 
         {
             "raw_prompt": [
                 {"role": "user", "content": "Investigate the failing test."},
-                {"role": "assistant", "content": "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"test\"}}</tool_call>"},
+                {"role": "assistant", "content": "<tool_call>{\"tool\":\"text_search\",\"args\":{\"query\":\"test\"}}</tool_call>"},
             ]
         }
     )

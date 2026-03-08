@@ -15,14 +15,6 @@ _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 _ALLOWED_TOOLS_SET = set(ALLOWED_TOOLS)
 
 
-def _as_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    return str(value)
-
-
 def _parse_response_text(response_text: str, *, max_tool_calls: int) -> ActionEnvelope:
     stripped = response_text.strip()
     if stripped.startswith("<|im_start|>assistant"):
@@ -32,6 +24,16 @@ def _parse_response_text(response_text: str, *, max_tool_calls: int) -> ActionEn
 
 def _thinking_delimiters_balanced(response_text: str) -> bool:
     return response_text.count("<think>") == response_text.count("</think>")
+
+
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _coerce_bool_flag(value: Any, *, fallback: bool) -> bool:
@@ -383,8 +385,11 @@ def reward_fn(
         reward_verification_missing.append(verification_missing)
 
         reward_value = 0.0
+        if has_expected_tests:
+            # Missing verifier signal on tasks with expected tests is treated as
+            # an unresolved verification failure, not a neutral baseline.
+            reward_value = -1.0 if verification_missing else 1.0
         if has_expected_tests and not verification_missing:
-            reward_value = 1.0
             if not fail_verified:
                 reward_value -= 1.0
             if not pass_verified:

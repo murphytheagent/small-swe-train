@@ -17,7 +17,9 @@ from typing import Any, Mapping, Sequence
 import yaml
 
 from runtime_paths import (
+    DEFAULT_ON_POLICY_BAD_TASK_CACHE_RELATIVE_DIR,
     DEFAULT_SDPO_TASK_CACHE_RELATIVE_DIR,
+    resolve_on_policy_bad_task_cache_dir,
     resolve_sdpo_task_cache_dir,
 )
 from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME
@@ -61,6 +63,8 @@ class OnPolicyRuntimeConfig:
     container_start_timeout_sec: int
     attempt_timeout_sec: int
     max_tool_calls_per_turn: int
+    verify_submissions: bool = False
+    verifier_timeout_sec: int = 600
     max_in_flight_tasks: int = 4
 
 
@@ -422,6 +426,14 @@ def _parse_on_policy_runtime_config(payload: Mapping[str, Any]) -> OnPolicyRunti
         payload.get("max_tool_calls_per_turn"),
         label="on_policy.max_tool_calls_per_turn",
     )
+    verify_submissions = _coerce_bool(
+        payload.get("verify_submissions", False),
+        label="on_policy.verify_submissions",
+    )
+    verifier_timeout_sec = _coerce_positive_int(
+        payload.get("verifier_timeout_sec", 600),
+        label="on_policy.verifier_timeout_sec",
+    )
     max_in_flight_tasks = _coerce_positive_int(
         payload.get("max_in_flight_tasks", task_batch_size),
         label="on_policy.max_in_flight_tasks",
@@ -438,6 +450,8 @@ def _parse_on_policy_runtime_config(payload: Mapping[str, Any]) -> OnPolicyRunti
         container_start_timeout_sec=container_start_timeout_sec,
         attempt_timeout_sec=attempt_timeout_sec,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
+        verify_submissions=verify_submissions,
+        verifier_timeout_sec=verifier_timeout_sec,
         max_in_flight_tasks=max_in_flight_tasks,
     )
 

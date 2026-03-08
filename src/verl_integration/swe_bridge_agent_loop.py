@@ -786,6 +786,9 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         final_turn_has_submit = False
         final_submit_format_valid = False
         verification_metadata: dict[str, Any] = {}
+        final_response_text = ""
+        executor: DockerToolExecutor | None = None
+        attempt_budget_started_at: float | None = None
 
         container_slot_gate = _get_container_slot_gate(self.env_pool_size)
         pool = BatchContainerPool(
@@ -1003,13 +1006,17 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 turn_validation_errors = _collect_validation_errors(bridge_result.steps)
                 if turn_validation_errors:
                     validation_errors.extend(turn_validation_errors)
-                if bridge_result.is_terminal:
-                    final_turn_has_submit = True
-                    final_submit_format_valid = not bool(turn_validation_errors)
+                turn_has_submit = any(
+                    getattr(call, "tool", "") == "submit" for call in bridge_result.envelope.tool_calls
+                )
+                final_turn_has_submit = bool(turn_has_submit)
+                final_submit_format_valid = bool(turn_has_submit and not turn_validation_errors)
+                if turn_has_submit:
                     final_response_text = _extract_final_submit_text(
                         bridge_result.envelope.tool_calls,
                         bridge_result.steps,
                     )
+                if bridge_result.is_terminal:
                     _set_stage("verify_submission")
                     verification_metadata = await _await_with_attempt_timeout(
                         asyncio.to_thread(
@@ -1063,6 +1070,51 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 if reached_limit:
                     loop_exit_reason = "response_length_budget_exhausted"
                     break
+
+            if (
+                not verification_metadata
+                and executor is not None
+                and attempt_budget_started_at is not None
+            ):
+                remaining_sec = _remaining_attempt_timeout_sec(
+                    started_at=attempt_budget_started_at,
+                    attempt_timeout_sec=self.attempt_timeout_sec,
+                )
+                if remaining_sec > 0:
+                    _set_stage("verify_submission")
+                    try:
+                        verification_metadata = await _await_with_attempt_timeout(
+                            asyncio.to_thread(
+                                _verify_terminal_submission,
+                                executor,
+                                task_sample,
+                                self.verifier_timeout_sec,
+                                final_submit_format_valid,
+                                final_response_text,
+                            ),
+                            task_id=task_context.task_id,
+                            stage=current_stage,
+                            started_at=attempt_budget_started_at,
+                            attempt_timeout_sec=self.attempt_timeout_sec,
+                        )
+                    except TimeoutError as exc:
+                        verification_metadata = {
+                            "submission_final_response": final_response_text,
+                            "fail_to_pass": _coerce_test_targets(task_sample.fail_to_pass),
+                            "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
+                            "fail_to_pass_results": {},
+                            "pass_to_pass_results": {},
+                            "fail_to_pass_verified": False,
+                            "pass_to_pass_verified": False,
+                            "verification_missing": False,
+                            "verification_error": f"verifier timeout: {exc}",
+                            "verification_feedback": "",
+                            "resolved": False,
+                        }
+                    if verification_metadata and trajectory_steps:
+                        metadata = trajectory_steps[-1].setdefault("metadata", {})
+                        if isinstance(metadata, dict):
+                            metadata.update(verification_metadata)
         except TimeoutError as exc:
             timeout_error = str(exc)
             loop_exit_reason = "attempt_timeout"
@@ -1222,6 +1274,10 @@ def _initial_verification_extra_fields(
         "verification_feedback": "",
         "fail_to_pass_results": {},
         "pass_to_pass_results": {},
+        "fail_to_pass_failures": {},
+        "pass_to_pass_failures": {},
+        "fail_to_pass_stderr_tail": "",
+        "pass_to_pass_stderr_tail": "",
         "fail_to_pass_all_passed": None,
         "pass_to_pass_all_passed": None,
         "fail_to_pass_verified": None,
@@ -1258,6 +1314,22 @@ def _apply_verification_metadata(
             "pass_to_pass_results": verification_metadata.get(
                 "pass_to_pass_results",
                 extra_fields.get("pass_to_pass_results", {}),
+            ),
+            "fail_to_pass_failures": verification_metadata.get(
+                "fail_to_pass_failures",
+                extra_fields.get("fail_to_pass_failures", {}),
+            ),
+            "pass_to_pass_failures": verification_metadata.get(
+                "pass_to_pass_failures",
+                extra_fields.get("pass_to_pass_failures", {}),
+            ),
+            "fail_to_pass_stderr_tail": verification_metadata.get(
+                "fail_to_pass_stderr_tail",
+                extra_fields.get("fail_to_pass_stderr_tail", ""),
+            ),
+            "pass_to_pass_stderr_tail": verification_metadata.get(
+                "pass_to_pass_stderr_tail",
+                extra_fields.get("pass_to_pass_stderr_tail", ""),
             ),
             "fail_to_pass_all_passed": verification_metadata.get(
                 "fail_to_pass_all_passed",
@@ -1302,20 +1374,7 @@ def _verify_terminal_submission(
     final_submit_format_valid: bool,
     final_response: str,
 ) -> dict[str, Any]:
-    if not final_submit_format_valid:
-        return {
-            "submission_final_response": final_response,
-            "fail_to_pass": _coerce_test_targets(task_sample.fail_to_pass),
-            "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
-            "fail_to_pass_results": {},
-            "pass_to_pass_results": {},
-            "fail_to_pass_verified": False,
-            "pass_to_pass_verified": False,
-            "verification_missing": False,
-            "verification_error": "terminal submit failed tool-argument validation",
-            "verification_feedback": "Verifier skipped: terminal submit format was invalid.",
-            "resolved": False,
-        }
+    del final_submit_format_valid
     try:
         return run_submission_verifier(
             executor=executor,
@@ -1331,6 +1390,10 @@ def _verify_terminal_submission(
             "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
             "fail_to_pass_results": {},
             "pass_to_pass_results": {},
+            "fail_to_pass_failures": {},
+            "pass_to_pass_failures": {},
+            "fail_to_pass_stderr_tail": "",
+            "pass_to_pass_stderr_tail": "",
             "fail_to_pass_verified": False,
             "pass_to_pass_verified": False,
             "verification_missing": False,

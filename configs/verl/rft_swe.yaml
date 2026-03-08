@@ -54,7 +54,7 @@ actor_rollout_ref:
 # this section is only here for compatibility with verl SFT trainer config
   rollout:
     name: vllm
-    gpu_memory_utilization: 0.9
+    gpu_memory_utilization: 0.8
     enforce_eager: true
     free_cache_engine: true
     max_num_seqs: 64
@@ -62,7 +62,7 @@ actor_rollout_ref:
 
 # RFT token budget per packed training row.
 # This is consumed by data.max_length and by run_rft.sh overrides.
-max_model_len: 8192
+max_model_len: 16384
 
 data:
   micro_batch_size_per_gpu: 2

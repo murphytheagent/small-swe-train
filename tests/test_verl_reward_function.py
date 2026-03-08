@@ -33,7 +33,7 @@ def test_reward_fn_requires_terminal_submit_and_verifier_success() -> None:
     assert info["terminal_submit_content"] == ["done"]
 
 
-def test_reward_fn_returns_zero_when_verifier_signals_are_missing() -> None:
+def test_reward_fn_returns_negative_one_when_verifier_signals_are_missing() -> None:
     data = [
         {
             "response_text": '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
@@ -44,17 +44,34 @@ def test_reward_fn_returns_zero_when_verifier_signals_are_missing() -> None:
 
     rewards, info = reward_fn(data)
 
-    assert rewards == [0.0]
+    assert rewards == [-1.0]
     assert info["resolved_source"] == ["missing_verifier"]
     assert info["reward_verification_missing"] == [True]
     assert info["fail_to_pass_verified"] == [False]
     assert info["pass_to_pass_verified"] == [False]
 
 
+def test_reward_fn_applies_terminal_penalty_when_verifier_signals_are_missing() -> None:
+    data = [
+        {
+            "response_text": '<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
+            "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+        }
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [-1.0 - config.TERMINAL_VALIDITY_PENALTY]
+    assert info["resolved_source"] == ["missing_verifier"]
+    assert info["reward_verification_missing"] == [True]
+    assert info["terminal_submission"] == [False]
+
+
 def test_reward_fn_applies_terminal_validity_penalty_when_submit_is_missing() -> None:
     data = [
         {
-            "response_text": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
+            "response_text": '<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
             "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
             "pass_to_pass": ["tests/test_ok.py::test_regression"],
             "tool_output": {
@@ -152,7 +169,7 @@ def test_reward_fn_rejects_terminal_metadata_when_submit_is_not_singleton() -> N
         {
             "response_text": (
                 "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
-                "<tool_call>{\"tool\":\"search\",\"args\":{\"query\":\"needle\"}}</tool_call>"
+                "<tool_call>{\"tool\":\"text_search\",\"args\":{\"query\":\"needle\"}}</tool_call>"
             ),
             "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
             "pass_to_pass": ["tests/test_ok.py::test_regression"],
@@ -172,3 +189,28 @@ def test_reward_fn_rejects_terminal_metadata_when_submit_is_not_singleton() -> N
     expected_reward = 1.0 - config.TERMINAL_VALIDITY_PENALTY
     assert rewards == [expected_reward]
     assert info["terminal_submission"] == [False]
+
+
+def test_reward_fn_coerces_explicit_submission_final_response_to_text() -> None:
+    data = [
+        {
+            "response_text": '<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
+            "submission_final_response": {"summary": "done"},
+            "final_turn_has_submit": True,
+            "final_submit_format_valid": True,
+            "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+            "tool_output": {
+                "metadata": {
+                    "fail_to_pass_results": {"tests/test_bug.py::test_bugfix": True},
+                    "pass_to_pass_results": {"tests/test_ok.py::test_regression": True},
+                }
+            },
+        }
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [1.0]
+    assert info["terminal_submission"] == [True]
+    assert info["terminal_submit_content"] == ["{'summary': 'done'}"]

@@ -6,6 +6,7 @@ import pytest
 
 import config
 from verl_integration import reward_adapter
+from prompts.runtime_messages import build_onpolicy_system_prompt
 
 
 @dataclass
@@ -65,6 +66,15 @@ def test_dataproto_to_rows_extracts_metadata_and_tool_outputs() -> None:
                 {"ground_truth": {"resolved": False}},
             ],
             "tool_response_blocks": [["<tool_response>{}</tool_response>"], []],
+            "fail_to_pass_failures": [
+                {
+                    "tests/test_bug.py::test_bugfix": {
+                        "returncode": 1,
+                        "command": ["python3", "-m", "pytest", "-q", "tests/test_bug.py::test_bugfix"],
+                    }
+                },
+                {},
+            ],
         },
     )
 
@@ -79,6 +89,19 @@ def test_dataproto_to_rows_extracts_metadata_and_tool_outputs() -> None:
     assert rows[0]["resolved"] is True
     assert rows[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
     assert rows[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
+    assert rows[0]["fail_to_pass_failures"] == {
+        "tests/test_bug.py::test_bugfix": {
+            "returncode": 1,
+            "command": ["python3", "-m", "pytest", "-q", "tests/test_bug.py::test_bugfix"],
+        }
+    }
+    assert rows[0]["fail_to_pass_failures"]["tests/test_bug.py::test_bugfix"]["command"] == [
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_bug.py::test_bugfix",
+    ]
     assert rows[0]["_response_mask"] == [1, 1, 1]
     assert rows[1]["prompt"] == "Fix task two"
     assert rows[1]["tool_output"] == {}
@@ -117,8 +140,8 @@ def test_rows_to_reward_tensor_marks_last_valid_response_token_when_torch_availa
             },
         },
         {
-            "response_text": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
-            "assistant_response": '<tool_call>{"tool":"search","args":{"query":"needle"}}</tool_call>',
+            "response_text": '<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
+            "assistant_response": '<tool_call>{"tool":"text_search","args":{"query":"needle"}}</tool_call>',
             "_response_mask": [1, 1, 0, 0],
             "resolved": False,
         },
@@ -159,6 +182,28 @@ def test_dataproto_to_rows_decodes_generated_tokens_only_from_response_mask() ->
     assert rows[0]["_response_mask"] == [1, 0, 1, 0]
 
 
+def test_dataproto_to_rows_injects_system_prompt_into_raw_prompt_messages() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 12]],
+            "response_mask": [[1, 1]],
+        },
+        non_tensor_batch={
+            "raw_prompt": [[{"role": "user", "content": "Fix task"}]],
+            "task_id": ["task-1"],
+            "image_name": ["img-1"],
+        },
+    )
+
+    rows = reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+    messages = rows[0]["_raw_prompt_messages"]
+    assert messages[0]["role"] == "system"
+    assert build_onpolicy_system_prompt().splitlines()[0] in messages[0]["content"]
+    assert messages[1]["role"] == "user"
+    assert "Fix task" in messages[1]["content"]
+
+
 def test_dataproto_to_rows_uses_final_assistant_turn_tokens_when_multiturn() -> None:
     batch = _FakeBatch(
         batch={
@@ -177,3 +222,84 @@ def test_dataproto_to_rows_uses_final_assistant_turn_tokens_when_multiturn() -> 
 
     assert len(rows) == 1
     assert rows[0]["response_text"] == "21 22 23"
+
+
+def test_dataproto_to_rows_raises_when_swe_mask_is_missing() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 12]],
+        },
+        non_tensor_batch={
+            "raw_prompt": [[{"role": "user", "content": "Fix task"}]],
+            "task_id": ["task-1"],
+            "image_name": ["img-1"],
+            "trajectory_steps": [[{"tool": "bash", "stdout": "", "stderr": "", "exit_code": 0}]],
+            "trajectory_assistant_turns": [["turn-0"]],
+        },
+    )
+
+    with pytest.raises(ValueError, match="_response_mask"):
+        reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+
+def test_dataproto_to_rows_requires_mask_for_empty_swe_payloads() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 12]],
+        },
+        non_tensor_batch={
+            "raw_prompt": [[{"role": "user", "content": "Fix task"}]],
+            "task_id": ["task-1"],
+            "image_name": ["img-1"],
+            # Empty rows still use SWE schema and must not silently fall back.
+            "trajectory_steps": [[]],
+            "trajectory_assistant_turns": [[]],
+        },
+    )
+
+    with pytest.raises(ValueError, match="_response_mask"):
+        reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+
+def test_dataproto_to_rows_keeps_non_swe_mask_fallback() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[31, 32, 33]],
+        },
+        non_tensor_batch={
+            "raw_prompt": [[{"role": "user", "content": "Fix task"}]],
+            "task_id": ["task-1"],
+            "image_name": ["img-1"],
+        },
+    )
+
+    rows = reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+    assert rows[0]["_response_mask"] == [1, 1, 1]
+
+
+def test_dataproto_to_rows_requires_explicit_mask_only_for_swe_rows_in_mixed_batch() -> None:
+    batch = _FakeBatch(
+        batch={
+            "responses": [[11, 12], [21, 22]],
+            "response_mask": [[1, 1], []],
+        },
+        non_tensor_batch={
+            "raw_prompt": [
+                [{"role": "user", "content": "Fix swe task"}],
+                [{"role": "user", "content": "General task"}],
+            ],
+            "task_id": ["task-1", "task-2"],
+            "image_name": ["img-1", "img-2"],
+            "trajectory_steps": [
+                [{"tool": "bash", "stdout": "", "stderr": "", "exit_code": 0}],
+                None,
+            ],
+            "trajectory_assistant_turns": [["turn-0"], None],
+        },
+    )
+
+    rows = reward_adapter.dataproto_to_rows(batch=batch, tokenizer=_FakeTokenizer())
+
+    assert rows[0]["_response_mask"] == [1, 1]
+    # Second row is non-SWE despite mixed batch keys, so fallback mask remains available.
+    assert rows[1]["_response_mask"] == [1, 1]

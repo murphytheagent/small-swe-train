@@ -16,6 +16,11 @@ from importlib.machinery import ModuleSpec
 from pathlib import Path
 from typing import Any
 
+try:  # pragma: no cover - exercised in train runtime
+    import torch
+except ModuleNotFoundError:  # pragma: no cover - unit-test environments without train deps
+    torch = None  # type: ignore[assignment]
+
 _MISTRAL_MODEL_TYPES = {
     "mistral",
     "mistral3",
@@ -24,6 +29,9 @@ _MISTRAL_MODEL_TYPES = {
     "pixtral",
 }
 _TORCH_DTYPE_DEPRECATION_MESSAGE = "`torch_dtype` is deprecated! Use `dtype` instead!"
+_TURN_SUPERVISION_NEXT = "next_turn"
+_TURN_SUPERVISION_CURRENT = "current_turn"
+_TURN_SUPERVISION_MODES = {_TURN_SUPERVISION_NEXT, _TURN_SUPERVISION_CURRENT}
 _WANDB_EXTRA_KEYS_ENV = "SMALL_SWE_WANDB_EXTRA_KEYS"
 _WANDB_EXTRA_PREFIXES_ENV = "SMALL_SWE_WANDB_EXTRA_PREFIXES"
 _WANDB_ESSENTIAL_FILTER_ENV = "SMALL_SWE_WANDB_FILTER_ESSENTIALS"
@@ -95,6 +103,24 @@ _WANDB_ESSENTIAL_EXACT_KEYS = {
 _WANDB_ESSENTIAL_PREFIXES = (
     "val-aux/num_turns/",
 )
+_VERIFIER_FEEDBACK_NONE = "none"
+_VERIFIER_FEEDBACK_FINAL_TURN_ONLY = "final_turn_only"
+_VERIFIER_FEEDBACK_ALL_TURNS = "all_turns"
+_VERIFIER_FEEDBACK_MODES = {
+    _VERIFIER_FEEDBACK_NONE,
+    _VERIFIER_FEEDBACK_FINAL_TURN_ONLY,
+    _VERIFIER_FEEDBACK_ALL_TURNS,
+}
+_LEGACY_GATING_RESOLVED_ONLY = "resolved_only"
+_LEGACY_GATING_FEEDBACK_PRESENT = "feedback_present"
+_LEGACY_GATING_ALWAYS = "always"
+_LEGACY_GATING_POLICIES = {
+    _LEGACY_GATING_RESOLVED_ONLY,
+    _LEGACY_GATING_FEEDBACK_PRESENT,
+    _LEGACY_GATING_ALWAYS,
+}
+_TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
+_FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 
 
 class _TorchDtypeDeprecationFilter(logging.Filter):
@@ -110,8 +136,61 @@ def _coerce_bool_env(name: str, *, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
         return default
-    normalized = value.strip().lower()
-    return normalized in {"1", "true", "t", "yes", "y", "on"}
+    return _coerce_bool_value(value, default=default)
+
+
+def _coerce_bool_value(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, float):
+        return value != 0.0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+    return default
+
+
+def _normalize_turn_supervision_mode(value: Any) -> str:
+    if value is None:
+        return _TURN_SUPERVISION_CURRENT
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _TURN_SUPERVISION_CURRENT
+    if normalized not in _TURN_SUPERVISION_MODES:
+        supported = ", ".join(sorted(_TURN_SUPERVISION_MODES))
+        raise ValueError(f"turn_supervision_mode must be one of: {supported}")
+    return normalized
+
+
+def _normalize_verifier_feedback_mode(value: Any) -> str:
+    if value is None:
+        return _VERIFIER_FEEDBACK_NONE
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _VERIFIER_FEEDBACK_NONE
+    if normalized not in _VERIFIER_FEEDBACK_MODES:
+        supported = ", ".join(sorted(_VERIFIER_FEEDBACK_MODES))
+        raise ValueError(f"verifier_feedback_mode must be one of: {supported}")
+    return normalized
+
+
+def _normalize_legacy_gating_policy(value: Any) -> str:
+    if value is None:
+        return _LEGACY_GATING_RESOLVED_ONLY
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return _LEGACY_GATING_RESOLVED_ONLY
+    if normalized not in _LEGACY_GATING_POLICIES:
+        supported = ", ".join(sorted(_LEGACY_GATING_POLICIES))
+        raise ValueError(f"legacy_distillation_gating_policy must be one of: {supported}")
+    return normalized
 
 
 def _install_flash_attn_find_spec_guard() -> None:
@@ -183,31 +262,97 @@ def _install_self_distillation_config_compat_patch() -> None:
     except Exception:
         return
 
-    # Newer verl versions may already expose this field natively.
+    # Newer verl versions may already expose small-swe SDPO fields natively.
     dataclass_fields = getattr(SelfDistillationConfig, "__dataclass_fields__", {})
-    if isinstance(dataclass_fields, dict) and "num_recent_raw_blocks" in dataclass_fields:
+    has_native_num_recent = isinstance(dataclass_fields, dict) and "num_recent_raw_blocks" in dataclass_fields
+    has_native_turn_supervision_mode = (
+        isinstance(dataclass_fields, dict) and "turn_supervision_mode" in dataclass_fields
+    )
+    has_native_verifier_feedback_mode = (
+        isinstance(dataclass_fields, dict) and "verifier_feedback_mode" in dataclass_fields
+    )
+    has_native_legacy_gating_policy = (
+        isinstance(dataclass_fields, dict)
+        and "legacy_distillation_gating_policy" in dataclass_fields
+    )
+    has_native_include_teacher_memory_blocks = (
+        isinstance(dataclass_fields, dict) and "include_teacher_memory_blocks" in dataclass_fields
+    )
+    if (
+        has_native_num_recent
+        and has_native_turn_supervision_mode
+        and has_native_verifier_feedback_mode
+        and has_native_legacy_gating_policy
+        and has_native_include_teacher_memory_blocks
+    ):
         return
 
-    if getattr(SelfDistillationConfig, "_small_swe_num_recent_raw_blocks_compat", False):
+    if getattr(SelfDistillationConfig, "_small_swe_self_distillation_compat", False):
         return
 
     original_init = SelfDistillationConfig.__init__
+    missing = object()
 
     def _small_swe_self_distillation_init(self, *args, **kwargs):
-        raw_num_recent_raw_blocks = kwargs.pop("num_recent_raw_blocks", None)
+        raw_num_recent_raw_blocks: Any = missing
+        if not has_native_num_recent:
+            raw_num_recent_raw_blocks = kwargs.pop("num_recent_raw_blocks", missing)
+
+        raw_turn_supervision_mode: Any = missing
+        if not has_native_turn_supervision_mode:
+            raw_turn_supervision_mode = kwargs.pop("turn_supervision_mode", missing)
+        raw_verifier_feedback_mode: Any = missing
+        if not has_native_verifier_feedback_mode:
+            raw_verifier_feedback_mode = kwargs.pop("verifier_feedback_mode", missing)
+        raw_legacy_gating_policy: Any = missing
+        if not has_native_legacy_gating_policy:
+            raw_legacy_gating_policy = kwargs.pop("legacy_distillation_gating_policy", missing)
+        raw_include_teacher_memory_blocks: Any = missing
+        if not has_native_include_teacher_memory_blocks:
+            raw_include_teacher_memory_blocks = kwargs.pop("include_teacher_memory_blocks", missing)
+
         original_init(self, *args, **kwargs)
-        value = 3 if raw_num_recent_raw_blocks is None else raw_num_recent_raw_blocks
-        try:
-            normalized = int(value)
-        except (TypeError, ValueError):
-            normalized = 3
-        normalized = max(normalized, 0)
-        # BaseConfig allows setting new fields once on frozen configs.
-        setattr(self, "num_recent_raw_blocks", normalized)
+
+        if not has_native_num_recent:
+            value = 3 if raw_num_recent_raw_blocks is missing else raw_num_recent_raw_blocks
+            try:
+                normalized = int(value)
+            except (TypeError, ValueError):
+                normalized = 3
+            normalized = max(normalized, 0)
+            # BaseConfig allows setting new fields once on frozen configs.
+            setattr(self, "num_recent_raw_blocks", normalized)
+
+        if not has_native_turn_supervision_mode:
+            mode_value = _TURN_SUPERVISION_CURRENT if raw_turn_supervision_mode is missing else raw_turn_supervision_mode
+            normalized_mode = _normalize_turn_supervision_mode(mode_value)
+            setattr(self, "turn_supervision_mode", normalized_mode)
+        if not has_native_verifier_feedback_mode:
+            verifier_mode_value = (
+                _VERIFIER_FEEDBACK_ALL_TURNS
+                if raw_verifier_feedback_mode is missing
+                else raw_verifier_feedback_mode
+            )
+            normalized_verifier_mode = _normalize_verifier_feedback_mode(verifier_mode_value)
+            setattr(self, "verifier_feedback_mode", normalized_verifier_mode)
+        if not has_native_legacy_gating_policy:
+            gating_policy_value = (
+                _LEGACY_GATING_RESOLVED_ONLY
+                if raw_legacy_gating_policy is missing
+                else raw_legacy_gating_policy
+            )
+            normalized_gating_policy = _normalize_legacy_gating_policy(gating_policy_value)
+            setattr(self, "legacy_distillation_gating_policy", normalized_gating_policy)
+        if not has_native_include_teacher_memory_blocks:
+            include_memory_value = (
+                True if raw_include_teacher_memory_blocks is missing else raw_include_teacher_memory_blocks
+            )
+            normalized_include_memory = _coerce_bool_value(include_memory_value, default=True)
+            setattr(self, "include_teacher_memory_blocks", normalized_include_memory)
 
     _small_swe_self_distillation_init.__name__ = "_small_swe_self_distillation_init"
     SelfDistillationConfig.__init__ = _small_swe_self_distillation_init
-    setattr(SelfDistillationConfig, "_small_swe_num_recent_raw_blocks_compat", True)
+    setattr(SelfDistillationConfig, "_small_swe_self_distillation_compat", True)
 
 
 def _install_sdpo_runtime_patch_import_guard() -> None:
@@ -340,6 +485,43 @@ def _suppress_fast_tokenizer_pad_warning(tokenizer: Any) -> None:
     deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
 
+def _install_tokenizer_pad_tensor_guard(tokenizer: Any) -> None:
+    if torch is None or tokenizer is None:
+        return
+    if getattr(tokenizer, "_small_swe_pad_tensor_guard_installed", False):
+        return
+
+    original_pad = getattr(tokenizer, "pad", None)
+    if not callable(original_pad):
+        return
+
+    def _small_swe_pad(*args, **kwargs):
+        pad_output = original_pad(*args, **kwargs)
+        if kwargs.get("return_tensors") != "pt":
+            return pad_output
+
+        for key in ("input_ids", "attention_mask"):
+            try:
+                value = pad_output.get(key) if hasattr(pad_output, "get") else pad_output[key]
+            except Exception:
+                continue
+            if not isinstance(value, (list, tuple)):
+                continue
+            try:
+                tensor_value = torch.as_tensor(value)
+            except Exception:
+                continue
+            try:
+                pad_output[key] = tensor_value
+            except Exception:
+                continue
+        return pad_output
+
+    _small_swe_pad.__name__ = "_small_swe_pad"
+    tokenizer.pad = _small_swe_pad
+    setattr(tokenizer, "_small_swe_pad_tensor_guard_installed", True)
+
+
 def _install_verl_tokenizer_compat_patches() -> None:
     try:
         from verl.utils import tokenizer as tokenizer_module
@@ -380,6 +562,7 @@ def _install_verl_tokenizer_compat_patches() -> None:
             else:
                 raise
         _suppress_fast_tokenizer_pad_warning(tokenizer)
+        _install_tokenizer_pad_tensor_guard(tokenizer)
         return tokenizer
 
     def _small_swe_hf_processor(name_or_path, *args, **kwargs):
@@ -401,6 +584,198 @@ def _install_verl_tokenizer_compat_patches() -> None:
     if verl_utils_module is not None:
         setattr(verl_utils_module, "hf_tokenizer", tokenizer_module.hf_tokenizer)
         setattr(verl_utils_module, "hf_processor", tokenizer_module.hf_processor)
+
+
+def _resolve_sequence_length(value: Any) -> int:
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        try:
+            if len(shape) > 0:
+                resolved = int(shape[-1])
+                if resolved >= 0:
+                    return resolved
+        except Exception:
+            pass
+    try:
+        resolved = int(len(value))
+    except Exception:
+        return 0
+    if resolved < 0:
+        return 0
+    return resolved
+
+
+def _coerce_non_negative_index(value: Any, *, fallback: int, upper_bound: int | None = None) -> int:
+    parsed: int | None = None
+    if torch is not None and isinstance(value, torch.Tensor):
+        tensor_value = value.detach()
+        if tensor_value.numel() == 0:
+            parsed = fallback
+        else:
+            try:
+                parsed = int(tensor_value.sum().item())
+            except Exception:
+                try:
+                    parsed = int(tensor_value.reshape(-1)[0].item())
+                except Exception:
+                    parsed = fallback
+    elif isinstance(value, (list, tuple)):
+        parsed = 0
+        for item in value:
+            parsed += _coerce_non_negative_index(item, fallback=0)
+    elif hasattr(value, "item"):
+        try:
+            parsed = int(value.item())
+        except Exception:
+            parsed = None
+    if parsed is None:
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = fallback
+    if parsed < 0:
+        parsed = 0
+    if upper_bound is not None and parsed > upper_bound:
+        parsed = upper_bound
+    return parsed
+
+
+def _slice_attention_tail_for_valid_response_length(attention_mask: Any, response_length: int) -> Any:
+    if response_length <= 0:
+        return attention_mask
+
+    if torch is not None and isinstance(attention_mask, torch.Tensor):
+        try:
+            return attention_mask[..., -response_length:]
+        except Exception:
+            return attention_mask
+
+    try:
+        return attention_mask[-response_length:]
+    except Exception:
+        return attention_mask
+
+
+def _slice_response_ids_for_decode(response_ids: Any, valid_response_length: int) -> Any:
+    if valid_response_length <= 0:
+        return response_ids[:0] if hasattr(response_ids, "__getitem__") else []
+
+    if torch is not None and isinstance(response_ids, torch.Tensor):
+        flattened = response_ids.detach().reshape(-1)
+        return flattened[:valid_response_length]
+
+    try:
+        return response_ids[:valid_response_length]
+    except Exception:
+        pass
+
+    if hasattr(response_ids, "tolist"):
+        try:
+            list_value = response_ids.tolist()
+        except Exception:
+            return []
+        if isinstance(list_value, list):
+            if list_value and isinstance(list_value[0], list):
+                list_value = list_value[0]
+            return list_value[:valid_response_length]
+    return []
+
+
+def _install_reward_loop_valid_response_length_guard() -> None:
+    try:
+        from verl.experimental.reward_loop.reward_manager.naive import NaiveRewardManager
+    except Exception:
+        return
+
+    if getattr(NaiveRewardManager, "_small_swe_valid_response_length_guard", False):
+        return
+
+    original_run_single = getattr(NaiveRewardManager, "run_single", None)
+    if not callable(original_run_single):
+        return
+
+    async def _small_swe_run_single(self, data):
+        try:
+            return await original_run_single(self, data)
+        except TypeError as exc:
+            if "only integer tensors of a single element can be converted to an index" not in str(exc):
+                raise
+
+        assert len(data) == 1, "Only support single data item"
+        data_item = data[0]
+        response_ids = data_item.batch["responses"]
+        response_length = _resolve_sequence_length(response_ids)
+        attention_mask = data_item.batch["attention_mask"]
+        attention_tail = _slice_attention_tail_for_valid_response_length(attention_mask, response_length)
+        try:
+            raw_valid_response_length = attention_tail.sum()
+        except Exception:
+            raw_valid_response_length = attention_tail
+        valid_response_length = _coerce_non_negative_index(
+            raw_valid_response_length,
+            fallback=response_length,
+            upper_bound=response_length if response_length > 0 else None,
+        )
+        valid_response_ids = _slice_response_ids_for_decode(response_ids, valid_response_length)
+
+        data_source = data_item.non_tensor_batch["data_source"]
+        ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
+        extra_info = data_item.non_tensor_batch.get("extra_info", {})
+        tool_extra_fields = data_item.non_tensor_batch.get("tool_extra_fields", None)
+        if tool_extra_fields is not None:
+            extra_info.update(tool_extra_fields.items())
+
+        num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
+        rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
+        extra_info["num_turns"] = num_turns
+        extra_info["rollout_reward_scores"] = rollout_reward_scores
+
+        response_str = await self.loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.decode(valid_response_ids, skip_special_tokens=True),
+        )
+
+        extra_reward_kwargs = (
+            {
+                "reward_router_address": self.reward_router_address,
+                "reward_model_tokenizer": self.reward_model_tokenizer,
+            }
+            if self.reward_router_address is not None
+            else {}
+        )
+        if self.is_async_reward_score:
+            result = await self.compute_score(
+                data_source=data_source,
+                solution_str=response_str,
+                ground_truth=ground_truth,
+                extra_info=extra_info,
+                **extra_reward_kwargs,
+            )
+        else:
+            result = await self.loop.run_in_executor(
+                None,
+                lambda: self.compute_score(
+                    data_source=data_source,
+                    solution_str=response_str,
+                    ground_truth=ground_truth,
+                    extra_info=extra_info,
+                    **extra_reward_kwargs,
+                ),
+            )
+
+        reward_extra_info: dict[str, Any] = {}
+        if isinstance(result, dict):
+            score = result["score"]
+            for key, value in result.items():
+                reward_extra_info[key] = value
+        else:
+            score = result
+            reward_extra_info["acc"] = score
+        return {"reward_score": score, "reward_extra_info": reward_extra_info}
+
+    _small_swe_run_single.__name__ = "_small_swe_run_single"
+    NaiveRewardManager.run_single = _small_swe_run_single
+    setattr(NaiveRewardManager, "_small_swe_valid_response_length_guard", True)
 
 
 def _install_transformers_torch_dtype_warning_filter() -> None:
@@ -699,6 +1074,7 @@ def apply_small_swe_runtime_patches() -> None:
         _install_self_distillation_config_compat_patch()
         _install_ray_worker_local_rank_device_patch()
         _install_verl_tokenizer_compat_patches()
+        _install_reward_loop_valid_response_length_guard()
         _install_transformers_torch_dtype_property_patch()
         _install_transformers_torch_dtype_warning_filter()
         _install_verl_tracking_patch()

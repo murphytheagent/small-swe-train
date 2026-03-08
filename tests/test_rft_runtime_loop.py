@@ -1628,7 +1628,7 @@ def test_filter_selected_rows_by_token_length_drops_overlength_rows() -> None:
     kept_rows, dropped_count = filter_selected_rows_by_token_length(
         selected_rows=selected_rows,
         tokenizer=_FakeTokenizer(),
-        max_sequence_length=200,
+        max_sequence_length=400,
     )
 
     assert dropped_count == 1

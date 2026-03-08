@@ -36,6 +36,9 @@ In `configs/verl/sdpo_swe.yaml`:
   wired from local `data.max_*` fields.
 - `actor_rollout_ref.rollout.max_model_len`:
   wired from local `max_model_len`.
+- `actor_rollout_ref.model.override_config.max_position_embeddings`:
+  pinned to `max_model_len` so vLLM inherits the same sequence cap
+  (verl overrides rollout max length with the HF config value).
 
 Practical rule:
 - keep `max_model_len >= max_prompt_length + max_response_length`.

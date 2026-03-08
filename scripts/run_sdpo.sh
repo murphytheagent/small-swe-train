@@ -111,6 +111,15 @@ _resolve_slurm_job_id() {
   return 1
 }
 
+_run_small_swe_preflight_container_sweep() {
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    return 0
+  fi
+  export SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE="${SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE:-1}"
+  export SMALL_SWE_PREFLIGHT_CONTAINER_POOL_NAMES="${SMALL_SWE_PREFLIGHT_CONTAINER_POOL_NAMES:-onpolicy-task ${SDPO_CONTAINER_NAME_PREFIX}}"
+  bash "${SCRIPT_DIR}/preflight_sweep_stale_docker_containers.sh"
+}
+
 _collect_slurm_job_ray_pids() {
   local job_id="$1"
   if [[ -z "${job_id}" ]] || ! command -v pgrep >/dev/null 2>&1; then
@@ -1564,6 +1573,8 @@ echo "run_sdpo.sh launch: task=${TASK} experiment=${EXPERIMENT} slurm_job_id=${S
 echo "run_sdpo.sh launch: trainer_module=${SDPO_TRAINER_MODULE} total_steps=${RESOLVED_TOTAL_STEPS:-<config-default>}"
 echo "run_sdpo.sh launch: checkpoint=${RESOLVED_CHECKPOINT:-<config-default>}"
 echo "run_sdpo.sh launch: train_files=${RESOLVED_TRAIN_FILES:-<config-default>} val_files=${RESOLVED_VAL_FILES:-<config-default>}"
+
+_run_small_swe_preflight_container_sweep
 
 if [[ "${SDPO_MONITOR_ENABLE}" == "1" ]]; then
   mkdir -p "$(dirname "${SDPO_TRAINER_LOG_PATH}")"

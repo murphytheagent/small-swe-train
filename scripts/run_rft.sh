@@ -28,6 +28,15 @@ _to_lower_ascii() {
   printf '%s' "${value}" | tr '[:upper:]' '[:lower:]'
 }
 
+_run_small_swe_preflight_container_sweep() {
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    return 0
+  fi
+  export SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE="${SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE:-1}"
+  export SMALL_SWE_PREFLIGHT_CONTAINER_POOL_NAMES="${SMALL_SWE_PREFLIGHT_CONTAINER_POOL_NAMES:-onpolicy-task sdpo-swe-bridge}"
+  bash "${SCRIPT_DIR}/preflight_sweep_stale_docker_containers.sh"
+}
+
 if [[ -z "${PYTHON_BIN:-}" ]]; then
   if _is_executable_cmd "${VENV_PYTHON}"; then
     PYTHON_BIN="${VENV_PYTHON}"
@@ -458,6 +467,7 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
     exit 1
   fi
 
+  _run_small_swe_preflight_container_sweep
   export TASK="${TASK:-${RFT_TASK_NAME}}"
   "${CMD[@]}"
   exit 0
@@ -530,5 +540,6 @@ if [[ "${DRY_RUN}" -eq 0 ]]; then
   fi
 fi
 
+_run_small_swe_preflight_container_sweep
 export TASK="${TASK:-${RFT_TASK_NAME}}"
 "${LOOP_CMD[@]}"

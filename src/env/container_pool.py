@@ -15,6 +15,8 @@ from .task_dataset import TaskSample
 _CONTAINER_START_MAX_ATTEMPTS = 3
 _CONTAINER_START_RETRY_BASE_DELAY_SEC = 1.0
 _CONTAINER_START_RETRY_MAX_DELAY_SEC = 5.0
+_SWE_SMITH_REPO_ROOT = "/testbed"
+_TASK_REPO_ROOT_ENV = "TASK_REPO_ROOT"
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,7 @@ class BatchContainerPool:
         suffix = uuid.uuid4().hex[:8]
         container_name = f"{self._name_prefix}-{suffix}"
         label_args = self._build_container_label_args()
+        repo_root_env = _resolve_repo_root_env(task.image_name)
         last_timeout = False
         last_error = "<unknown error>"
         for attempt_index in range(_CONTAINER_START_MAX_ATTEMPTS):
@@ -91,11 +94,15 @@ class BatchContainerPool:
                 "--name",
                 container_name,
                 *label_args,
+            ]
+            if repo_root_env:
+                command.extend(["-e", f"{_TASK_REPO_ROOT_ENV}={repo_root_env}"])
+            command.extend([
                 task.image_name,
                 "sh",
                 "-lc",
                 "sleep infinity",
-            ]
+            ])
             try:
                 result = self._runner(command, timeout_sec=self._container_start_timeout_sec)
             except subprocess.TimeoutExpired:
@@ -141,6 +148,11 @@ class BatchContainerPool:
             "small_swe.managed": "1",
             "small_swe.pool_name": self._name_prefix,
         }
+        runtime_user = os.environ.get("USER", "").strip()
+        if not runtime_user:
+            runtime_user = os.environ.get("LOGNAME", "").strip()
+        if runtime_user:
+            labels["small_swe.user"] = runtime_user
         slurm_job_id = os.environ.get("SLURM_JOB_ID", "").strip() or os.environ.get(
             "SLURM_JOBID", ""
         ).strip()
@@ -178,3 +190,12 @@ class BatchContainerPool:
         except subprocess.TimeoutExpired:
             # Best-effort cleanup in all error cases.
             return
+
+
+def _resolve_repo_root_env(image_name: str) -> str | None:
+    normalized = str(image_name or "").strip().lower()
+    if not normalized:
+        return None
+    if "swebench/swesmith" in normalized or "swe-smith" in normalized or "swesmith" in normalized:
+        return _SWE_SMITH_REPO_ROOT
+    return None
