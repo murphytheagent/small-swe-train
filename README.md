@@ -2,12 +2,13 @@
 
 Repository for a chat-style SWE training stack with RFT + step-SDPO stages.
 
-Latest doc update: 2026-03-06.
+Latest doc update: 2026-03-09.
 
 ## Current status
-- Active implementation work continues on PR #18 (`plan/1772102085-current-turn-supervision`).
+- PR #18 (`plan/1772102085-current-turn-supervision`) merged into `main` on 2026-03-08 05:02 UTC, so current-turn supervision is now on the base branch.
 - The latest validated E2E execution remains the 8-GPU rerun chain `826` / `827` / `828`; detailed metrics and follow-up notes live in `IMPLEMENTATION_BLUEPRINT.md`.
-- Maintenance confirmed PR #18 is still review-active and not merge-ready, and PR #23 remains open as a planning branch but is still blocked by the standing `SWE-rebench` integration constraint.
+- PR #23 remains open as a planning branch, but it is still intentionally blocked by the standing `SWE-rebench` integration constraint.
+- Legacy research PRs #14-#17 remain open/unstable and are not current merge candidates.
 
 ## What is implemented
 - Stable protocol types for assistant tool-call envelopes and feedback packets.
