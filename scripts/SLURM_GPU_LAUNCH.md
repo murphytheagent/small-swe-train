@@ -55,7 +55,7 @@ sbatch \
   --gres="gpu:${GPUS}" \
   --cpus-per-task="${CPUS}" \
   --mem="${MEM}" \
-  --time=24:00:00 \
+  --time=48:00:00 \
   --job-name=small-swe-rft \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \

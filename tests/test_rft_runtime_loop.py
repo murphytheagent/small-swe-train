@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import signal
 import sys
 import time
 import types
@@ -1728,6 +1730,41 @@ def test_run_command_extracts_inner_loss_metrics(tmp_path: Path) -> None:
     assert metrics["val_loss_last"] == pytest.approx(0.48)
 
 
+def test_run_command_starts_new_session_and_cleans_up_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_popen_kwargs: dict[str, object] = {}
+    cleanup_calls: list[tuple[int, float]] = []
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 4321
+            self.stdout = io.StringIO("step:1 - train/loss:0.45 - train/lr(1e-3):0.1\n")
+
+        def wait(self) -> int:
+            return 0
+
+    def _fake_popen(*args, **kwargs):
+        del args
+        captured_popen_kwargs.update(kwargs)
+        return _FakeProcess()
+
+    monkeypatch.setattr(rft_runtime_loop.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "_cleanup_process_group",
+        lambda process_group_id, *, timeout_sec: cleanup_calls.append((process_group_id, timeout_sec)),
+    )
+
+    metrics = rft_runtime_loop._run_command(["python3", "-m", "trainer"], cwd=tmp_path)
+
+    assert captured_popen_kwargs["start_new_session"] is True
+    assert cleanup_calls == [(4321, rft_runtime_loop._DEFAULT_PROCESS_GROUP_CLEANUP_TIMEOUT_SEC)]
+    assert metrics["train_step_last"] == 1
+    assert metrics["train_loss_last"] == pytest.approx(0.45)
+
+
 def test_reset_step_artifacts_removes_mutable_outputs(tmp_path: Path) -> None:
     step_dir = tmp_path / "rft_step_00000"
     (step_dir / "collector_artifacts").mkdir(parents=True)
@@ -1907,6 +1944,120 @@ def test_vllm_controller_rejects_occupied_endpoint_before_launch(
 
     with pytest.raises(RuntimeError, match="already has a ready endpoint"):
         controller.start(model_path="/tmp/model")
+
+
+def test_cleanup_process_group_escalates_from_sigterm_to_sigkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals_sent: list[tuple[int, signal.Signals]] = []
+    wait_responses = iter((False, False, True))
+
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "_wait_for_process_group_exit",
+        lambda process_group_id, *, timeout_sec: next(wait_responses),
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "_signal_process_group",
+        lambda process_group_id, sig: signals_sent.append((process_group_id, sig)),
+    )
+
+    rft_runtime_loop._cleanup_process_group(9876, timeout_sec=0.5)
+
+    assert signals_sent == [
+        (9876, signal.SIGTERM),
+        (9876, signal.SIGKILL),
+    ]
+
+
+def test_vllm_controller_uses_new_session_and_process_group_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=1,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=1,
+        train_batch_size=1,
+        output_dir=tmp_path / "runtime",
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=True,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+    )
+    controller = rft_runtime_loop.VLLMServerController(
+        config=config,
+        log_path=tmp_path / "vllm_server.log",
+    )
+    captured_popen_kwargs: dict[str, object] = {}
+    cleanup_calls: list[tuple[int, int]] = []
+    snapshot_labels: list[str] = []
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 6543
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: int | None = None) -> int:
+            del timeout
+            self.returncode = 0
+            return 0
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    def _fake_popen(*args, **kwargs):
+        del args
+        captured_popen_kwargs.update(kwargs)
+        return _FakeProcess()
+
+    def _fake_ready(url, *, api_key=None, expected_model_name=None):
+        del url, api_key
+        return expected_model_name is not None
+
+    monkeypatch.setattr(rft_runtime_loop.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(rft_runtime_loop, "_is_http_endpoint_ready", _fake_ready)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "_cleanup_process_group",
+        lambda process_group_id, *, timeout_sec: cleanup_calls.append((process_group_id, timeout_sec)),
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "_append_vllm_debug_snapshot",
+        lambda *, log_path, label: snapshot_labels.append(label),
+    )
+
+    controller.start(model_path="/tmp/model")
+    controller.stop()
+
+    assert captured_popen_kwargs["start_new_session"] is True
+    assert cleanup_calls == [(6543, 1)]
+    assert snapshot_labels == ["pre-launch GPU snapshot for model=/tmp/model"]
 
 
 def test_resolve_vllm_api_key_prefers_small_swe_env(monkeypatch) -> None:

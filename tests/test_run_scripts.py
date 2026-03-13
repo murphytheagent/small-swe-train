@@ -448,6 +448,7 @@ def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
     )
     assert f"--tensor-parallel-size {expected_tp}" in result.stdout
     assert f"--data-parallel-size {expected_dp}" in result.stdout
+    assert "--gpu-memory-utilization 0.8" in result.stdout
 
 
 def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topology(
@@ -567,6 +568,7 @@ def test_run_rft_script_dry_run_respects_explicit_vllm_extra_args() -> None:
     )
     assert "--tensor-parallel-size 2" in result.stdout
     assert "--max-num-seqs 16" in result.stdout
+    assert "--gpu-memory-utilization 0.8" not in result.stdout
 
 
 def test_run_rft_script_dry_run_uses_centralized_sequence_length_overrides() -> None:

@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -59,6 +60,8 @@ _DEFAULT_RFT_WANDB_GROUP = "small-swe-rft"
 _TOOL_RESPONSE_PREFIX = "<tool_response>"
 _TRAIN_LOSS_PATTERN = re.compile(r"step:(\d+)\s*-\s*train/loss:([0-9eE+\-.]+)")
 _VAL_LOSS_PATTERN = re.compile(r"step:(\d+)\s*-\s*val/loss:([0-9eE+\-.]+)")
+_DEFAULT_PROCESS_GROUP_CLEANUP_TIMEOUT_SEC = 5.0
+_DEFAULT_DIAGNOSTIC_COMMAND_TIMEOUT_SEC = 5.0
 _MODEL_ARTIFACT_FILE_NAMES = {
     "model.safetensors",
     "model.safetensors.index.json",
@@ -119,6 +122,7 @@ class VLLMServerController:
     def __init__(self, *, config: RFTLoopConfig, log_path: Path) -> None:
         self._config = config
         self._process: subprocess.Popen[str] | None = None
+        self._process_group_id: int | None = None
         self._log_path = log_path
         self._models_url = _build_models_url(config.vllm_base_url)
         self._api_key = _resolve_vllm_api_key()
@@ -142,36 +146,70 @@ class VLLMServerController:
         )
 
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_handle = self._log_path.open("a", encoding="utf-8")
-        self._process = subprocess.Popen(
-            command,
-            cwd=self._config.project_root,
-            stdout=log_handle,
-            stderr=log_handle,
-            text=True,
+        _append_vllm_debug_snapshot(
+            log_path=self._log_path,
+            label=f"pre-launch GPU snapshot for model={model_path}",
         )
-        self._wait_until_ready()
+        with self._log_path.open("a", encoding="utf-8") as log_handle:
+            self._process = subprocess.Popen(
+                command,
+                cwd=self._config.project_root,
+                stdout=log_handle,
+                stderr=log_handle,
+                text=True,
+                start_new_session=True,
+            )
+        self._process_group_id = self._process.pid
+        try:
+            self._wait_until_ready()
+        except Exception:
+            _cleanup_process_group(
+                self._process_group_id,
+                timeout_sec=self._config.vllm_stop_timeout_sec,
+            )
+            if self._process is not None:
+                try:
+                    self._process.wait(timeout=self._config.vllm_stop_timeout_sec)
+                except subprocess.TimeoutExpired:
+                    pass
+            self._process = None
+            self._process_group_id = None
+            raise
 
     def stop(self) -> None:
         process = self._process
         self._process = None
+        process_group_id = self._process_group_id
+        self._process_group_id = None
         if process is None:
             return
-        if process.poll() is not None:
-            return
-
-        process.terminate()
-        try:
-            process.wait(timeout=self._config.vllm_stop_timeout_sec)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=self._config.vllm_stop_timeout_sec)
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=self._config.vllm_stop_timeout_sec)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=self._config.vllm_stop_timeout_sec)
+        _cleanup_process_group(
+            process_group_id,
+            timeout_sec=self._config.vllm_stop_timeout_sec,
+        )
 
     def _wait_until_ready(self) -> None:
         assert self._process is not None
         deadline = time.monotonic() + self._config.vllm_ready_timeout_sec
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
+                _append_vllm_debug_snapshot(
+                    log_path=self._log_path,
+                    label="startup failure GPU snapshot",
+                )
                 raise RuntimeError(
                     f"vLLM server exited early with code {self._process.returncode}. "
                     f"Inspect logs at {self._log_path}."
@@ -195,6 +233,140 @@ class VLLMServerController:
             "Timed out waiting for vLLM readiness at "
             f"{self._models_url}.{observed_models_hint} Inspect logs at {self._log_path}."
         )
+
+
+def _process_group_exists(process_group_id: int | None) -> bool:
+    if process_group_id is None or process_group_id <= 0:
+        return False
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _signal_process_group(process_group_id: int | None, sig: signal.Signals) -> None:
+    if process_group_id is None or process_group_id <= 0:
+        return
+    try:
+        os.killpg(process_group_id, sig)
+    except ProcessLookupError:
+        return
+
+
+def _wait_for_process_group_exit(process_group_id: int | None, *, timeout_sec: float) -> bool:
+    if process_group_id is None or process_group_id <= 0:
+        return True
+    deadline = time.monotonic() + max(float(timeout_sec), 0.0)
+    while True:
+        if not _process_group_exists(process_group_id):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def _cleanup_process_group(process_group_id: int | None, *, timeout_sec: float) -> None:
+    if process_group_id is None or process_group_id <= 0:
+        return
+    if _wait_for_process_group_exit(process_group_id, timeout_sec=0.0):
+        return
+    _signal_process_group(process_group_id, signal.SIGTERM)
+    if _wait_for_process_group_exit(process_group_id, timeout_sec=timeout_sec):
+        return
+    _signal_process_group(process_group_id, signal.SIGKILL)
+    _wait_for_process_group_exit(process_group_id, timeout_sec=timeout_sec)
+
+
+def _run_diagnostic_command(command: Sequence[str]) -> tuple[int, str, str]:
+    try:
+        completed = subprocess.run(
+            list(command),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_DEFAULT_DIAGNOSTIC_COMMAND_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return 124, "", f"timeout after {exc.timeout}s"
+    except OSError as exc:
+        return 127, "", f"{type(exc).__name__}: {exc}"
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+def _append_vllm_debug_snapshot(*, log_path: Path, label: str) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"[small-swe] {label} @ {_utc_now()}"]
+    gpu_query = (
+        "index,name,memory.used,memory.free,memory.total"
+    )
+    compute_query = "gpu_uuid,pid,process_name,used_gpu_memory"
+    diagnostic_commands: list[tuple[str, list[str]]] = [
+        (
+            "gpu memory",
+            [
+                "nvidia-smi",
+                f"--query-gpu={gpu_query}",
+                "--format=csv,noheader,nounits",
+            ],
+        ),
+        (
+            "compute apps",
+            [
+                "nvidia-smi",
+                f"--query-compute-apps={compute_query}",
+                "--format=csv,noheader,nounits",
+            ],
+        ),
+    ]
+
+    compute_app_output = ""
+    for title, command in diagnostic_commands:
+        if shutil.which(command[0]) is None:
+            lines.append(f"[small-swe] {title}: command not found: {command[0]}")
+            continue
+        return_code, stdout, stderr = _run_diagnostic_command(command)
+        stdout = stdout.strip()
+        stderr = stderr.strip()
+        lines.append(f"[small-swe] {title}: rc={return_code}")
+        if stdout:
+            lines.append(stdout)
+        if stderr:
+            lines.append(f"[small-swe] {title} stderr: {stderr}")
+        if title == "compute apps":
+            compute_app_output = stdout
+
+    gpu_pids: list[str] = []
+    for row in compute_app_output.splitlines():
+        parts = [part.strip() for part in row.split(",")]
+        if len(parts) < 2:
+            continue
+        pid = parts[1]
+        if pid.isdigit():
+            gpu_pids.append(pid)
+    if gpu_pids and shutil.which("ps") is not None:
+        return_code, stdout, stderr = _run_diagnostic_command(
+            [
+                "ps",
+                "-o",
+                "pid=,ppid=,pgid=,user=,stat=,etime=,cmd=",
+                "-p",
+                ",".join(sorted(set(gpu_pids))),
+            ]
+        )
+        lines.append(f"[small-swe] ps for gpu pids: rc={return_code}")
+        stdout = stdout.strip()
+        stderr = stderr.strip()
+        if stdout:
+            lines.append(stdout)
+        if stderr:
+            lines.append(f"[small-swe] ps stderr: {stderr}")
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+        handle.write("\n")
 
 
 def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
@@ -1154,28 +1326,50 @@ def _run_command(command: Sequence[str], *, cwd: Path) -> dict[str, float | int]
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
+    process_group_id = process.pid
 
     train_step_last: int | None = None
     train_loss_last: float | None = None
     val_step_last: int | None = None
     val_loss_last: float | None = None
+    command_error: subprocess.CalledProcessError | None = None
+    cleanup_error: Exception | None = None
 
-    if process.stdout is not None:
-        for line in process.stdout:
-            print(line, end="")
-            train_match = _TRAIN_LOSS_PATTERN.search(line)
-            if train_match is not None:
-                train_step_last = int(train_match.group(1))
-                train_loss_last = float(train_match.group(2))
-            val_match = _VAL_LOSS_PATTERN.search(line)
-            if val_match is not None:
-                val_step_last = int(val_match.group(1))
-                val_loss_last = float(val_match.group(2))
+    try:
+        if process.stdout is not None:
+            for line in process.stdout:
+                print(line, end="")
+                train_match = _TRAIN_LOSS_PATTERN.search(line)
+                if train_match is not None:
+                    train_step_last = int(train_match.group(1))
+                    train_loss_last = float(train_match.group(2))
+                val_match = _VAL_LOSS_PATTERN.search(line)
+                if val_match is not None:
+                    val_step_last = int(val_match.group(1))
+                    val_loss_last = float(val_match.group(2))
 
-    return_code = process.wait()
-    if return_code != 0:
-        raise subprocess.CalledProcessError(return_code, list(command))
+        return_code = process.wait()
+        if return_code != 0:
+            command_error = subprocess.CalledProcessError(return_code, list(command))
+    finally:
+        try:
+            _cleanup_process_group(
+                process_group_id,
+                timeout_sec=_DEFAULT_PROCESS_GROUP_CLEANUP_TIMEOUT_SEC,
+            )
+        except Exception as exc:  # pragma: no cover - defensive cleanup path
+            cleanup_error = exc
+
+    if command_error is not None:
+        if cleanup_error is not None:
+            command_error.add_note(
+                f"trainer subprocess cleanup also failed: {type(cleanup_error).__name__}: {cleanup_error}"
+            )
+        raise command_error
+    if cleanup_error is not None:
+        raise cleanup_error
 
     metrics: dict[str, float | int] = {}
     if train_step_last is not None:

@@ -37,6 +37,177 @@ _run_small_swe_preflight_container_sweep() {
   bash "${SCRIPT_DIR}/preflight_sweep_stale_docker_containers.sh"
 }
 
+RFT_PROC_ROOT="${RFT_PROC_ROOT:-/proc}"
+RFT_CLEANUP_ON_EXIT="${RFT_CLEANUP_ON_EXIT:-1}"
+RFT_CLEANUP_DRAIN_SEC="${RFT_CLEANUP_DRAIN_SEC:-30}"
+RFT_CLEANUP_GRACE_SEC="${RFT_CLEANUP_GRACE_SEC:-5}"
+_RFT_CLEANUP_COMPLETED=0
+
+_resolve_slurm_job_id() {
+  local job_id="${SLURM_JOB_ID:-${SLURM_JOBID:-}}"
+  if [[ "${job_id}" =~ ^[0-9]+$ ]]; then
+    printf '%s' "${job_id}"
+    return 0
+  fi
+  return 1
+}
+
+_pid_matches_slurm_job() {
+  local pid="$1"
+  local job_id="$2"
+  [[ -n "${job_id}" ]] || return 1
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  local environ_path="${RFT_PROC_ROOT}/${pid}/environ"
+  [[ -r "${environ_path}" ]] || return 1
+  tr '\0' '\n' <"${environ_path}" | grep -Eq "^SLURM_JOB_ID=${job_id}$|^SLURM_JOBID=${job_id}$"
+}
+
+_collect_rft_job_runtime_pids() {
+  local job_id="$1"
+  if [[ -z "${job_id}" ]] || ! command -v pgrep >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local process_pattern
+  process_pattern="trainer\\.rft_runtime_loop|trainer\\.vllm_api_server_entry|vllm\\.entrypoints\\.openai\\.api_server|VLLM::EngineCore|torch\\.distributed\\.run|verl_integration\\.fsdp_sft_trainer_entry|multiprocessing\\.resource_tracker"
+
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+    [[ "${pid}" != "$$" ]] || continue
+    if _pid_matches_slurm_job "${pid}" "${job_id}"; then
+      printf '%s\n' "${pid}"
+    fi
+  done < <(pgrep -u "$(id -u)" -f "${process_pattern}" || true)
+}
+
+_collect_live_slurm_job_pids() {
+  local job_id="$1"
+  shift || true
+  local pid
+  for pid in "$@"; do
+    [[ -n "${pid}" ]] || continue
+    if kill -0 "${pid}" 2>/dev/null && _pid_matches_slurm_job "${pid}" "${job_id}"; then
+      printf '%s\n' "${pid}"
+    fi
+  done
+}
+
+_cleanup_rft_runtime_processes() {
+  local job_id="$1"
+  [[ -n "${job_id}" ]] || return 0
+
+  local -a pids=()
+  local -a pids_after_drain=()
+  local -a still_running=()
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    pids+=("${pid}")
+  done < <(_collect_rft_job_runtime_pids "${job_id}")
+  if [[ "${#pids[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local drain_sec=0
+  if [[ "${RFT_CLEANUP_DRAIN_SEC}" =~ ^[0-9]+$ ]]; then
+    drain_sec=$((10#${RFT_CLEANUP_DRAIN_SEC}))
+  fi
+  if (( drain_sec > 0 )); then
+    local drain_deadline_epoch
+    local now_epoch
+    drain_deadline_epoch=$(( $(date +%s) + drain_sec ))
+    pids_after_drain=("${pids[@]}")
+    while [[ "${#pids_after_drain[@]}" -gt 0 ]]; do
+      now_epoch="$(date +%s)"
+      if [[ "${now_epoch}" -ge "${drain_deadline_epoch}" ]]; then
+        break
+      fi
+      local -a next_still_running=()
+      for pid in "${pids_after_drain[@]}"; do
+        if kill -0 "${pid}" 2>/dev/null; then
+          next_still_running+=("${pid}")
+        fi
+      done
+      pids_after_drain=("${next_still_running[@]}")
+      if [[ "${#pids_after_drain[@]}" -eq 0 ]]; then
+        break
+      fi
+      sleep 1
+    done
+    if [[ "${#pids_after_drain[@]}" -eq 0 ]]; then
+      echo "run_rft.sh cleanup: all runtime processes exited during ${drain_sec}s drain window for SLURM job ${job_id}."
+      return 0
+    fi
+    pids=("${pids_after_drain[@]}")
+  fi
+
+  local -a verified_pids=()
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    verified_pids+=("${pid}")
+  done < <(_collect_live_slurm_job_pids "${job_id}" "${pids[@]}")
+  if [[ "${#verified_pids[@]}" -eq 0 ]]; then
+    echo "run_rft.sh cleanup: no matching runtime processes remained after drain for SLURM job ${job_id}."
+    return 0
+  fi
+  pids=("${verified_pids[@]}")
+
+  echo "run_rft.sh cleanup: sending SIGTERM to ${#pids[@]} runtime process(es) for SLURM job ${job_id}."
+  kill "${pids[@]}" 2>/dev/null || true
+  sleep "${RFT_CLEANUP_GRACE_SEC}"
+
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    still_running+=("${pid}")
+  done < <(_collect_live_slurm_job_pids "${job_id}" "${pids[@]}")
+
+  if [[ "${#still_running[@]}" -gt 0 ]]; then
+    echo "run_rft.sh cleanup: force-killing ${#still_running[@]} lingering process(es)."
+    kill -9 "${still_running[@]}" 2>/dev/null || true
+  fi
+}
+
+_cleanup_rft_runtime_once() {
+  if [[ "${_RFT_CLEANUP_COMPLETED}" == "1" ]]; then
+    return 0
+  fi
+  _RFT_CLEANUP_COMPLETED=1
+
+  if [[ "${DRY_RUN}" == "1" ]] || [[ "${RFT_CLEANUP_ON_EXIT}" != "1" ]]; then
+    return 0
+  fi
+
+  local slurm_job_id=""
+  slurm_job_id="$(_resolve_slurm_job_id || true)"
+  if [[ -n "${slurm_job_id}" ]]; then
+    _cleanup_rft_runtime_processes "${slurm_job_id}"
+  fi
+}
+
+_on_rft_exit() {
+  local exit_code=$?
+  _cleanup_rft_runtime_once
+  return "${exit_code}"
+}
+
+_on_rft_int() {
+  trap - EXIT INT TERM
+  _cleanup_rft_runtime_once
+  exit 130
+}
+
+_on_rft_term() {
+  trap - EXIT INT TERM
+  _cleanup_rft_runtime_once
+  exit 143
+}
+
+trap _on_rft_exit EXIT
+trap _on_rft_int INT
+trap _on_rft_term TERM
+
 _check_managed_vllm_bind_target_available() {
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     return 0
@@ -208,6 +379,7 @@ RFT_VLLM_LAUNCH_MODULE="${RFT_VLLM_LAUNCH_MODULE:-trainer.vllm_api_server_entry}
 RFT_VLLM_READY_TIMEOUT_SEC="${RFT_VLLM_READY_TIMEOUT_SEC:-180}"
 RFT_VLLM_STOP_TIMEOUT_SEC="${RFT_VLLM_STOP_TIMEOUT_SEC:-30}"
 RFT_VLLM_EXTRA_ARGS="${RFT_VLLM_EXTRA_ARGS:-}"
+RFT_VLLM_GPU_MEMORY_UTILIZATION="${RFT_VLLM_GPU_MEMORY_UTILIZATION:-0.8}"
 RFT_VLLM_TP_SIZE="${RFT_VLLM_TP_SIZE:-}"
 RFT_VLLM_DP_SIZE="${RFT_VLLM_DP_SIZE:-}"
 RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS:-}"
@@ -499,6 +671,7 @@ if [[ -z "${RFT_VLLM_EXTRA_ARGS}" ]]; then
   if (( RFT_VLLM_DP_SIZE > 1 )); then
     RFT_VLLM_EXTRA_ARGS="${RFT_VLLM_EXTRA_ARGS} --data-parallel-size ${RFT_VLLM_DP_SIZE}"
   fi
+  RFT_VLLM_EXTRA_ARGS="${RFT_VLLM_EXTRA_ARGS} --gpu-memory-utilization ${RFT_VLLM_GPU_MEMORY_UTILIZATION}"
 fi
 
 export SMALL_SWE_VLLM_BASE_URL="${SMALL_SWE_VLLM_BASE_URL:-${DEFAULT_VLLM_BASE_URL}}"
