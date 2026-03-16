@@ -44,7 +44,7 @@ By default, `run_rft.sh` writes artifacts under a unique directory:
 `outputs/rft_runtime/<UTC_TIMESTAMP>_job<SLURM_JOB_ID>`.
 
 ```bash
-GPUS=8
+GPUS=4
 CPUS=$((GPUS * 16))
 MEM="$((GPUS * 48))G"
 VLLM_PORT=18080

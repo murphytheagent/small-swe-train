@@ -1717,17 +1717,174 @@ def test_run_command_extracts_inner_loss_metrics(tmp_path: Path) -> None:
         "-c",
         (
             "print('step:1 - train/loss:0.45 - train/lr(1e-3):0.1')\n"
-            "print('step:2 - train/loss:0.40 - train/lr(1e-3):0.0')\n"
+            "print('step:2 - train/loss:0.40 - train/lr(1e-3):0.05')\n"
+            "print('step:3 - train/loss:0.42 - train/lr(1e-3):0.0')\n"
             "print('step:2 - val/loss:0.48')\n"
+            "print('step:3 - val/loss:0.44')\n"
         ),
     ]
 
     metrics = rft_runtime_loop._run_command(command, cwd=tmp_path)
 
-    assert metrics["train_step_last"] == 2
-    assert metrics["train_loss_last"] == pytest.approx(0.40)
-    assert metrics["val_step_last"] == 2
-    assert metrics["val_loss_last"] == pytest.approx(0.48)
+    assert metrics["train_step_first"] == 1
+    assert metrics["train_loss_first"] == pytest.approx(0.45)
+    assert metrics["train_step_last"] == 3
+    assert metrics["train_loss_last"] == pytest.approx(0.42)
+    assert metrics["train_loss_min"] == pytest.approx(0.40)
+    assert metrics["train_loss_min_step"] == 2
+    assert metrics["train_loss_delta"] == pytest.approx(-0.03)
+    assert metrics["val_step_first"] == 2
+    assert metrics["val_loss_first"] == pytest.approx(0.48)
+    assert metrics["val_step_last"] == 3
+    assert metrics["val_loss_last"] == pytest.approx(0.44)
+    assert metrics["val_loss_min"] == pytest.approx(0.44)
+    assert metrics["val_loss_min_step"] == 3
+    assert metrics["val_loss_delta"] == pytest.approx(-0.04)
+
+
+def test_run_loop_writes_inner_loss_delta_metrics_to_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_load_tokenizer(_model_path: str):
+        return _StubTokenizer()
+
+    def _fake_collect(*, request, tokenizer):
+        del request, tokenizer
+        return {
+            "selected_rows": [
+                {
+                    "task_id": "task-1",
+                    "attempt_index": 0,
+                    "step_index": 0,
+                    "turn_index": 0,
+                    "resolved": False,
+                    "format_valid": True,
+                    "final_turn_has_submit": True,
+                    "final_submit_format_valid": True,
+                    "prompt": "Fix bug",
+                    "assistant_response": "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>",
+                    "trajectory_history": [
+                        "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
+                    ],
+                }
+            ],
+            "rejected_rows": [],
+        }
+
+    def _fake_write_selected_rows(_rows, parquet_path: Path):
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        parquet_path.write_text("stub", encoding="utf-8")
+        return 1
+
+    def _fake_build_trainer_step_command(**kwargs):
+        trainer_output_dir = Path(kwargs["trainer_output_dir"])
+        return ["fake-trainer", str(trainer_output_dir)]
+
+    def _fake_run_command(command, *, cwd: Path):
+        del cwd
+        trainer_output_dir = Path(command[1])
+        (trainer_output_dir / "global_step_2" / "huggingface").mkdir(parents=True, exist_ok=True)
+        return {
+            "train_step_first": 1,
+            "train_loss_first": 0.45,
+            "train_step_last": 2,
+            "train_loss_last": 0.40,
+            "train_loss_min": 0.40,
+            "train_loss_min_step": 2,
+            "train_loss_delta": -0.05,
+            "val_step_first": 1,
+            "val_loss_first": 0.50,
+            "val_step_last": 2,
+            "val_loss_last": 0.46,
+            "val_loss_min": 0.46,
+            "val_loss_min_step": 2,
+            "val_loss_delta": -0.04,
+        }
+
+    def _fake_resolve_latest_hf_checkpoint(checkpoint_root: Path):
+        target = Path(checkpoint_root) / "global_step_2" / "huggingface"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    monkeypatch.setattr(rft_runtime_loop, "_load_tokenizer", _fake_load_tokenizer)
+    monkeypatch.setattr(rft_runtime_loop, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "write_selected_rows_to_multiturn_parquet",
+        _fake_write_selected_rows,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "build_trainer_step_command",
+        _fake_build_trainer_step_command,
+    )
+    monkeypatch.setattr(rft_runtime_loop, "_run_command", _fake_run_command)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "resolve_latest_hf_checkpoint",
+        _fake_resolve_latest_hf_checkpoint,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_global_step_checkpoints",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_step_checkpoints",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_step_payloads",
+        lambda **_kwargs: [],
+    )
+
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=1,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=1,
+        train_batch_size=1,
+        output_dir=tmp_path / "runtime",
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=False,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+        eval_split_fraction=0.0,
+    )
+
+    rft_runtime_loop.run_rft_runtime_loop(config)
+
+    summary_path = config.output_dir / "rft_step_00000" / "rft_step_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["inner_train_loss_first"] == pytest.approx(0.45)
+    assert summary["inner_train_loss_last"] == pytest.approx(0.40)
+    assert summary["inner_train_loss_delta"] == pytest.approx(-0.05)
+    assert summary["inner_train_loss_min"] == pytest.approx(0.40)
+    assert summary["inner_train_loss_min_step"] == 2
+    assert summary["inner_val_loss_first"] == pytest.approx(0.50)
+    assert summary["inner_val_loss_last"] == pytest.approx(0.46)
+    assert summary["inner_val_loss_delta"] == pytest.approx(-0.04)
+    assert summary["inner_val_loss_min"] == pytest.approx(0.46)
+    assert summary["inner_val_loss_min_step"] == 2
 
 
 def test_run_command_starts_new_session_and_cleans_up_process_group(

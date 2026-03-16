@@ -652,10 +652,20 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "effective_eval_batch_size": effective_eval_batch_size,
                 "collector_duration_sec": collect_duration_sec,
                 "trainer_duration_sec": trainer_duration_sec,
+                "inner_train_step_first": trainer_metrics.get("train_step_first"),
+                "inner_train_loss_first": trainer_metrics.get("train_loss_first"),
                 "inner_train_step_last": trainer_metrics.get("train_step_last"),
                 "inner_train_loss_last": trainer_metrics.get("train_loss_last"),
+                "inner_train_loss_min": trainer_metrics.get("train_loss_min"),
+                "inner_train_loss_min_step": trainer_metrics.get("train_loss_min_step"),
+                "inner_train_loss_delta": trainer_metrics.get("train_loss_delta"),
+                "inner_val_step_first": trainer_metrics.get("val_step_first"),
+                "inner_val_loss_first": trainer_metrics.get("val_loss_first"),
                 "inner_val_step_last": trainer_metrics.get("val_step_last"),
                 "inner_val_loss_last": trainer_metrics.get("val_loss_last"),
+                "inner_val_loss_min": trainer_metrics.get("val_loss_min"),
+                "inner_val_loss_min_step": trainer_metrics.get("val_loss_min_step"),
+                "inner_val_loss_delta": trainer_metrics.get("val_loss_delta"),
                 "step_duration_sec": time.monotonic() - step_start,
                 "train_parquet": str(train_parquet_path),
                 "eval_parquet": str(resolved_val_parquet_path),
@@ -1330,10 +1340,18 @@ def _run_command(command: Sequence[str], *, cwd: Path) -> dict[str, float | int]
     )
     process_group_id = process.pid
 
+    train_step_first: int | None = None
+    train_loss_first: float | None = None
     train_step_last: int | None = None
     train_loss_last: float | None = None
+    train_loss_min: float | None = None
+    train_loss_min_step: int | None = None
+    val_step_first: int | None = None
+    val_loss_first: float | None = None
     val_step_last: int | None = None
     val_loss_last: float | None = None
+    val_loss_min: float | None = None
+    val_loss_min_step: int | None = None
     command_error: subprocess.CalledProcessError | None = None
     cleanup_error: Exception | None = None
 
@@ -1343,12 +1361,28 @@ def _run_command(command: Sequence[str], *, cwd: Path) -> dict[str, float | int]
                 print(line, end="")
                 train_match = _TRAIN_LOSS_PATTERN.search(line)
                 if train_match is not None:
-                    train_step_last = int(train_match.group(1))
-                    train_loss_last = float(train_match.group(2))
+                    train_step = int(train_match.group(1))
+                    train_loss = float(train_match.group(2))
+                    if train_step_first is None:
+                        train_step_first = train_step
+                        train_loss_first = train_loss
+                    train_step_last = train_step
+                    train_loss_last = train_loss
+                    if train_loss_min is None or train_loss < train_loss_min:
+                        train_loss_min = train_loss
+                        train_loss_min_step = train_step
                 val_match = _VAL_LOSS_PATTERN.search(line)
                 if val_match is not None:
-                    val_step_last = int(val_match.group(1))
-                    val_loss_last = float(val_match.group(2))
+                    val_step = int(val_match.group(1))
+                    val_loss = float(val_match.group(2))
+                    if val_step_first is None:
+                        val_step_first = val_step
+                        val_loss_first = val_loss
+                    val_step_last = val_step
+                    val_loss_last = val_loss
+                    if val_loss_min is None or val_loss < val_loss_min:
+                        val_loss_min = val_loss
+                        val_loss_min_step = val_step
 
         return_code = process.wait()
         if return_code != 0:
@@ -1372,14 +1406,34 @@ def _run_command(command: Sequence[str], *, cwd: Path) -> dict[str, float | int]
         raise cleanup_error
 
     metrics: dict[str, float | int] = {}
+    if train_step_first is not None:
+        metrics["train_step_first"] = train_step_first
+    if train_loss_first is not None:
+        metrics["train_loss_first"] = train_loss_first
     if train_step_last is not None:
         metrics["train_step_last"] = train_step_last
     if train_loss_last is not None:
         metrics["train_loss_last"] = train_loss_last
+    if train_loss_min is not None:
+        metrics["train_loss_min"] = train_loss_min
+    if train_loss_min_step is not None:
+        metrics["train_loss_min_step"] = train_loss_min_step
+    if train_loss_first is not None and train_loss_last is not None:
+        metrics["train_loss_delta"] = train_loss_last - train_loss_first
+    if val_step_first is not None:
+        metrics["val_step_first"] = val_step_first
+    if val_loss_first is not None:
+        metrics["val_loss_first"] = val_loss_first
     if val_step_last is not None:
         metrics["val_step_last"] = val_step_last
     if val_loss_last is not None:
         metrics["val_loss_last"] = val_loss_last
+    if val_loss_min is not None:
+        metrics["val_loss_min"] = val_loss_min
+    if val_loss_min_step is not None:
+        metrics["val_loss_min_step"] = val_loss_min_step
+    if val_loss_first is not None and val_loss_last is not None:
+        metrics["val_loss_delta"] = val_loss_last - val_loss_first
     return metrics
 
 
@@ -1745,10 +1799,16 @@ def _log_rft_runtime_step_to_wandb(*, wandb_run: Any | None, step_summary: Mappi
         "rft/trainer_skipped": int(bool(step_summary.get("trainer_skipped", False))),
         "rft/collector_duration_sec": step_summary.get("collector_duration_sec"),
         "rft/trainer_duration_sec": step_summary.get("trainer_duration_sec"),
+        "rft/inner_train_loss_first": step_summary.get("inner_train_loss_first"),
         "rft/inner_train_step_last": step_summary.get("inner_train_step_last"),
         "rft/inner_train_loss_last": step_summary.get("inner_train_loss_last"),
+        "rft/inner_train_loss_min": step_summary.get("inner_train_loss_min"),
+        "rft/inner_train_loss_delta": step_summary.get("inner_train_loss_delta"),
+        "rft/inner_val_loss_first": step_summary.get("inner_val_loss_first"),
         "rft/inner_val_step_last": step_summary.get("inner_val_step_last"),
         "rft/inner_val_loss_last": step_summary.get("inner_val_loss_last"),
+        "rft/inner_val_loss_min": step_summary.get("inner_val_loss_min"),
+        "rft/inner_val_loss_delta": step_summary.get("inner_val_loss_delta"),
         "rft/step_duration_sec": step_summary.get("step_duration_sec"),
     }
     sanitized_metrics: dict[str, float | int] = {}
