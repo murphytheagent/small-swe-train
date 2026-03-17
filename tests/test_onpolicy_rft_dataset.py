@@ -438,3 +438,44 @@ def test_onpolicy_dataset_explicit_partition_overrides_identical_dataset_paths(
 
     assert len(captured_requests) == 1
     assert captured_requests[0].task_partition == "eval"
+
+
+def test_onpolicy_dataset_reuses_train_partition_when_eval_split_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests = []
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        if request.task_partition == "eval":
+            return _runtime_result(0)
+        assert request.task_partition == "train"
+        return _runtime_result(2)
+
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_module())
+    monkeypatch.setattr(dataset_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+
+    config = {
+        "train_files": "/tmp/onpolicy-rft-train.parquet",
+        "val_files": "/tmp/onpolicy-rft-val.parquet",
+        "on_policy": {
+            "enabled": True,
+            "task_eval_split_fraction": 0.25,
+        },
+    }
+
+    eval_dataset = dataset_module.OnPolicyRFTDataset(
+        parquet_files=["/tmp/onpolicy-rft-val.parquet"],
+        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+        config=config,
+    )
+    train_dataset = dataset_module.OnPolicyRFTDataset(
+        parquet_files=["/tmp/onpolicy-rft-train.parquet"],
+        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+        config=config,
+    )
+
+    assert len(eval_dataset) == 2
+    assert len(train_dataset) == 2
+    assert [request.task_partition for request in captured_requests] == ["eval", "train"]

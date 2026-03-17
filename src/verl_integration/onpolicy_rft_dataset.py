@@ -65,6 +65,10 @@ class OnPolicyRFTDataset:
         runtime_overrides = _as_mapping(on_policy_cfg.get("runtime_overrides", {}))
         data_overrides = _as_mapping(on_policy_cfg.get("data_overrides", {}))
         handoff_overrides = _as_mapping(on_policy_cfg.get("rft_handoff_overrides", {}))
+        explicit_task_partition = ""
+        explicit_task_partition_raw = on_policy_cfg.get("task_partition")
+        if explicit_task_partition_raw is not None:
+            explicit_task_partition = str(explicit_task_partition_raw).strip()
         stage_name = _resolve_stage_name(on_policy_cfg.get("stage_name", _FORMAT_RFT_STAGE_NAME))
         handoff_overrides = _merge_stage_handoff_overrides(
             handoff_overrides=handoff_overrides,
@@ -85,56 +89,87 @@ class OnPolicyRFTDataset:
         output_dir_raw = on_policy_cfg.get("output_dir")
         output_dir = str(output_dir_raw).strip() if isinstance(output_dir_raw, str) and output_dir_raw.strip() else None
         parquet_file_fingerprint = _normalize_parquet_files(parquet_files)
+        train_file_fingerprint = _normalize_parquet_files(config_mapping.get("train_files"))
         task_partition = _resolve_task_partition(
-            explicit_partition=on_policy_cfg.get("task_partition"),
+            explicit_partition=explicit_task_partition_raw,
             parquet_files=parquet_file_fingerprint,
             train_files=config_mapping.get("train_files"),
             val_files=config_mapping.get("val_files"),
             task_eval_split_fraction=task_eval_split_fraction,
         )
 
-        cache_key = _cache_key(
-            data_config_name=data_config_name,
-            turn_generator_mode=turn_generator_mode,
-            total_steps=total_steps,
-            runtime_overrides=runtime_overrides,
-            data_overrides=data_overrides,
-            handoff_overrides=handoff_overrides,
-            verify_submissions=verify_submissions,
-            stage_name=stage_name,
-            task_partition=task_partition,
-            task_eval_split_fraction=task_eval_split_fraction,
-            task_eval_min_rows=task_eval_min_rows,
-            parquet_files=parquet_file_fingerprint,
-            tokenizer=tokenizer,
+        def _build_cache_key_for(
+            *,
+            resolved_task_partition: str,
+            resolved_parquet_files: Sequence[str],
+        ) -> str:
+            return _cache_key(
+                data_config_name=data_config_name,
+                turn_generator_mode=turn_generator_mode,
+                total_steps=total_steps,
+                runtime_overrides=runtime_overrides,
+                data_overrides=data_overrides,
+                handoff_overrides=handoff_overrides,
+                verify_submissions=verify_submissions,
+                stage_name=stage_name,
+                task_partition=resolved_task_partition,
+                task_eval_split_fraction=task_eval_split_fraction,
+                task_eval_min_rows=task_eval_min_rows,
+                parquet_files=resolved_parquet_files,
+                tokenizer=tokenizer,
+            )
+
+        cache_key = _build_cache_key_for(
+            resolved_task_partition=task_partition,
+            resolved_parquet_files=parquet_file_fingerprint,
         )
+        allow_empty_eval_fallback_to_train = (
+            task_partition == _TASK_PARTITION_EVAL
+            and task_eval_split_fraction > 0.0
+            and not explicit_task_partition
+            and bool(train_file_fingerprint)
+        )
+        train_cache_key = (
+            _build_cache_key_for(
+                resolved_task_partition=_TASK_PARTITION_TRAIN,
+                resolved_parquet_files=train_file_fingerprint,
+            )
+            if allow_empty_eval_fallback_to_train
+            else None
+        )
+
+        def _collect_runtime_batch_for_partition(resolved_task_partition: str) -> dict[str, Any]:
+            request = OnPolicyRFTRuntimeRequest(
+                data_config_name=data_config_name,
+                turn_generator_mode=turn_generator_mode,
+                total_steps=total_steps,
+                runtime_overrides=runtime_overrides,
+                data_overrides=data_overrides,
+                handoff_overrides=handoff_overrides,
+                task_partition=resolved_task_partition,
+                task_eval_split_fraction=task_eval_split_fraction,
+                task_eval_min_rows=task_eval_min_rows,
+                verify_submissions=verify_submissions,
+                stage_name=stage_name,
+                output_dir=output_dir,
+            )
+            return collect_onpolicy_rft_runtime_batch(
+                request=request,
+                tokenizer=tokenizer,
+            )
+
         cached_result = _ONPOLICY_RFT_CACHE.get(cache_key)
         if cached_result is None:
-
-            def _collect_once() -> dict[str, Any]:
-                request = OnPolicyRFTRuntimeRequest(
-                    data_config_name=data_config_name,
-                    turn_generator_mode=turn_generator_mode,
-                    total_steps=total_steps,
-                    runtime_overrides=runtime_overrides,
-                    data_overrides=data_overrides,
-                    handoff_overrides=handoff_overrides,
-                    task_partition=task_partition,
-                    task_eval_split_fraction=task_eval_split_fraction,
-                    task_eval_min_rows=task_eval_min_rows,
-                    verify_submissions=verify_submissions,
-                    stage_name=stage_name,
-                    output_dir=output_dir,
-                )
-                return collect_onpolicy_rft_runtime_batch(
-                    request=request,
-                    tokenizer=tokenizer,
-                )
-
             collected_result = _collect_on_rank0_and_broadcast(
                 torch_module=torch,
-                collect_fn=_collect_once,
+                collect_fn=lambda: _collect_runtime_batch_for_partition(task_partition),
             )
+            if _selected_sample_count(collected_result) < 1 and train_cache_key is not None:
+                collected_result = _collect_empty_eval_fallback(
+                    torch_module=torch,
+                    train_cache_key=train_cache_key,
+                    collect_train_fn=lambda: _collect_runtime_batch_for_partition(_TASK_PARTITION_TRAIN),
+                )
             if _selected_sample_count(collected_result) < 1:
                 raise ValueError("OnPolicyRFTDataset produced zero selected rows for training.")
             _ONPOLICY_RFT_CACHE[cache_key] = collected_result
@@ -199,6 +234,27 @@ def _selected_sample_count(result: Mapping[str, Any]) -> int:
     if not isinstance(input_ids, Sequence) or isinstance(input_ids, (str, bytes)):
         return 0
     return len(input_ids)
+
+
+def _collect_empty_eval_fallback(
+    *,
+    torch_module: Any,
+    train_cache_key: str,
+    collect_train_fn: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    cached_train_result = _ONPOLICY_RFT_CACHE.get(train_cache_key)
+    if cached_train_result is not None:
+        if _selected_sample_count(cached_train_result) > 0:
+            return cached_train_result
+        _ONPOLICY_RFT_CACHE.pop(train_cache_key, None)
+
+    train_result = _collect_on_rank0_and_broadcast(
+        torch_module=torch_module,
+        collect_fn=collect_train_fn,
+    )
+    if _selected_sample_count(train_result) > 0:
+        _ONPOLICY_RFT_CACHE[train_cache_key] = train_result
+    return train_result
 
 
 def _as_rows(value: Any, *, label: str) -> list[list[int]]:
