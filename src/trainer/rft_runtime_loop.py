@@ -799,6 +799,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 task_eval_split_fraction=config.eval_split_fraction,
                 task_eval_min_rows=config.eval_min_rows,
                 verify_submissions=stage_verify_submissions,
+                stage_name=resolved_stage_name,
             )
             collect_train_start = time.monotonic()
             train_handoff = collect_onpolicy_rft_runtime_batch(
@@ -870,6 +871,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                     task_eval_split_fraction=config.eval_split_fraction,
                     task_eval_min_rows=config.eval_min_rows,
                     verify_submissions=stage_verify_submissions,
+                    stage_name=resolved_stage_name,
                 )
                 collect_eval_start = time.monotonic()
                 eval_handoff = collect_onpolicy_rft_runtime_batch(

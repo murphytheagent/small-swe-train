@@ -254,6 +254,22 @@ def test_onpolicy_collector_returns_no_rows_for_empty_eval_partition() -> None:
     assert rows == []
 
 
+def test_onpolicy_collector_uses_configured_stage_name_in_rollout_rows() -> None:
+    collector = OnPolicyRolloutCollector(
+        settings=_settings(),
+        turn_generator=lambda **_kwargs: '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: _FakePool(),
+        executor_factory=lambda _handle, _runtime: _FakeExecutor(),
+        stage_name="positive_rft",
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    assert rows[0]["stage"] == "positive_rft"
+
+
 def test_onpolicy_collector_truncates_tool_output_payload_fields() -> None:
     pool = _FakePool()
     truncation_settings = resolve_feedback_deterministic_truncation_settings()

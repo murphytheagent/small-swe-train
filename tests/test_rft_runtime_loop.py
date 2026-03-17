@@ -1705,7 +1705,9 @@ def test_run_loop_positive_stage_requests_resolved_only_selection(
         del tokenizer
         handoff = request.handoff_overrides
         assert isinstance(handoff, dict)
-        captured_requests.append((request.task_partition, request.verify_submissions, handoff))
+        captured_requests.append(
+            (request.task_partition, request.verify_submissions, request.stage_name, handoff)
+        )
         return {
             "selected_rows": [_selected_row(f"{request.task_partition}-task")],
             "rejected_rows": [],
@@ -1802,6 +1804,7 @@ def test_run_loop_positive_stage_requests_resolved_only_selection(
         (
             "train",
             True,
+            "positive_rft",
             {
                 "selection": {
                     "require_terminal": False,
@@ -1814,6 +1817,7 @@ def test_run_loop_positive_stage_requests_resolved_only_selection(
         (
             "eval",
             True,
+            "positive_rft",
             {
                 "selection": {
                     "require_terminal": False,
