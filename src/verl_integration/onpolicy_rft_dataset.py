@@ -50,6 +50,10 @@ class OnPolicyRFTDataset:
         runtime_overrides = _as_mapping(on_policy_cfg.get("runtime_overrides", {}))
         data_overrides = _as_mapping(on_policy_cfg.get("data_overrides", {}))
         handoff_overrides = _as_mapping(on_policy_cfg.get("rft_handoff_overrides", {}))
+        verify_submissions = _coerce_bool(
+            on_policy_cfg.get("verify_submissions", runtime_overrides.get("verify_submissions")),
+            fallback=False,
+        )
         output_dir_raw = on_policy_cfg.get("output_dir")
         output_dir = str(output_dir_raw).strip() if isinstance(output_dir_raw, str) and output_dir_raw.strip() else None
         parquet_file_fingerprint = _normalize_parquet_files(parquet_files)
@@ -61,6 +65,7 @@ class OnPolicyRFTDataset:
             runtime_overrides=runtime_overrides,
             data_overrides=data_overrides,
             handoff_overrides=handoff_overrides,
+            verify_submissions=verify_submissions,
             parquet_files=parquet_file_fingerprint,
             tokenizer=tokenizer,
         )
@@ -75,6 +80,7 @@ class OnPolicyRFTDataset:
                     runtime_overrides=runtime_overrides,
                     data_overrides=data_overrides,
                     handoff_overrides=handoff_overrides,
+                    verify_submissions=verify_submissions,
                     output_dir=output_dir,
                 )
                 return collect_onpolicy_rft_runtime_batch(
@@ -206,6 +212,7 @@ def _cache_key(
     runtime_overrides: Mapping[str, Any],
     data_overrides: Mapping[str, Any],
     handoff_overrides: Mapping[str, Any],
+    verify_submissions: bool,
     parquet_files: Sequence[str],
     tokenizer: Any,
 ) -> str:
@@ -216,6 +223,7 @@ def _cache_key(
         "runtime_overrides": _normalize_mapping(runtime_overrides),
         "data_overrides": _normalize_mapping(data_overrides),
         "handoff_overrides": _normalize_mapping(handoff_overrides),
+        "verify_submissions": bool(verify_submissions),
         "parquet_files": [str(path) for path in parquet_files],
         "tokenizer_fingerprint": _tokenizer_cache_fingerprint(tokenizer),
     }

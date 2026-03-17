@@ -439,6 +439,28 @@ def test_run_rft_script_runtime_loop_trainer_overrides_hydra_resolve() -> None:
     )
 
 
+def test_run_rft_script_dry_run_propagates_positive_stage_to_loop_runtime() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        env_overrides={"RFT_STAGE_NAME": "positive_rft"},
+    )
+    assert "stage_name=positive_rft" in result.stdout
+
+
+def test_run_rft_script_dry_run_direct_mode_wires_positive_selection_overrides() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        env_overrides={
+            "RFT_RUNTIME_MODE": "direct",
+            "RFT_STAGE_NAME": "positive_rft",
+            "NPROC_PER_NODE": "1",
+        },
+    )
+    assert "+data.on_policy.runtime_overrides.verify_submissions=true" in result.stdout
+    assert "+data.on_policy.rft_handoff_overrides.selection.require_resolved=true" in result.stdout
+    assert "+data.on_policy.rft_handoff_overrides.selection.require_format_valid=false" in result.stdout
+
+
 def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
     expected_tp, expected_dp = config.resolve_rft_vllm_parallel_defaults(nproc_per_node=8)
     result = _run_script(

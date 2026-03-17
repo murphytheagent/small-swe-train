@@ -18,9 +18,11 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
 ) -> None:
     fake_collector = object()
     captured_turn_generator = {"fn": None}
+    captured_collector_kwargs: dict[str, object] = {}
 
     def fake_build_onpolicy_collector(**kwargs):
         captured_turn_generator["fn"] = kwargs.get("turn_generator")
+        captured_collector_kwargs.update(kwargs)
         return fake_collector
 
     def fake_collect_rft_sft_batch_for_steps(
@@ -66,6 +68,10 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
         data_overrides={"dataset_split": "train"},
         handoff_overrides={"require_resolved": True},
         output_dir=str(tmp_path),
+        task_partition="eval",
+        task_eval_split_fraction=0.25,
+        task_eval_min_rows=2,
+        verify_submissions=True,
     )
     result = collect_onpolicy_rft_runtime_batch(
         request=request,
@@ -73,6 +79,10 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
     )
 
     assert len(result["selected_rows"]) == 1
+    assert captured_collector_kwargs["task_partition"] == "eval"
+    assert captured_collector_kwargs["task_eval_split_fraction"] == 0.25
+    assert captured_collector_kwargs["task_eval_min_rows"] == 2
+    assert captured_collector_kwargs["runtime_overrides"] == {"task_batch_size": 2, "verify_submissions": True}
     turn_generator = captured_turn_generator["fn"]
     assert callable(turn_generator)
     submit_turn = turn_generator(
@@ -88,6 +98,10 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
     manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest_payload["total_steps"] == 2
     assert manifest_payload["start_step_index"] == 3
+    assert manifest_payload["task_partition"] == "eval"
+    assert manifest_payload["task_eval_split_fraction"] == 0.25
+    assert manifest_payload["task_eval_min_rows"] == 2
+    assert manifest_payload["verify_submissions"] is True
     assert manifest_payload["rollout_count"] == 2
     assert manifest_payload["selected_count"] == 1
     assert manifest_payload["rejected_count"] == 1

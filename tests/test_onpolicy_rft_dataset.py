@@ -35,6 +35,7 @@ def _build_key(tokenizer: object) -> str:
         runtime_overrides={"seed": 11},
         data_overrides={"task_batch_size": 8},
         handoff_overrides={"selection_policy": "terminal_valid"},
+        verify_submissions=False,
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -111,6 +112,7 @@ def test_cache_key_includes_parquet_split_fingerprint() -> None:
         runtime_overrides={"seed": 11},
         data_overrides={"task_batch_size": 8},
         handoff_overrides={"selection_policy": "terminal_valid"},
+        verify_submissions=False,
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -121,6 +123,7 @@ def test_cache_key_includes_parquet_split_fingerprint() -> None:
         runtime_overrides={"seed": 11},
         data_overrides={"task_batch_size": 8},
         handoff_overrides={"selection_policy": "terminal_valid"},
+        verify_submissions=False,
         parquet_files=["/tmp/val.parquet"],
         tokenizer=tokenizer,
     )
@@ -202,6 +205,7 @@ def test_onpolicy_dataset_evicts_stale_empty_cache_entry(
         runtime_overrides={},
         data_overrides={},
         handoff_overrides={},
+        verify_submissions=False,
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -226,3 +230,31 @@ def test_onpolicy_dataset_evicts_stale_empty_cache_entry(
 
     assert key not in dataset_module._ONPOLICY_RFT_CACHE
     assert calls["count"] == 0
+
+
+def test_onpolicy_dataset_forwards_verify_submissions_from_runtime_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests = []
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        return _runtime_result(1)
+
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_module())
+    monkeypatch.setattr(dataset_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+
+    dataset_module.OnPolicyRFTDataset(
+        parquet_files=["/tmp/train.parquet"],
+        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+        config={
+            "on_policy": {
+                "enabled": True,
+                "runtime_overrides": {"verify_submissions": True},
+            }
+        },
+    )
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0].verify_submissions is True

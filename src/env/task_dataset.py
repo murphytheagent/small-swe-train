@@ -22,6 +22,19 @@ SDPO_TASK_ROWS_SCHEMA_VERSION = 3
 ON_POLICY_BAD_TASK_CACHE_SCHEMA_VERSION = 1
 _BAD_TASK_CACHE_PATH_ENV = "SMALL_SWE_BAD_TASK_CACHE_PATH"
 _BAD_TASK_CACHE_DIR_ENV = "SMALL_SWE_BAD_TASK_CACHE_DIR"
+_TASK_PARTITION_ALL = "all"
+_TASK_PARTITION_TRAIN = "train"
+_TASK_PARTITION_EVAL = "eval"
+_TASK_PARTITION_ALIASES = {
+    "": _TASK_PARTITION_ALL,
+    _TASK_PARTITION_ALL: _TASK_PARTITION_ALL,
+    _TASK_PARTITION_TRAIN: _TASK_PARTITION_TRAIN,
+    _TASK_PARTITION_EVAL: _TASK_PARTITION_EVAL,
+    "heldout": _TASK_PARTITION_EVAL,
+    "held_out": _TASK_PARTITION_EVAL,
+    "val": _TASK_PARTITION_EVAL,
+    "validation": _TASK_PARTITION_EVAL,
+}
 
 
 @dataclass(frozen=True)
@@ -397,6 +410,9 @@ def load_task_batch(
     batch_size: int,
     config: OnPolicyDataConfig,
     dataset_loader: DatasetLoader | None = None,
+    task_partition: str = _TASK_PARTITION_ALL,
+    eval_split_fraction: float = 0.0,
+    min_eval_rows: int = 0,
 ) -> list[TaskSample]:
     """Load a deterministic on-policy task batch for a given global step."""
     if step_index < 0:
@@ -404,19 +420,36 @@ def load_task_batch(
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
 
+    normalized_partition = _normalize_task_partition(task_partition)
     task_pool = _load_task_pool(config=config, dataset_loader=dataset_loader)
-    if len(task_pool.tasks) < batch_size:
+    tasks = list(task_pool.tasks)
+    if normalized_partition != _TASK_PARTITION_ALL:
+        train_tasks, eval_tasks = split_task_samples_for_eval(
+            tasks,
+            eval_split_fraction=eval_split_fraction,
+            min_eval_rows=min_eval_rows,
+        )
+        tasks = train_tasks if normalized_partition == _TASK_PARTITION_TRAIN else eval_tasks
+
+    if not tasks or (normalized_partition == _TASK_PARTITION_ALL and len(tasks) < batch_size):
         detail = task_pool.last_error if task_pool.last_error else "no valid rows found"
+        partition_detail = (
+            f" in task partition {normalized_partition!r}"
+            if normalized_partition != _TASK_PARTITION_ALL
+            else ""
+        )
         raise ValueError(
             f"Unable to build task batch of size {batch_size} from "
-            f"{config.dataset_id!r}:{config.dataset_split!r}. "
-            f"Collected {len(task_pool.tasks)} valid rows after scanning {task_pool.scanned_rows}. "
+            f"{config.dataset_id!r}:{config.dataset_split!r}{partition_detail}. "
+            f"Collected {len(tasks)} valid rows after scanning {task_pool.scanned_rows}. "
             f"Last validation error: {detail}"
         )
 
-    start = (step_index * batch_size) % len(task_pool.tasks)
+    # Held-out train/eval partitions can be intentionally smaller than the collector width.
+    # Keep them usable by reusing the deterministic partition with wraparound.
+    start = (step_index * batch_size) % len(tasks)
     samples = [
-        task_pool.tasks[(start + offset) % len(task_pool.tasks)]
+        tasks[(start + offset) % len(tasks)]
         for offset in range(batch_size)
     ]
     return list(samples)
@@ -690,9 +723,63 @@ def _slugify_for_filename(value: str) -> str:
     return "dataset"
 
 
+def split_task_samples_for_eval(
+    tasks: Sequence[TaskSample],
+    *,
+    eval_split_fraction: float,
+    min_eval_rows: int,
+) -> tuple[list[TaskSample], list[TaskSample]]:
+    """Split valid task samples into deterministic train/eval partitions."""
+    if eval_split_fraction < 0.0 or eval_split_fraction >= 1.0:
+        raise ValueError("eval_split_fraction must be in [0.0, 1.0).")
+    if min_eval_rows < 0:
+        raise ValueError("min_eval_rows must be >= 0.")
+
+    copied_tasks = list(tasks)
+    total = len(copied_tasks)
+    if total < 1:
+        raise ValueError("tasks must be non-empty.")
+
+    max_eval_rows = total - 1
+    if max_eval_rows < 1 or eval_split_fraction <= 0.0:
+        return copied_tasks, []
+
+    eval_rows_target = int(total * eval_split_fraction)
+    eval_rows_target = max(eval_rows_target, min_eval_rows)
+    eval_rows_target = min(eval_rows_target, max_eval_rows)
+    if eval_rows_target < 1:
+        return copied_tasks, []
+
+    ranked_indexes = sorted(
+        range(total),
+        key=lambda row_index: _stable_split_token(
+            task_id=copied_tasks[row_index].task_id,
+            image_name=copied_tasks[row_index].image_name,
+            row_index=row_index,
+        ),
+    )
+    eval_indexes = set(ranked_indexes[:eval_rows_target])
+
+    train_tasks: list[TaskSample] = []
+    eval_tasks: list[TaskSample] = []
+    for row_index, task in enumerate(copied_tasks):
+        if row_index in eval_indexes:
+            eval_tasks.append(task)
+        else:
+            train_tasks.append(task)
+
+    if not train_tasks:
+        train_tasks.append(eval_tasks.pop())
+    return train_tasks, eval_tasks
+
+
 def _stable_split_rank(row: Mapping[str, Any], *, row_index: int) -> str:
     task_id = str(row.get("task_id", "")).strip()
     image_name = str(row.get("image_name", "")).strip()
+    return _stable_split_token(task_id=task_id, image_name=image_name, row_index=row_index)
+
+
+def _stable_split_token(*, task_id: str, image_name: str, row_index: int) -> str:
     token = f"{task_id}|{image_name}|{row_index}"
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -705,3 +792,11 @@ def _coerce_sdpo_prompt_char_limit(value: int | None) -> int | None:
     if isinstance(value, int) and value >= 1:
         return int(value)
     raise ValueError("max_problem_statement_chars must be an integer >= 1 or null.")
+
+
+def _normalize_task_partition(value: str) -> str:
+    normalized = str(value).strip().lower()
+    partition = _TASK_PARTITION_ALIASES.get(normalized)
+    if partition is None:
+        raise ValueError("task_partition must be one of: all, train, eval.")
+    return partition

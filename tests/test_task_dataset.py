@@ -15,6 +15,7 @@ from env.task_dataset import (
     resolve_on_policy_bad_task_cache_path,
     resolve_sdpo_task_rows_cache_path,
     resolve_sdpo_task_split_cache_paths,
+    split_task_samples_for_eval,
     split_sdpo_task_rows_for_eval,
 )
 from prompts.runtime_messages import build_onpolicy_initial_user_message
@@ -67,6 +68,108 @@ def test_load_task_batch_is_step_deterministic_with_wraparound() -> None:
 
     assert [sample.task_id for sample in batch] == ["task-2", "task-0"]
     assert batch[0].problem_statement == "p2"
+
+
+def test_split_task_samples_for_eval_is_deterministic() -> None:
+    rows = [
+        {
+            "task_id": f"task-{index}",
+            "image_name": f"img:{index}",
+            "problem_statement": f"p{index}",
+            "FAIL_TO_PASS": [f"f{index}"],
+            "PASS_TO_PASS": [f"p{index}"],
+        }
+        for index in range(4)
+    ]
+    tasks = [
+        load_task_batch(
+            step_index=index,
+            batch_size=1,
+            config=_config(),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )[0]
+        for index in range(4)
+    ]
+
+    train_a, eval_a = split_task_samples_for_eval(
+        tasks,
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+    train_b, eval_b = split_task_samples_for_eval(
+        tasks,
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    assert [task.task_id for task in train_a] == [task.task_id for task in train_b]
+    assert [task.task_id for task in eval_a] == [task.task_id for task in eval_b]
+    assert train_a
+    assert eval_a
+
+
+def test_load_task_batch_supports_deterministic_train_eval_partitions() -> None:
+    rows = [
+        {
+            "task_id": f"task-{index}",
+            "image_name": f"img:{index}",
+            "problem_statement": f"p{index}",
+            "FAIL_TO_PASS": [f"f{index}"],
+            "PASS_TO_PASS": [f"p{index}"],
+        }
+        for index in range(4)
+    ]
+
+    train_batch = load_task_batch(
+        step_index=0,
+        batch_size=3,
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="train",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+    eval_batch = load_task_batch(
+        step_index=0,
+        batch_size=1,
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="eval",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    assert len(train_batch) == 3
+    assert len(eval_batch) == 1
+    assert {sample.task_id for sample in train_batch}.isdisjoint(
+        {sample.task_id for sample in eval_batch}
+    )
+
+
+def test_load_task_batch_wraps_partitioned_batches_when_heldout_split_is_smaller_than_batch() -> None:
+    rows = [
+        {
+            "task_id": f"task-{index}",
+            "image_name": f"img:{index}",
+            "problem_statement": f"p{index}",
+            "FAIL_TO_PASS": [f"f{index}"],
+            "PASS_TO_PASS": [f"p{index}"],
+        }
+        for index in range(4)
+    ]
+
+    eval_batch = load_task_batch(
+        step_index=0,
+        batch_size=3,
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="eval",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    assert len(eval_batch) == 3
+    assert len({sample.task_id for sample in eval_batch}) == 1
 
 
 def test_load_task_batch_rejects_missing_required_columns() -> None:

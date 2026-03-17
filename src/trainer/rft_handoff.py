@@ -35,6 +35,9 @@ def build_onpolicy_collector(
     data_config_name: str = DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
     runtime_overrides: Mapping[str, Any] | None = None,
     data_overrides: Mapping[str, Any] | None = None,
+    task_partition: str = "all",
+    task_eval_split_fraction: float = 0.0,
+    task_eval_min_rows: int = 0,
     dataset_loader: DatasetLoader | None = None,
     pool_factory: PoolFactory | None = None,
     executor_factory: ExecutorFactory | None = None,
@@ -53,6 +56,9 @@ def build_onpolicy_collector(
         pool_factory=pool_factory,
         executor_factory=executor_factory,
         attempt_resolver=attempt_resolver,
+        task_partition=task_partition,
+        task_eval_split_fraction=task_eval_split_fraction,
+        task_eval_min_rows=task_eval_min_rows,
     )
 
 

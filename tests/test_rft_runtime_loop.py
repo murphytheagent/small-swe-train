@@ -1367,6 +1367,8 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     write_calls: list[tuple[str, int]] = []
+    request_partitions: list[str] = []
+    request_partitions: list[str] = []
 
     def _selected_row(task_id: str) -> dict[str, object]:
         return {
@@ -1391,13 +1393,21 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
     def _fake_collect(*, request, tokenizer):
         del tokenizer
         assert request.start_step_index == 0
+        request_partitions.append(request.task_partition)
+        assert request.task_eval_split_fraction == 0.25
+        assert request.task_eval_min_rows == 1
+        if request.task_partition == "train":
+            return {
+                "selected_rows": [
+                    _selected_row("task-1"),
+                    _selected_row("task-2"),
+                    _selected_row("task-3"),
+                ],
+                "rejected_rows": [],
+            }
+        assert request.task_partition == "eval"
         return {
-            "selected_rows": [
-                _selected_row("task-1"),
-                _selected_row("task-2"),
-                _selected_row("task-3"),
-                _selected_row("task-4"),
-            ],
+            "selected_rows": [_selected_row("task-4")],
             "rejected_rows": [],
         }
 
@@ -1490,16 +1500,18 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
 
     rft_runtime_loop.run_rft_runtime_loop(config)
 
+    assert request_partitions == ["train", "eval"]
     assert write_calls == [
         ("accepted_trajectories.parquet", 3),
         ("accepted_trajectories_eval.parquet", 1),
     ]
     summary_path = config.output_dir / "rft_step_00000" / "rft_step_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    assert summary["selected_count_raw"] == 4
+    assert summary["selected_count_raw"] == 3
     assert summary["selected_count_for_train_raw"] == 3
     assert summary["selected_count_for_train"] == 3
     assert summary["selected_count_for_eval"] == 1
+    assert summary["eval_selected_count_raw"] == 1
     assert summary["eval_split_fallback_to_train"] is False
     assert summary["eval_parquet"].endswith("accepted_trajectories_eval.parquet")
 
@@ -1509,6 +1521,7 @@ def test_run_loop_upsamples_eval_rows_to_effective_batch_multiple(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     write_calls: list[tuple[str, int]] = []
+    request_partitions: list[str] = []
 
     def _selected_row(task_id: str) -> dict[str, object]:
         return {
@@ -1533,14 +1546,22 @@ def test_run_loop_upsamples_eval_rows_to_effective_batch_multiple(
     def _fake_collect(*, request, tokenizer):
         del tokenizer
         assert request.start_step_index == 0
+        request_partitions.append(request.task_partition)
+        assert request.task_eval_split_fraction == 0.2
+        assert request.task_eval_min_rows == 1
+        if request.task_partition == "train":
+            return {
+                "selected_rows": [
+                    _selected_row("task-1"),
+                    _selected_row("task-2"),
+                    _selected_row("task-3"),
+                    _selected_row("task-4"),
+                ],
+                "rejected_rows": [],
+            }
+        assert request.task_partition == "eval"
         return {
-            "selected_rows": [
-                _selected_row("task-1"),
-                _selected_row("task-2"),
-                _selected_row("task-3"),
-                _selected_row("task-4"),
-                _selected_row("task-5"),
-            ],
+            "selected_rows": [_selected_row("task-5")],
             "rejected_rows": [],
         }
 
@@ -1635,21 +1656,185 @@ def test_run_loop_upsamples_eval_rows_to_effective_batch_multiple(
 
     rft_runtime_loop.run_rft_runtime_loop(config)
 
+    assert request_partitions == ["train", "eval"]
     assert write_calls == [
         ("accepted_trajectories.parquet", 4),
         ("accepted_trajectories_eval.parquet", 2),
     ]
     summary_path = config.output_dir / "rft_step_00000" / "rft_step_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    assert summary["selected_count_raw"] == 5
+    assert summary["selected_count_raw"] == 4
     assert summary["selected_count_for_train_raw"] == 4
     assert summary["selected_count_for_train"] == 4
     assert summary["selected_rows_upsampled"] == 0
     assert summary["selected_count_for_eval_raw"] == 1
     assert summary["selected_count_for_eval"] == 2
+    assert summary["eval_selected_count_raw"] == 1
     assert summary["selected_rows_eval_upsampled"] == 1
     assert summary["effective_eval_batch_size"] == 2
     assert summary["eval_split_fallback_to_train"] is False
+
+
+def test_run_loop_positive_stage_requests_resolved_only_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests: list[tuple[str, bool, dict[str, object] | None]] = []
+
+    def _selected_row(task_id: str) -> dict[str, object]:
+        return {
+            "task_id": task_id,
+            "attempt_index": 0,
+            "step_index": 0,
+            "turn_index": 0,
+            "resolved": True,
+            "format_valid": False,
+            "final_turn_has_submit": True,
+            "final_submit_format_valid": False,
+            "prompt": "Fix bug",
+            "assistant_response": "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>",
+            "trajectory_history": [
+                "<tool_call>{\"tool\":\"submit\",\"args\":{\"final_response\":\"done\"}}</tool_call>"
+            ],
+        }
+
+    def _fake_load_tokenizer(_model_path: str):
+        return _StubTokenizer()
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        handoff = request.handoff_overrides
+        assert isinstance(handoff, dict)
+        captured_requests.append((request.task_partition, request.verify_submissions, handoff))
+        return {
+            "selected_rows": [_selected_row(f"{request.task_partition}-task")],
+            "rejected_rows": [],
+        }
+
+    def _fake_write_selected_rows(rows, parquet_path: Path):
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        parquet_path.write_text("stub", encoding="utf-8")
+        return len(rows)
+
+    def _fake_build_trainer_step_command(**kwargs):
+        trainer_output_dir = Path(kwargs["trainer_output_dir"])
+        return ["fake-trainer", str(trainer_output_dir)]
+
+    def _fake_run_command(command, *, cwd: Path):
+        del cwd
+        trainer_output_dir = Path(command[1])
+        (trainer_output_dir / "global_step_1" / "huggingface").mkdir(parents=True, exist_ok=True)
+
+    def _fake_resolve_latest_hf_checkpoint(checkpoint_root: Path):
+        target = Path(checkpoint_root) / "global_step_1" / "huggingface"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    monkeypatch.setattr(rft_runtime_loop, "_load_tokenizer", _fake_load_tokenizer)
+    monkeypatch.setattr(rft_runtime_loop, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "write_selected_rows_to_multiturn_parquet",
+        _fake_write_selected_rows,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "build_trainer_step_command",
+        _fake_build_trainer_step_command,
+    )
+    monkeypatch.setattr(rft_runtime_loop, "_run_command", _fake_run_command)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "resolve_latest_hf_checkpoint",
+        _fake_resolve_latest_hf_checkpoint,
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_global_step_checkpoints",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_step_checkpoints",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "prune_old_step_payloads",
+        lambda **_kwargs: [],
+    )
+
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=1,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=1,
+        train_batch_size=1,
+        output_dir=tmp_path / "runtime",
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=False,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+        eval_split_fraction=0.25,
+        eval_min_rows=1,
+        stage_name="positive_rft",
+    )
+
+    rft_runtime_loop.run_rft_runtime_loop(config)
+
+    assert captured_requests == [
+        (
+            "train",
+            True,
+            {
+                "selection": {
+                    "require_terminal": False,
+                    "require_format_valid": False,
+                    "require_resolved": True,
+                    "reject_on_invalid_final_submit": False,
+                }
+            },
+        ),
+        (
+            "eval",
+            True,
+            {
+                "selection": {
+                    "require_terminal": False,
+                    "require_format_valid": False,
+                    "require_resolved": True,
+                    "reject_on_invalid_final_submit": False,
+                }
+            },
+        ),
+    ]
+    summary_path = config.output_dir / "rft_step_00000" / "rft_step_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["stage"] == "positive_rft"
+    assert summary["selection_contract"] == {
+        "mode": "positive_rft",
+        "require_terminal": False,
+        "require_format_valid": False,
+        "require_resolved": True,
+        "reject_on_invalid_final_submit": False,
+    }
+    assert summary["correctness_contract"] == "verifier"
 
 
 def test_prune_old_global_step_checkpoints_keeps_latest_steps(tmp_path: Path) -> None:
@@ -1847,6 +2032,36 @@ def test_split_selected_rows_for_eval_disables_holdout_when_fraction_is_zero() -
     )
     assert len(train_rows) == 2
     assert eval_rows == []
+
+
+def test_resolve_rft_stage_helpers_cover_format_and_positive_modes() -> None:
+    assert rft_runtime_loop.resolve_rft_stage_name("format") == "format_rft"
+    assert rft_runtime_loop.resolve_rft_stage_name("positive") == "positive_rft"
+    assert rft_runtime_loop.resolve_rft_stage_verify_submissions("format_rft") is False
+    assert rft_runtime_loop.resolve_rft_stage_verify_submissions("positive_rft") is True
+    assert rft_runtime_loop.resolve_rft_stage_selection_contract("format_rft") == {
+        "mode": "format_first_rft",
+        "require_terminal": True,
+        "require_format_valid": True,
+    }
+    assert rft_runtime_loop.resolve_rft_stage_selection_contract("positive_rft") == {
+        "mode": "positive_rft",
+        "require_terminal": False,
+        "require_format_valid": False,
+        "require_resolved": True,
+        "reject_on_invalid_final_submit": False,
+    }
+    assert rft_runtime_loop.resolve_rft_stage_correctness_contract("format_rft") == "heuristic"
+    assert rft_runtime_loop.resolve_rft_stage_correctness_contract("positive_rft") == "verifier"
+    assert rft_runtime_loop.resolve_rft_stage_handoff_overrides("format_rft") == {}
+    assert rft_runtime_loop.resolve_rft_stage_handoff_overrides("positive_rft") == {
+        "selection": {
+            "require_terminal": False,
+            "require_format_valid": False,
+            "require_resolved": True,
+            "reject_on_invalid_final_submit": False,
+        }
+    }
 
 
 def test_resolve_micro_batch_size_per_gpu_prefers_override(tmp_path: Path) -> None:
