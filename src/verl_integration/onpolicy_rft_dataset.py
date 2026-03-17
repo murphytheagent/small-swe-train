@@ -343,6 +343,17 @@ def _resolve_task_partition(
 
     normalized_train_files = _normalize_parquet_files(train_files)
     normalized_val_files = _normalize_parquet_files(val_files)
+    if (
+        parquet_files
+        and normalized_train_files
+        and normalized_train_files == normalized_val_files
+        and parquet_files == normalized_train_files
+    ):
+        raise ValueError(
+            "data.train_files and data.val_files must differ when "
+            "data.on_policy.task_eval_split_fraction > 0 unless "
+            "data.on_policy.task_partition is set explicitly."
+        )
     if parquet_files and parquet_files == normalized_val_files and normalized_val_files:
         return _TASK_PARTITION_EVAL
     if parquet_files and parquet_files == normalized_train_files and normalized_train_files:

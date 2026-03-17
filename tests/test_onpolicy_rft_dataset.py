@@ -387,3 +387,54 @@ def test_onpolicy_dataset_routes_train_and_eval_partitions_from_dataset_paths(
     assert captured_requests[1].task_partition == "eval"
     assert captured_requests[1].task_eval_split_fraction == 0.25
     assert captured_requests[1].task_eval_min_rows == 2
+
+
+def test_onpolicy_dataset_rejects_ambiguous_identical_train_and_val_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_module())
+
+    with pytest.raises(ValueError, match="data.train_files and data.val_files must differ"):
+        dataset_module.OnPolicyRFTDataset(
+            parquet_files=["/tmp/onpolicy-rft-shared.parquet"],
+            tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+            config={
+                "train_files": "/tmp/onpolicy-rft-shared.parquet",
+                "val_files": "/tmp/onpolicy-rft-shared.parquet",
+                "on_policy": {
+                    "enabled": True,
+                    "task_eval_split_fraction": 0.25,
+                },
+            },
+        )
+
+
+def test_onpolicy_dataset_explicit_partition_overrides_identical_dataset_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests = []
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        return _runtime_result(1)
+
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_module())
+    monkeypatch.setattr(dataset_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+
+    dataset_module.OnPolicyRFTDataset(
+        parquet_files=["/tmp/onpolicy-rft-shared.parquet"],
+        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+        config={
+            "train_files": "/tmp/onpolicy-rft-shared.parquet",
+            "val_files": "/tmp/onpolicy-rft-shared.parquet",
+            "on_policy": {
+                "enabled": True,
+                "task_partition": "eval",
+                "task_eval_split_fraction": 0.25,
+            },
+        },
+    )
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0].task_partition == "eval"
