@@ -37,6 +37,9 @@ def _build_key(tokenizer: object) -> str:
         handoff_overrides={"selection_policy": "terminal_valid"},
         verify_submissions=False,
         stage_name="format_rft",
+        task_partition="all",
+        task_eval_split_fraction=0.0,
+        task_eval_min_rows=0,
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -115,6 +118,9 @@ def test_cache_key_includes_parquet_split_fingerprint() -> None:
         handoff_overrides={"selection_policy": "terminal_valid"},
         verify_submissions=False,
         stage_name="format_rft",
+        task_partition="train",
+        task_eval_split_fraction=0.25,
+        task_eval_min_rows=1,
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -127,6 +133,9 @@ def test_cache_key_includes_parquet_split_fingerprint() -> None:
         handoff_overrides={"selection_policy": "terminal_valid"},
         verify_submissions=False,
         stage_name="format_rft",
+        task_partition="eval",
+        task_eval_split_fraction=0.25,
+        task_eval_min_rows=1,
         parquet_files=["/tmp/val.parquet"],
         tokenizer=tokenizer,
     )
@@ -210,6 +219,9 @@ def test_onpolicy_dataset_evicts_stale_empty_cache_entry(
         handoff_overrides={},
         verify_submissions=False,
         stage_name="format_rft",
+        task_partition="all",
+        task_eval_split_fraction=0.0,
+        task_eval_min_rows=0,
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -290,3 +302,88 @@ def test_onpolicy_dataset_forwards_stage_name(
 
     assert len(captured_requests) == 1
     assert captured_requests[0].stage_name == "positive_rft"
+
+
+def test_onpolicy_dataset_positive_stage_derives_runtime_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests = []
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        return _runtime_result(1)
+
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_module())
+    monkeypatch.setattr(dataset_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+
+    dataset_module.OnPolicyRFTDataset(
+        parquet_files=["/tmp/train.parquet"],
+        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+        config={
+            "on_policy": {
+                "enabled": True,
+                "stage_name": "positive_rft",
+                "rft_handoff_overrides": {
+                    "selection": {
+                        "require_terminal": True,
+                        "require_resolved": False,
+                    }
+                },
+            }
+        },
+    )
+
+    assert len(captured_requests) == 1
+    request = captured_requests[0]
+    assert request.stage_name == "positive_rft"
+    assert request.verify_submissions is True
+    assert request.handoff_overrides["selection"] == {
+        "require_terminal": False,
+        "require_format_valid": False,
+        "require_resolved": True,
+        "reject_on_invalid_final_submit": False,
+    }
+
+
+def test_onpolicy_dataset_routes_train_and_eval_partitions_from_dataset_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests = []
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        return _runtime_result(1)
+
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_module())
+    monkeypatch.setattr(dataset_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+
+    config = {
+        "train_files": "/tmp/onpolicy-rft-train.parquet",
+        "val_files": "/tmp/onpolicy-rft-val.parquet",
+        "on_policy": {
+            "enabled": True,
+            "task_eval_split_fraction": 0.25,
+            "task_eval_min_rows": 2,
+        },
+    }
+
+    dataset_module.OnPolicyRFTDataset(
+        parquet_files=["/tmp/onpolicy-rft-train.parquet"],
+        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+        config=config,
+    )
+    dataset_module.OnPolicyRFTDataset(
+        parquet_files=["/tmp/onpolicy-rft-val.parquet"],
+        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+        config=config,
+    )
+
+    assert len(captured_requests) == 2
+    assert captured_requests[0].task_partition == "train"
+    assert captured_requests[0].task_eval_split_fraction == 0.25
+    assert captured_requests[0].task_eval_min_rows == 2
+    assert captured_requests[1].task_partition == "eval"
+    assert captured_requests[1].task_eval_split_fraction == 0.25
+    assert captured_requests[1].task_eval_min_rows == 2

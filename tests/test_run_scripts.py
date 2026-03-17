@@ -462,6 +462,20 @@ def test_run_rft_script_dry_run_direct_mode_wires_positive_selection_overrides()
     assert "+data.on_policy.rft_handoff_overrides.selection.require_format_valid=false" in result.stdout
 
 
+def test_run_rft_script_dry_run_direct_mode_propagates_task_holdout_settings() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        env_overrides={
+            "RFT_RUNTIME_MODE": "direct",
+            "RFT_EVAL_SPLIT_FRACTION": "0.25",
+            "RFT_EVAL_MIN_ROWS": "2",
+            "NPROC_PER_NODE": "1",
+        },
+    )
+    assert "+data.on_policy.task_eval_split_fraction=0.25" in result.stdout
+    assert "+data.on_policy.task_eval_min_rows=2" in result.stdout
+
+
 def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
     expected_tp, expected_dp = config.resolve_rft_vllm_parallel_defaults(nproc_per_node=8)
     result = _run_script(

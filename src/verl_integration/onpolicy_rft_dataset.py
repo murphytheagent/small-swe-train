@@ -15,6 +15,21 @@ from trainer.rft_runtime import (
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 _ONPOLICY_RFT_CACHE: dict[str, dict[str, Any]] = {}
+_FORMAT_RFT_STAGE_NAME = "format_rft"
+_POSITIVE_RFT_STAGE_NAME = "positive_rft"
+_TASK_PARTITION_ALL = "all"
+_TASK_PARTITION_TRAIN = "train"
+_TASK_PARTITION_EVAL = "eval"
+_TASK_PARTITION_ALIASES = {
+    "": _TASK_PARTITION_ALL,
+    _TASK_PARTITION_ALL: _TASK_PARTITION_ALL,
+    _TASK_PARTITION_TRAIN: _TASK_PARTITION_TRAIN,
+    _TASK_PARTITION_EVAL: _TASK_PARTITION_EVAL,
+    "heldout": _TASK_PARTITION_EVAL,
+    "held_out": _TASK_PARTITION_EVAL,
+    "val": _TASK_PARTITION_EVAL,
+    "validation": _TASK_PARTITION_EVAL,
+}
 
 
 class OnPolicyRFTDataset:
@@ -50,14 +65,33 @@ class OnPolicyRFTDataset:
         runtime_overrides = _as_mapping(on_policy_cfg.get("runtime_overrides", {}))
         data_overrides = _as_mapping(on_policy_cfg.get("data_overrides", {}))
         handoff_overrides = _as_mapping(on_policy_cfg.get("rft_handoff_overrides", {}))
+        stage_name = _resolve_stage_name(on_policy_cfg.get("stage_name", _FORMAT_RFT_STAGE_NAME))
+        handoff_overrides = _merge_stage_handoff_overrides(
+            handoff_overrides=handoff_overrides,
+            stage_name=stage_name,
+        )
         verify_submissions = _coerce_bool(
             on_policy_cfg.get("verify_submissions", runtime_overrides.get("verify_submissions")),
             fallback=False,
+        ) or _resolve_stage_verify_submissions(stage_name)
+        task_eval_split_fraction = _coerce_fraction(
+            on_policy_cfg.get("task_eval_split_fraction", 0.0),
+            label="data.on_policy.task_eval_split_fraction",
         )
-        stage_name = str(on_policy_cfg.get("stage_name", "format_rft")).strip() or "format_rft"
+        task_eval_min_rows = _coerce_non_negative_int(
+            on_policy_cfg.get("task_eval_min_rows", 0),
+            label="data.on_policy.task_eval_min_rows",
+        )
         output_dir_raw = on_policy_cfg.get("output_dir")
         output_dir = str(output_dir_raw).strip() if isinstance(output_dir_raw, str) and output_dir_raw.strip() else None
         parquet_file_fingerprint = _normalize_parquet_files(parquet_files)
+        task_partition = _resolve_task_partition(
+            explicit_partition=on_policy_cfg.get("task_partition"),
+            parquet_files=parquet_file_fingerprint,
+            train_files=config_mapping.get("train_files"),
+            val_files=config_mapping.get("val_files"),
+            task_eval_split_fraction=task_eval_split_fraction,
+        )
 
         cache_key = _cache_key(
             data_config_name=data_config_name,
@@ -68,6 +102,9 @@ class OnPolicyRFTDataset:
             handoff_overrides=handoff_overrides,
             verify_submissions=verify_submissions,
             stage_name=stage_name,
+            task_partition=task_partition,
+            task_eval_split_fraction=task_eval_split_fraction,
+            task_eval_min_rows=task_eval_min_rows,
             parquet_files=parquet_file_fingerprint,
             tokenizer=tokenizer,
         )
@@ -82,6 +119,9 @@ class OnPolicyRFTDataset:
                     runtime_overrides=runtime_overrides,
                     data_overrides=data_overrides,
                     handoff_overrides=handoff_overrides,
+                    task_partition=task_partition,
+                    task_eval_split_fraction=task_eval_split_fraction,
+                    task_eval_min_rows=task_eval_min_rows,
                     verify_submissions=verify_submissions,
                     stage_name=stage_name,
                     output_dir=output_dir,
@@ -207,6 +247,117 @@ def _coerce_positive_int(value: Any, *, label: str) -> int:
     raise ValueError(f"{label} must be an integer >= 1.")
 
 
+def _coerce_non_negative_int(value: Any, *, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be an integer >= 0.")
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            try:
+                parsed = int(stripped)
+            except ValueError as exc:
+                raise ValueError(f"{label} must be an integer >= 0.") from exc
+            if parsed >= 0:
+                return parsed
+    raise ValueError(f"{label} must be an integer >= 0.")
+
+
+def _coerce_fraction(value: Any, *, label: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must satisfy 0.0 <= value < 1.0.")
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return 0.0
+        try:
+            parsed = float(stripped)
+        except ValueError as exc:
+            raise ValueError(f"{label} must satisfy 0.0 <= value < 1.0.") from exc
+    else:
+        raise ValueError(f"{label} must satisfy 0.0 <= value < 1.0.")
+    if parsed < 0.0 or parsed >= 1.0:
+        raise ValueError(f"{label} must satisfy 0.0 <= value < 1.0.")
+    return parsed
+
+
+def _resolve_stage_name(value: Any) -> str:
+    normalized = str(value).strip().lower()
+    if normalized in {"", "default", "format", _FORMAT_RFT_STAGE_NAME}:
+        return _FORMAT_RFT_STAGE_NAME
+    if normalized in {"positive", _POSITIVE_RFT_STAGE_NAME}:
+        return _POSITIVE_RFT_STAGE_NAME
+    raise ValueError("data.on_policy.stage_name must be one of: format_rft, positive_rft.")
+
+
+def _resolve_stage_verify_submissions(stage_name: str) -> bool:
+    return _resolve_stage_name(stage_name) == _POSITIVE_RFT_STAGE_NAME
+
+
+def _merge_stage_handoff_overrides(
+    *,
+    handoff_overrides: Mapping[str, Any],
+    stage_name: str,
+) -> dict[str, Any]:
+    resolved = dict(handoff_overrides)
+    if _resolve_stage_name(stage_name) != _POSITIVE_RFT_STAGE_NAME:
+        return resolved
+
+    selection = _mapping_or_empty(resolved.get("selection"))
+    selection.update(
+        {
+            "require_terminal": False,
+            "require_format_valid": False,
+            "require_resolved": True,
+            "reject_on_invalid_final_submit": False,
+        }
+    )
+    resolved["selection"] = selection
+    return resolved
+
+
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {}
+
+
+def _resolve_task_partition(
+    *,
+    explicit_partition: Any,
+    parquet_files: Sequence[str],
+    train_files: Any,
+    val_files: Any,
+    task_eval_split_fraction: float,
+) -> str:
+    normalized_explicit = ""
+    if explicit_partition is not None:
+        normalized_explicit = str(explicit_partition).strip()
+    if normalized_explicit:
+        return _normalize_task_partition(normalized_explicit)
+    if task_eval_split_fraction <= 0.0:
+        return _TASK_PARTITION_ALL
+
+    normalized_train_files = _normalize_parquet_files(train_files)
+    normalized_val_files = _normalize_parquet_files(val_files)
+    if parquet_files and parquet_files == normalized_val_files and normalized_val_files:
+        return _TASK_PARTITION_EVAL
+    if parquet_files and parquet_files == normalized_train_files and normalized_train_files:
+        return _TASK_PARTITION_TRAIN
+    return _TASK_PARTITION_ALL
+
+
+def _normalize_task_partition(value: Any) -> str:
+    normalized = str(value).strip().lower()
+    partition = _TASK_PARTITION_ALIASES.get(normalized)
+    if partition is None:
+        raise ValueError("data.on_policy.task_partition must be one of: all, train, eval.")
+    return partition
+
+
 def _cache_key(
     *,
     data_config_name: str,
@@ -217,6 +368,9 @@ def _cache_key(
     handoff_overrides: Mapping[str, Any],
     verify_submissions: bool,
     stage_name: str,
+    task_partition: str,
+    task_eval_split_fraction: float,
+    task_eval_min_rows: int,
     parquet_files: Sequence[str],
     tokenizer: Any,
 ) -> str:
@@ -229,6 +383,9 @@ def _cache_key(
         "handoff_overrides": _normalize_mapping(handoff_overrides),
         "verify_submissions": bool(verify_submissions),
         "stage_name": str(stage_name),
+        "task_partition": str(task_partition),
+        "task_eval_split_fraction": float(task_eval_split_fraction),
+        "task_eval_min_rows": int(task_eval_min_rows),
         "parquet_files": [str(path) for path in parquet_files],
         "tokenizer_fingerprint": _tokenizer_cache_fingerprint(tokenizer),
     }
