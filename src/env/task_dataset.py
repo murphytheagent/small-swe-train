@@ -423,6 +423,14 @@ def load_task_batch(
     normalized_partition = _normalize_task_partition(task_partition)
     task_pool = _load_task_pool(config=config, dataset_loader=dataset_loader)
     tasks = list(task_pool.tasks)
+    if not tasks:
+        detail = task_pool.last_error if task_pool.last_error else "no valid rows found"
+        raise ValueError(
+            f"Unable to build task batch of size {batch_size} from "
+            f"{config.dataset_id!r}:{config.dataset_split!r}. "
+            f"Collected 0 valid rows after scanning {task_pool.scanned_rows}. "
+            f"Last validation error: {detail}"
+        )
     if normalized_partition != _TASK_PARTITION_ALL:
         train_tasks, eval_tasks = split_task_samples_for_eval(
             tasks,
@@ -430,8 +438,10 @@ def load_task_batch(
             min_eval_rows=min_eval_rows,
         )
         tasks = train_tasks if normalized_partition == _TASK_PARTITION_TRAIN else eval_tasks
+        if not tasks:
+            return []
 
-    if not tasks or (normalized_partition == _TASK_PARTITION_ALL and len(tasks) < batch_size):
+    if normalized_partition == _TASK_PARTITION_ALL and len(tasks) < batch_size:
         detail = task_pool.last_error if task_pool.last_error else "no valid rows found"
         partition_detail = (
             f" in task partition {normalized_partition!r}"

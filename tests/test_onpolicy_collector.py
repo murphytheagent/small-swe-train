@@ -233,6 +233,27 @@ def test_onpolicy_collector_collects_terminal_attempt_rows() -> None:
     assert pool.release_called is True
 
 
+def test_onpolicy_collector_returns_no_rows_for_empty_eval_partition() -> None:
+    collector = OnPolicyRolloutCollector(
+        settings=_settings(),
+        turn_generator=lambda **_kwargs: '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: (_ for _ in ()).throw(
+            AssertionError("collector should not request containers for an empty eval partition")
+        ),
+        executor_factory=lambda _handle, _runtime: (_ for _ in ()).throw(
+            AssertionError("collector should not create executors for an empty eval partition")
+        ),
+        task_partition="eval",
+        task_eval_split_fraction=0.25,
+        task_eval_min_rows=0,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert rows == []
+
+
 def test_onpolicy_collector_truncates_tool_output_payload_fields() -> None:
     pool = _FakePool()
     truncation_settings = resolve_feedback_deterministic_truncation_settings()

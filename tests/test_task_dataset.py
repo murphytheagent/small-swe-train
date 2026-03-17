@@ -172,6 +172,30 @@ def test_load_task_batch_wraps_partitioned_batches_when_heldout_split_is_smaller
     assert len({sample.task_id for sample in eval_batch}) == 1
 
 
+def test_load_task_batch_allows_empty_eval_partition_when_holdout_resolves_to_zero_rows() -> None:
+    rows = [
+        {
+            "task_id": "task-0",
+            "image_name": "img:0",
+            "problem_statement": "p0",
+            "FAIL_TO_PASS": ["f0"],
+            "PASS_TO_PASS": ["p0"],
+        }
+    ]
+
+    eval_batch = load_task_batch(
+        step_index=0,
+        batch_size=1,
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="eval",
+        eval_split_fraction=0.25,
+        min_eval_rows=0,
+    )
+
+    assert eval_batch == []
+
+
 def test_load_task_batch_rejects_missing_required_columns() -> None:
     rows = [
         {
