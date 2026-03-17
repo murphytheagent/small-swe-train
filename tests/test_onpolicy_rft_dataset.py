@@ -36,6 +36,7 @@ def _build_key(tokenizer: object) -> str:
         data_overrides={"task_batch_size": 8},
         handoff_overrides={"selection_policy": "terminal_valid"},
         verify_submissions=False,
+        stage_name="format_rft",
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -113,6 +114,7 @@ def test_cache_key_includes_parquet_split_fingerprint() -> None:
         data_overrides={"task_batch_size": 8},
         handoff_overrides={"selection_policy": "terminal_valid"},
         verify_submissions=False,
+        stage_name="format_rft",
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -124,6 +126,7 @@ def test_cache_key_includes_parquet_split_fingerprint() -> None:
         data_overrides={"task_batch_size": 8},
         handoff_overrides={"selection_policy": "terminal_valid"},
         verify_submissions=False,
+        stage_name="format_rft",
         parquet_files=["/tmp/val.parquet"],
         tokenizer=tokenizer,
     )
@@ -206,6 +209,7 @@ def test_onpolicy_dataset_evicts_stale_empty_cache_entry(
         data_overrides={},
         handoff_overrides={},
         verify_submissions=False,
+        stage_name="format_rft",
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -258,3 +262,31 @@ def test_onpolicy_dataset_forwards_verify_submissions_from_runtime_overrides(
 
     assert len(captured_requests) == 1
     assert captured_requests[0].verify_submissions is True
+
+
+def test_onpolicy_dataset_forwards_stage_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests = []
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        return _runtime_result(1)
+
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_module())
+    monkeypatch.setattr(dataset_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+
+    dataset_module.OnPolicyRFTDataset(
+        parquet_files=["/tmp/train.parquet"],
+        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+        config={
+            "on_policy": {
+                "enabled": True,
+                "stage_name": "positive_rft",
+            }
+        },
+    )
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0].stage_name == "positive_rft"

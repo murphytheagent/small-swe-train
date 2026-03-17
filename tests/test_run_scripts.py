@@ -456,6 +456,7 @@ def test_run_rft_script_dry_run_direct_mode_wires_positive_selection_overrides()
             "NPROC_PER_NODE": "1",
         },
     )
+    assert "+data.on_policy.stage_name=positive_rft" in result.stdout
     assert "+data.on_policy.runtime_overrides.verify_submissions=true" in result.stdout
     assert "+data.on_policy.rft_handoff_overrides.selection.require_resolved=true" in result.stdout
     assert "+data.on_policy.rft_handoff_overrides.selection.require_format_valid=false" in result.stdout

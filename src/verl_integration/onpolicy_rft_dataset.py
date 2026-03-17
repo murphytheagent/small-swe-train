@@ -54,6 +54,7 @@ class OnPolicyRFTDataset:
             on_policy_cfg.get("verify_submissions", runtime_overrides.get("verify_submissions")),
             fallback=False,
         )
+        stage_name = str(on_policy_cfg.get("stage_name", "format_rft")).strip() or "format_rft"
         output_dir_raw = on_policy_cfg.get("output_dir")
         output_dir = str(output_dir_raw).strip() if isinstance(output_dir_raw, str) and output_dir_raw.strip() else None
         parquet_file_fingerprint = _normalize_parquet_files(parquet_files)
@@ -66,6 +67,7 @@ class OnPolicyRFTDataset:
             data_overrides=data_overrides,
             handoff_overrides=handoff_overrides,
             verify_submissions=verify_submissions,
+            stage_name=stage_name,
             parquet_files=parquet_file_fingerprint,
             tokenizer=tokenizer,
         )
@@ -81,6 +83,7 @@ class OnPolicyRFTDataset:
                     data_overrides=data_overrides,
                     handoff_overrides=handoff_overrides,
                     verify_submissions=verify_submissions,
+                    stage_name=stage_name,
                     output_dir=output_dir,
                 )
                 return collect_onpolicy_rft_runtime_batch(
@@ -213,6 +216,7 @@ def _cache_key(
     data_overrides: Mapping[str, Any],
     handoff_overrides: Mapping[str, Any],
     verify_submissions: bool,
+    stage_name: str,
     parquet_files: Sequence[str],
     tokenizer: Any,
 ) -> str:
@@ -224,6 +228,7 @@ def _cache_key(
         "data_overrides": _normalize_mapping(data_overrides),
         "handoff_overrides": _normalize_mapping(handoff_overrides),
         "verify_submissions": bool(verify_submissions),
+        "stage_name": str(stage_name),
         "parquet_files": [str(path) for path in parquet_files],
         "tokenizer_fingerprint": _tokenizer_cache_fingerprint(tokenizer),
     }

@@ -734,6 +734,7 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
     actor_rollout_ref.model.lora.alpha="${RFT_LORA_ALPHA}"
     actor_rollout_ref.model.lora.target_modules="${RFT_LORA_TARGET_MODULES_HYDRA}"
     ++data.on_policy.total_steps="${RFT_STEPS}"
+    +data.on_policy.stage_name="${RFT_STAGE_NAME}"
     +data.on_policy.runtime_overrides.task_batch_size="${RFT_TASK_BATCH_SIZE}"
     +data.on_policy.runtime_overrides.attempts_per_task="${SAMPLES_PER_TASK}"
     +data.on_policy.runtime_overrides.max_in_flight_tasks="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}"
