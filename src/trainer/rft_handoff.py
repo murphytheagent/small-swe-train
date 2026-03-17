@@ -185,25 +185,31 @@ def merge_rollout_and_preprocessed_rows(
             fallback=_coerce_bool(rollout_row.get("is_terminal"), fallback=False),
         )
         final_submit_format_valid = _coerce_bool(
-            rollout_row.get("final_submit_format_valid"),
+            rollout_row.get("terminal_format_valid"),
             fallback=trajectory_format_valid and final_turn_has_submit,
+        )
+        final_submit_format_valid = _coerce_bool(
+            rollout_row.get("final_submit_format_valid"),
+            fallback=final_submit_format_valid,
+        )
+        fail_to_pass = rollout_row.get("fail_to_pass", rollout_row.get("FAIL_TO_PASS"))
+        pass_to_pass = rollout_row.get("pass_to_pass", rollout_row.get("PASS_TO_PASS"))
+        verifier_status, verifier_resolution_source = _derive_verifier_telemetry(
+            rollout_row=rollout_row,
+            fail_to_pass=fail_to_pass,
+            pass_to_pass=pass_to_pass,
         )
         merged = dict(preprocessed_row)
         merged.update(
             {
+                "stage": rollout_row.get("stage", preprocessed_row.get("stage", "format_rft")),
                 "task_id": task_id,
                 "attempt_index": rollout_row.get("attempt_index", 0),
                 "turn_index": rollout_row.get("turn_index", 0),
                 "step_index": rollout_row.get("step_index", 0),
                 "resolved": rollout_row.get("resolved", False),
-                "fail_to_pass": rollout_row.get(
-                    "fail_to_pass",
-                    rollout_row.get("FAIL_TO_PASS"),
-                ),
-                "pass_to_pass": rollout_row.get(
-                    "pass_to_pass",
-                    rollout_row.get("PASS_TO_PASS"),
-                ),
+                "fail_to_pass": fail_to_pass,
+                "pass_to_pass": pass_to_pass,
                 "is_terminal": rollout_row.get("is_terminal", False),
                 "collector_error": rollout_row.get("collector_error", ""),
                 "bridge_error": rollout_row.get("bridge_error", ""),
@@ -217,7 +223,10 @@ def merge_rollout_and_preprocessed_rows(
                 "format_valid": trajectory_format_valid,
                 "trajectory_format_valid": trajectory_format_valid,
                 "final_turn_has_submit": final_turn_has_submit,
+                "terminal_format_valid": final_submit_format_valid,
                 "final_submit_format_valid": final_submit_format_valid,
+                "verifier_status": verifier_status,
+                "verifier_resolution_source": verifier_resolution_source,
                 "trajectory_tool_validation_errors": rollout_row.get(
                     "trajectory_tool_validation_errors",
                     (),
@@ -449,6 +458,63 @@ def _coerce_bool(value: Any, *, fallback: bool) -> bool:
         if normalized in _FALSE_STRINGS:
             return False
     return fallback
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, float):
+        return value != 0.0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+    return None
+
+
+def _has_expected_verifier_targets(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and bool(value)
+
+
+def _derive_verifier_telemetry(
+    *,
+    rollout_row: Mapping[str, Any],
+    fail_to_pass: Any,
+    pass_to_pass: Any,
+) -> tuple[str, str]:
+    status = str(rollout_row.get("verifier_status", "")).strip()
+    source = str(rollout_row.get("verifier_resolution_source", "")).strip()
+    if status and source:
+        return status, source
+
+    has_expected_targets = _has_expected_verifier_targets(fail_to_pass) or _has_expected_verifier_targets(
+        pass_to_pass
+    )
+    verification_missing = _coerce_optional_bool(rollout_row.get("verification_missing"))
+    resolved = _coerce_optional_bool(rollout_row.get("resolved"))
+    has_explicit_verifier_signal = any(
+        key in rollout_row
+        for key in (
+            "fail_to_pass_verified",
+            "pass_to_pass_verified",
+            "verification_missing",
+            "verification_error",
+            "verification_feedback",
+            "submission_final_response",
+        )
+    )
+    if not has_explicit_verifier_signal or verification_missing is True or resolved is None:
+        return (
+            "missing",
+            "missing_verifier" if has_expected_targets else "missing_verifier_targets",
+        )
+    return ("correct" if resolved else "incorrect", "verifiable_tests")
 
 
 def _coerce_int(value: Any, *, fallback: int) -> int:

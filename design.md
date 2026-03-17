@@ -80,7 +80,7 @@ flowchart TD
 - `answer` → `submit` and `edit` → `apply_patch` via `canonical_tool_name()` in `schemas/contracts.py`.
 - `str_replace_editor` subcommands mapped via `data/tool_schema_adapter.py`.
 
-## 4) Default step-SDPO teacher prompt construction per turn
+## 4) Default turn-SDPO teacher prompt construction per turn
 
 At turn `t`, teacher prompt is:
 1. `INITIAL_PROMPT_BLOCK` — reconstructed from raw prompt messages (role-tagged) or fallback task text.
@@ -112,10 +112,11 @@ Computed from canonical feedback fields (when `feedback_processing.extract_self_
 
 ## 6) Stage-specific token masking policy
 
-| Stage | Think tokens | Tool-call tokens |
-|-------|-------------|-----------------|
-| RFT   | excluded    | included        |
-| step-SDPO | included | included       |
+| Stage | Assistant action supervision |
+|-------|------------------------------|
+| format-RFT | assistant turns (`think` + `tool_call`) |
+| positive-RFT | assistant turns (`think` + `tool_call`) |
+| turn-SDPO | assistant turns (`think` + `tool_call`) |
 
 ### Implementation status
 - `losses/action_masking.py` — `should_train_token()` + `build_action_token_mask()` implemented and tested.
@@ -151,7 +152,7 @@ small-swe-train/
       README.md
     verl/                        # verl/SDPO training configs
       model_defaults.yaml
-      sdpo_swe.yaml              # step-SDPO (main objective)
+      sdpo_swe.yaml              # turn-SDPO (main objective)
       rft_swe.yaml               # RFT supervised pre-training
       user.yaml                  # user-local path overrides
       agent_loops/
@@ -222,7 +223,6 @@ small-swe-train/
     small_swe_runtime_patches.py
   scripts/
     run_rft.sh
-    run_sdft.sh
     run_sdpo.sh
     run_step_sdpo_scaffold.py
     run_rft_onpolicy_rollout_proof.sh
@@ -359,7 +359,7 @@ have regression tests in `tests/`.
 
 ### 13.3 Config files
 - `configs/verl/model_defaults.yaml` — shared model defaults (primary training model name).
-- `configs/verl/sdpo_swe.yaml` — step-SDPO training (main objective).
+- `configs/verl/sdpo_swe.yaml` — turn-SDPO training (main objective).
 - `configs/verl/rft_swe.yaml` — RFT supervised pre-training.
 - `configs/verl/user.yaml` — user-local path overrides.
 - `configs/verl/agent_loops/swe_bridge_agent.yaml` — SDPO agent-loop runtime config.

@@ -19,6 +19,7 @@ class RolloutRowRequired(TypedDict):
 
 
 class RolloutRow(RolloutRowRequired, total=False):
+    stage: str
     fail_to_pass: Any
     pass_to_pass: Any
     fail_to_pass_results: Any
@@ -49,9 +50,13 @@ class RolloutRow(RolloutRowRequired, total=False):
     trajectory_steps: list[dict[str, Any]]
     trajectory_history: list[str]
     trajectory_assistant_turns: list[str]
+    trajectory_assistant_turn_count: int
     trajectory_tool_validation_errors: list[str]
     trajectory_format_valid: bool
     final_turn_has_submit: bool
+    terminal_format_valid: bool
     final_submit_format_valid: bool
+    verifier_status: str
+    verifier_resolution_source: str
     initial_prompt_block: str
     _raw_prompt_messages: list[dict[str, Any]]

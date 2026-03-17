@@ -1,4 +1,4 @@
-"""Feedback canonicalization and self-containment diagnostics for step-SDPO."""
+"""Feedback canonicalization and self-containment diagnostics for turn-SDPO."""
 
 from __future__ import annotations
 

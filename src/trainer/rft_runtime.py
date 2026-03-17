@@ -100,7 +100,9 @@ def _build_runtime_manifest_payload(
 
     rejection_reason_counts: dict[str, int] = {}
     for row in rejected_rows:
-        reason_text = str(row.get("rft_rejection_reason", "")).strip()
+        reason_text = str(
+            row.get("stage_decision_reason", row.get("rft_rejection_reason", ""))
+        ).strip()
         if not reason_text:
             parsed_reasons = ["unknown"]
         else:

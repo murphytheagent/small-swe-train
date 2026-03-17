@@ -30,7 +30,7 @@ def build_multiturn_dataset_records(
             fallback=False,
         )
         final_submit_format_valid = _coerce_bool(
-            row.get("final_submit_format_valid"),
+            row.get("terminal_format_valid", row.get("final_submit_format_valid")),
             fallback=False,
         )
         fail_to_pass = _resolve_test_targets_from_row(row, key="fail_to_pass")
@@ -69,6 +69,7 @@ def build_multiturn_dataset_records(
                 "pass_to_pass": pass_to_pass,
                 "format_valid": format_valid,
                 "final_turn_has_submit": final_turn_has_submit,
+                "terminal_format_valid": final_submit_format_valid,
                 "final_submit_format_valid": final_submit_format_valid,
             }
         )

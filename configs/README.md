@@ -14,6 +14,12 @@ Both are launched by scripts in `scripts/` with:
 
 These scripts also pass runtime-specific overrides through `configs/runtime/` and `configs/data/` (for example `RFT_TURN_GENERATOR_MODE`, `RFT_TASK_BATCH_SIZE`, etc.).
 
+The centralized runtime policy in `configs/runtime/training_policy_defaults.v1.json`
+tracks the canonical staged pipeline as:
+- `format_rft`
+- optional `positive_rft`
+- `turn_sdpo`
+
 ## Hydra Composition (Current)
 
 - `sdpo_swe.yaml` defaults: `model_defaults`, `ppo_trainer`, `_self_`
@@ -21,7 +27,7 @@ These scripts also pass runtime-specific overrides through `configs/runtime/` an
 
 `ppo_trainer` / `sft_trainer` come from installed `verl` package configs.
 
-## Length Fields (SDPO)
+## Length Fields (`turn_sdpo`)
 
 In `configs/verl/sdpo_swe.yaml`:
 

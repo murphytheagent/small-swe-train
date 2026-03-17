@@ -1236,6 +1236,50 @@ _discover_latest_rft_manifest() {
   printf '%s' "${latest_manifest}"
 }
 
+_discover_rft_manifests_by_mtime() {
+  "${PYTHON_BIN}" - "${PROJECT_ROOT}" <<'PY'
+import sys
+from pathlib import Path
+
+project_root = Path(sys.argv[1])
+candidates = [
+    *project_root.glob("outputs/rft_runtime/*/rft_runtime_loop_manifest.json"),
+    *project_root.glob("outputs/slurm/rft_runtime/*/rft_runtime_loop_manifest.json"),
+]
+for path in sorted(
+    (candidate for candidate in candidates if candidate.is_file()),
+    key=lambda item: (item.stat().st_mtime, str(item)),
+    reverse=True,
+):
+    print(path)
+PY
+}
+
+_checkpoint_from_latest_commit() {
+  local latest_commit_path="$1"
+  "${PYTHON_BIN}" - "${latest_commit_path}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+latest_commit_path = Path(sys.argv[1])
+payload = json.loads(latest_commit_path.read_text(encoding="utf-8"))
+
+for key in ("resume_model_path", "latest_vllm_checkpoint", "latest_hf_checkpoint"):
+    value = payload.get(key)
+    if not isinstance(value, str):
+        continue
+    normalized = value.strip()
+    if not normalized:
+        continue
+    if Path(normalized).exists():
+        print(normalized)
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
 _checkpoint_from_manifest() {
   local manifest_path="$1"
   "${PYTHON_BIN}" - "${manifest_path}" <<'PY'
@@ -1288,9 +1332,6 @@ for candidate in candidates:
         print(candidate)
         raise SystemExit(0)
 
-if candidates:
-    print(candidates[0])
-    raise SystemExit(0)
 raise SystemExit(1)
 PY
 }
@@ -1301,8 +1342,29 @@ _resolve_sdpo_rft_checkpoint() {
     return 0
   fi
 
+  local latest_commit_path=""
   local manifest_path="${SDPO_RFT_MANIFEST}"
-  if [[ -z "${manifest_path}" ]]; then
+  if [[ -n "${manifest_path}" ]]; then
+    latest_commit_path="$(dirname "${manifest_path}")/rft_latest_committed_checkpoint.json"
+    if [[ -f "${latest_commit_path}" ]]; then
+      _checkpoint_from_latest_commit "${latest_commit_path}"
+      return 0
+    fi
+  else
+    while IFS= read -r discovered_manifest; do
+      [[ -n "${discovered_manifest}" ]] || continue
+      latest_commit_path="$(dirname "${discovered_manifest}")/rft_latest_committed_checkpoint.json"
+      if [[ -f "${latest_commit_path}" ]] && _checkpoint_from_latest_commit "${latest_commit_path}"; then
+        return 0
+      fi
+      if _checkpoint_from_manifest "${discovered_manifest}"; then
+        return 0
+      fi
+    done < <(_discover_rft_manifests_by_mtime)
+    latest_commit_path="$(_discover_latest_rft_latest_commit)"
+    if [[ -n "${latest_commit_path}" ]] && _checkpoint_from_latest_commit "${latest_commit_path}"; then
+      return 0
+    fi
     manifest_path="$(_discover_latest_rft_manifest)"
   fi
   if [[ -z "${manifest_path}" ]]; then

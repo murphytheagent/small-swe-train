@@ -512,6 +512,9 @@ def test_merge_rollout_and_preprocessed_rows_propagates_verifier_targets() -> No
     assert len(merged) == 1
     assert merged[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
     assert merged[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
+    assert merged[0]["terminal_format_valid"] is True
+    assert merged[0]["verifier_status"] == "missing"
+    assert merged[0]["verifier_resolution_source"] == "missing_verifier"
 
 
 def test_merge_rollout_and_preprocessed_rows_requires_non_empty_task_id() -> None:

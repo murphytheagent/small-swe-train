@@ -1,4 +1,4 @@
-"""Teacher prompt assembly for step-SDPO trajectories."""
+"""Teacher prompt assembly for turn-SDPO trajectories."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def build_trajectory_block(
 
 
 def build_teacher_prompt(inputs: TeacherPromptInputs) -> str:
-    """Compose step-SDPO teacher prompt following v1.6 block ordering."""
+    """Compose turn-SDPO teacher prompt following v1.6 block ordering."""
     trajectory_block = build_trajectory_block(
         recent_raw_block=inputs.recent_raw_block,
         compressed_memory_block=inputs.compressed_memory_block,

@@ -8,8 +8,7 @@ This note covers GPU-using scripts under `scripts/` and the resource requests th
 | --- | --- | --- | --- | --- | --- |
 | `run_rft.sh` | Variable (recommend 8) | `8 x GPUs` | `64G x GPUs` | `24:00:00` | RFT loop uses `NPROC_PER_NODE`; scales by GPU count. |
 | `run_rft_onpolicy_rollout_proof.sh` | Variable (recommend 8) | `8 x GPUs` | `64G x GPUs` | `08:00:00` | Direct proof path, also keyed by GPU count. |
-| `run_sdpo.sh` | **8 required** | 64 | 512G | `24:00:00` | `configs/verl/sdpo_swe.yaml` is 8-GPU tuned (`fsdp_size=8`, rollout TP/DP layout). |
-| `run_sdft.sh` | **8 required** | 64 | 512G | `24:00:00` | Same base config and parallel layout as SDPO. |
+| `run_sdpo.sh` | **8 required** | 64 | 512G | `24:00:00` | `configs/verl/sdpo_swe.yaml` is the `turn_sdpo` launcher and is 8-GPU tuned (`fsdp_size=8`, rollout TP/DP layout). |
 | `run_teacher_reprompt_pilot_slurm.sh` | Variable (recommend 8) | `8 x GPUs` | `32G x GPUs` | `12:00:00` | Pilot ablations run with vLLM tensor parallel; set `PILOT_VLLM_TP_SIZE == requested GPUs`. |
 | `run_flash_attn_rebuild.sh` | 0 (default) | 8 | 128G | `03:00:00` | Build job defaults to no GPU request; override if your site requires one. |
 
@@ -31,7 +30,7 @@ PYTHON_BIN=$PWD/.venv/bin/python
 so Slurm runs use the project virtualenv interpreter.
 
 W&B run naming:
-- `run_rft.sh`, `run_sdpo.sh`, and `run_sdft.sh` use `EXPERIMENT` as the W&B run name.
+- `run_rft.sh` and `run_sdpo.sh` use `EXPERIMENT` as the W&B run name.
 - `run_rft_onpolicy_rollout_proof.sh` uses `WANDB_RUN_NAME`.
 - To map runs back to Slurm jobs, set names with `\$SLURM_JOB_ID` in every `--wrap`.
 - `run_rft.sh` loop mode now defaults to one outer RFT W&B run (`SMALL_SWE_RFT_LOOP_WANDB_ENABLE=1`) and keeps inner SFT W&B disabled (`SMALL_SWE_RFT_INNER_TRAINER_WANDB_ENABLE=0`), while still surfacing inner `train/loss` and `val/loss` as `rft/inner_*` metrics.
@@ -42,6 +41,8 @@ W&B run naming:
 Choose requested GPU count first, and pass the same count to `NPROC_PER_NODE`.
 By default, `run_rft.sh` writes artifacts under a unique directory:
 `outputs/rft_runtime/<UTC_TIMESTAMP>_job<SLURM_JOB_ID>`.
+That default is good for fresh runs, but it is not resume-friendly because a rerun gets
+a new timestamped directory.
 
 ```bash
 GPUS=4
@@ -64,6 +65,40 @@ sbatch \
 
 To keep runtime artifacts under the Slurm tree, add:
 `export RFT_OUTPUT_ROOT=$PWD/outputs/slurm/rft_runtime` inside `--wrap`.
+
+To make an RFT run resumable from Slurm, set a stable `RFT_OUTPUT_DIR` (or stable
+`RFT_RUN_LABEL`) and reuse it on restart/requeue. Under current code, resume is:
+- outer-loop only
+- from the latest committed outer-loop checkpoint only
+- from the next outer step after that checkpoint
+- with any interrupted in-flight step replayed/discarded
+
+Resume example:
+
+```bash
+RUN_DIR="$PWD/outputs/rft_runtime/20260316T003050Z_pid712689"
+GPUS=8
+CPUS=$((GPUS * 16))
+MEM="$((GPUS * 48))G"
+VLLM_PORT=18080
+
+sbatch \
+  --partition=gpu \
+  --nodes=1 \
+  --gres="gpu:${GPUS}" \
+  --cpus-per-task="${CPUS}" \
+  --mem="${MEM}" \
+  --time=48:00:00 \
+  --job-name=small-swe-rft \
+  --output="$PWD/outputs/slurm/%x-%j.out" \
+  --error="$PWD/outputs/slurm/%x-%j.err" \
+  --wrap "cd $PWD && export PYTHON_BIN=$PWD/.venv/bin/python && export WANDB_MODE=offline && export NPROC_PER_NODE=${GPUS} && export SMALL_SWE_VLLM_BASE_URL=http://127.0.0.1:${VLLM_PORT}/v1 && export RFT_OUTPUT_DIR=${RUN_DIR} && export EXPERIMENT=small-swe-rft_resume && bash scripts/run_rft.sh"
+```
+
+Resume will only work when `${RUN_DIR}` already contains a valid
+`rft_latest_committed_checkpoint.json` plus the checkpoint paths it references.
+If the latest committed checkpoint record or checkpoint paths are missing or incomplete,
+the launcher should be treated as a fresh run instead of an arbitrary-step resume.
 
 `run_rft.sh` now preflights the managed vLLM bind address and fails fast if the
 configured `SMALL_SWE_VLLM_BASE_URL` port is already occupied on the node.
@@ -112,7 +147,7 @@ Dry-run:
 bash scripts/run_rft_onpolicy_rollout_proof.sh --dry-run
 ```
 
-## 3) `scripts/run_sdpo.sh` (8 GPUs required)
+## 3) `scripts/run_sdpo.sh` (`turn_sdpo`, 8 GPUs required)
 quick math (verl `0.7.0.dev`, legacy FSDP worker path):
 - `ppo_mini_batch_size` is a prompt-level knob that gets normalized to per-GPU rollout units:
   `normalized_ppo_mini_batch_size_per_gpu = ppo_mini_batch_size * vllm.n / dp_world_size`.

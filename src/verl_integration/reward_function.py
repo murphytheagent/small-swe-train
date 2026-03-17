@@ -1,4 +1,4 @@
-"""Reward-function adapter for step-SDPO SWE rollout records."""
+"""Reward-function adapter for turn-SDPO SWE rollout records."""
 
 from __future__ import annotations
 
@@ -282,6 +282,7 @@ def reward_fn(
     validation_errors: list[bool] = []
     validation_error_messages: list[str] = []
     resolved_sources: list[str] = []
+    verifier_statuses: list[str] = []
     fail_to_pass_verified: list[bool] = []
     pass_to_pass_verified: list[bool] = []
     reward_verification_missing: list[bool] = []
@@ -341,7 +342,13 @@ def reward_fn(
             _lookup_verification_value(sample, "final_turn_has_submit", "FINAL_TURN_HAS_SUBMIT")
         )
         final_submit_format_valid = _coerce_optional_bool_flag(
-            _lookup_verification_value(sample, "final_submit_format_valid", "FINAL_SUBMIT_FORMAT_VALID")
+            _lookup_verification_value(
+                sample,
+                "terminal_format_valid",
+                "TERMINAL_FORMAT_VALID",
+                "final_submit_format_valid",
+                "FINAL_SUBMIT_FORMAT_VALID",
+            )
         )
         explicit_final_response = _lookup_verification_value(
             sample,
@@ -383,6 +390,12 @@ def reward_fn(
         fail_to_pass_verified.append(fail_verified)
         pass_to_pass_verified.append(pass_verified)
         reward_verification_missing.append(verification_missing)
+        if resolved_sources[-1] != "verifiable_tests":
+            verifier_statuses.append("missing")
+        elif fail_verified and pass_verified:
+            verifier_statuses.append("correct")
+        else:
+            verifier_statuses.append("incorrect")
 
         reward_value = 0.0
         if has_expected_tests:
@@ -437,6 +450,8 @@ def reward_fn(
         "validation_error_messages": validation_error_messages,
         "step_index_warnings": step_index_warnings,
         "resolved_source": resolved_sources,
+        "verifier_resolution_source": resolved_sources,
+        "verifier_status": verifier_statuses,
         "terminal_submit_content": terminal_submit_content,
         "fail_to_pass_verified": fail_to_pass_verified,
         "pass_to_pass_verified": pass_to_pass_verified,

@@ -205,9 +205,14 @@ def preprocess_trajectories(
         else:
             token_labels = _approx_labels_from_envelope(envelope) if envelope is not None else []
 
-        action_mask_rft = build_action_token_mask(token_labels, stage="rft") if token_labels else []
-        action_mask_step_sdpo = (
-            build_action_token_mask(token_labels, stage="step_sdpo") if token_labels else []
+        action_mask_format_rft = (
+            build_action_token_mask(token_labels, stage="format_rft") if token_labels else []
+        )
+        action_mask_positive_rft = (
+            build_action_token_mask(token_labels, stage="positive_rft") if token_labels else []
+        )
+        action_mask_turn_sdpo = (
+            build_action_token_mask(token_labels, stage="turn_sdpo") if token_labels else []
         )
 
         tool_output = sample.get("tool_output", {})
@@ -235,8 +240,13 @@ def preprocess_trajectories(
             "tool_calls": tool_calls_payload,
             "label_blocks": label_blocks,
             "token_labels": token_labels,
-            "action_mask_rft": action_mask_rft,
-            "action_mask_step_sdpo": action_mask_step_sdpo,
+            "stage": "format_rft",
+            "action_mask_format_rft": action_mask_format_rft,
+            "action_mask_positive_rft": action_mask_positive_rft,
+            "action_mask_turn_sdpo": action_mask_turn_sdpo,
+            "action_mask_rft": action_mask_format_rft,
+            "action_mask_step_sdpo": action_mask_turn_sdpo,
+            "assistant_action_token_count": sum(1 for flag in action_mask_format_rft if flag),
             "format_valid": envelope is not None and not validation_errors,
             "parse_error": parse_error,
             "validation_errors": validation_errors,
@@ -260,9 +270,19 @@ def preprocess_trajectories(
             row = rows[row_index]
             row["input_ids"] = input_ids
             row["token_labels"] = token_labels
-            row["action_mask_rft"] = build_action_token_mask(token_labels, stage="rft") if token_labels else []
-            row["action_mask_step_sdpo"] = (
-                build_action_token_mask(token_labels, stage="step_sdpo") if token_labels else []
+            row["action_mask_format_rft"] = (
+                build_action_token_mask(token_labels, stage="format_rft") if token_labels else []
+            )
+            row["action_mask_positive_rft"] = (
+                build_action_token_mask(token_labels, stage="positive_rft") if token_labels else []
+            )
+            row["action_mask_turn_sdpo"] = (
+                build_action_token_mask(token_labels, stage="turn_sdpo") if token_labels else []
+            )
+            row["action_mask_rft"] = row["action_mask_format_rft"]
+            row["action_mask_step_sdpo"] = row["action_mask_turn_sdpo"]
+            row["assistant_action_token_count"] = sum(
+                1 for flag in row["action_mask_format_rft"] if flag
             )
 
     return rows

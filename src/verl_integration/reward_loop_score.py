@@ -34,6 +34,7 @@ _EXTRA_INFO_KEYS = (
     "submission_final_response",
     "resolved",
     "final_turn_has_submit",
+    "terminal_format_valid",
     "final_submit_format_valid",
     "bridge_error",
     "timeout_error",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from config import OnPolicyRuntimeConfig, OnPolicySettings
 from env.container_pool import BatchContainerPool, ContainerHandle
@@ -103,6 +103,29 @@ def _extract_submit_final_response(envelope: Any) -> str:
             return value
         return str(value)
     return ""
+
+
+def _derive_verifier_telemetry(
+    *,
+    fail_to_pass: Sequence[Any],
+    pass_to_pass: Sequence[Any],
+    verification_metadata: Mapping[str, Any] | None,
+) -> tuple[str, str]:
+    has_expected_targets = bool(fail_to_pass or pass_to_pass)
+    if not isinstance(verification_metadata, Mapping):
+        return (
+            "missing",
+            "missing_verifier" if has_expected_targets else "missing_verifier_targets",
+        )
+
+    resolved = verification_metadata.get("resolved")
+    if isinstance(resolved, bool):
+        return ("correct" if resolved else "incorrect", "verifiable_tests")
+
+    return (
+        "missing",
+        "missing_verifier" if has_expected_targets else "missing_verifier_targets",
+    )
 
 
 def _verify_terminal_submission(
@@ -437,6 +460,7 @@ class OnPolicyRolloutCollector:
             raw_prompt_messages.append({"role": "user", "content": initial_user_message})
 
         row: RolloutRow = {
+            "stage": "format_rft",
             "prompt": task.problem_statement,
             "assistant_response": row_assistant_response,
             "tool_output": tool_output,
@@ -455,16 +479,25 @@ class OnPolicyRolloutCollector:
             "trajectory_steps": trajectory_steps,
             "trajectory_history": list(history),
             "trajectory_assistant_turns": list(trajectory_assistant_turns),
+            "trajectory_assistant_turn_count": len(trajectory_assistant_turns),
             "trajectory_tool_validation_errors": _stable_unique_strings(
                 trajectory_tool_validation_errors
             ),
             "trajectory_format_valid": trajectory_format_valid,
             "final_turn_has_submit": final_turn_has_submit,
+            "terminal_format_valid": final_submit_format_valid,
             "final_submit_format_valid": final_submit_format_valid,
             "container_init_succeeded": container_init_succeeded,
             "initial_prompt_block": initial_prompt_block,
             "_raw_prompt_messages": raw_prompt_messages,
         }
+        verifier_status, verifier_resolution_source = _derive_verifier_telemetry(
+            fail_to_pass=task.fail_to_pass,
+            pass_to_pass=task.pass_to_pass,
+            verification_metadata=verification_metadata,
+        )
+        row["verifier_status"] = verifier_status
+        row["verifier_resolution_source"] = verifier_resolution_source
         if collector_error:
             row["collector_error"] = collector_error
         if bridge_error:

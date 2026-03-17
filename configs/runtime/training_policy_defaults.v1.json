@@ -3,15 +3,11 @@
   "thread_ts": "1771579678.414229",
   "pipeline": {
     "pre_main_sequence": [
-      "rft",
-      "sdft_optional",
-      "sdpo_main"
+      "format_rft",
+      "positive_rft",
+      "turn_sdpo"
     ],
-    "sdft_enabled_default": true,
-    "sdft_token_budget_fraction_range": [
-      0.05,
-      0.1
-    ]
+    "positive_rft_enabled_default": false
   },
   "output_contract": {
     "format_mode": "chatml_with_multi_tool_calls",
@@ -67,13 +63,14 @@
     "self_containment_usage": "disabled"
   },
   "masking_policy": {
-    "rft": {
-      "include_thinking_tokens": false,
-      "include_tool_call_tokens": true
+    "format_rft": {
+      "supervision": "assistant_turn"
     },
-    "step_sdpo": {
-      "include_thinking_tokens": false,
-      "include_tool_call_tokens": true
+    "positive_rft": {
+      "supervision": "assistant_turn"
+    },
+    "turn_sdpo": {
+      "supervision": "assistant_turn"
     }
   },
   "adaptation": {

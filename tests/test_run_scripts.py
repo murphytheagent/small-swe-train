@@ -680,12 +680,6 @@ def test_run_rft_script_non_dry_run_allows_occupied_vllm_port_when_management_is
     assert "--skip-vllm-management" in captured_args
 
 
-def test_run_sdft_script_dry_run_includes_loss_mode_override() -> None:
-    result = _run_script("run_sdft.sh")
-    assert "--config-name sdpo_swe" in result.stdout
-    assert "actor_rollout_ref.actor.policy_loss.loss_mode=sdft" in result.stdout
-
-
 def test_teacher_reprompt_pilot_slurm_script_dry_run_uses_all_visible_gpus_for_tp() -> None:
     result = _run_script(
         "run_teacher_reprompt_pilot_slurm.sh",

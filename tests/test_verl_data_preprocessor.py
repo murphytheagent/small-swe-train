@@ -26,7 +26,11 @@ def test_preprocess_trajectories_from_assistant_response() -> None:
     assert row["format_valid"] is True
     assert row["validation_errors"] == []
     assert row["action_mask_rft"]
+    assert row["action_mask_format_rft"]
+    assert row["action_mask_positive_rft"]
+    assert row["action_mask_turn_sdpo"]
     assert row["action_mask_step_sdpo"]
+    assert row["assistant_action_token_count"] > 0
     assert row["feedback_packet"] is not None
 
 
@@ -244,7 +248,9 @@ def test_preprocess_trajectories_with_tokenizer_produces_aligned_masks() -> None
     assert "canonical_text" in row
     assert len(row["input_ids"]) == len(row["token_labels"])
     assert len(row["token_labels"]) == len(row["action_mask_rft"])
-    assert len(row["action_mask_rft"]) == len(row["action_mask_step_sdpo"])
+    assert len(row["action_mask_rft"]) == len(row["action_mask_turn_sdpo"])
+    assert row["action_mask_rft"] == row["action_mask_format_rft"]
+    assert row["action_mask_step_sdpo"] == row["action_mask_turn_sdpo"]
     assert "tool_call" in row["token_labels"]
     assert "think" in row["token_labels"]
 
@@ -284,7 +290,9 @@ def test_preprocess_trajectories_uses_batched_tokenization_when_supported() -> N
         assert "input_ids" in row
         assert len(row["input_ids"]) == len(row["token_labels"])
         assert len(row["token_labels"]) == len(row["action_mask_rft"])
-        assert len(row["action_mask_rft"]) == len(row["action_mask_step_sdpo"])
+        assert len(row["action_mask_rft"]) == len(row["action_mask_turn_sdpo"])
+        assert row["action_mask_rft"] == row["action_mask_format_rft"]
+        assert row["action_mask_step_sdpo"] == row["action_mask_turn_sdpo"]
 
 
 def test_preprocess_trajectories_without_tokenizer_omits_input_ids() -> None:

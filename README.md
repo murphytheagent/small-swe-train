@@ -1,6 +1,6 @@
 # small-swe-train
 
-Repository for a chat-style SWE training stack with RFT + step-SDPO stages.
+Repository for a chat-style SWE training stack with `format_rft`, optional `positive_rft`, and `turn_sdpo` stages.
 
 Latest doc update: 2026-03-09.
 
@@ -10,12 +10,17 @@ Latest doc update: 2026-03-09.
 - PR #23 remains open as a planning branch, but it is still intentionally blocked by the standing `SWE-rebench` integration constraint.
 - Legacy research PRs #14-#17 remain open/unstable and are not current merge candidates.
 
+Canonical staged pipeline:
+- `format_rft`
+- `positive_rft` as an optional follow-up stage
+- `turn_sdpo`
+
 ## What is implemented
 - Stable protocol types for assistant tool-call envelopes and feedback packets.
 - ChatML assistant-turn parser with `<think>` and ordered `<tool_call>` support.
 - Canonical feedback normalization and deterministic self-containment diagnostics.
 - Deterministic adapter layer from SWE-style tool traces into canonical tools.
-- Stage-aware masking policy helpers for `rft` and `step_sdpo`.
+- Assistant-turn supervision helpers used by the `format_rft` and `turn_sdpo` paths.
 - Initial trainer/prompt/eval interface signatures.
 - On-policy RFT output artifacts include `rollout_rows.jsonl` and `rollout_artifact_summary.json` (task IDs, task-image pairs, and trajectory counts) when `data.on_policy.output_dir` is set.
 - Live on-policy handoff is coordinated by `src/trainer/rft_handoff.py`, summarized in `src/trainer/rft_runtime.py`, and persisted by `src/trainer/rft_runtime_loop.py` in `rft_runtime_loop_manifest.json`.
@@ -95,7 +100,7 @@ Run proof-mode direct launch (single-shot trainer invocation):
 bash scripts/run_rft_onpolicy_rollout_proof.sh
 ```
 
-Run SDPO runtime (`run_sdpo.sh`) through Slurm only:
+Run `turn_sdpo` runtime (`run_sdpo.sh`) through Slurm only:
 ```bash
 # Required on this machine for SDPO:
 # 1) put Ray temp on scratch, not /tmp
@@ -107,7 +112,7 @@ if ! pgrep -u "$(id -u)" -fa "raylet|gcs_server|dashboard.py|runtime_env_agent" 
 fi
 bash scripts/run_sdpo.sh trainer.total_training_steps=2
 ```
-`run_sdpo.sh` defaults `TOKENIZERS_PARALLELISM=false` for Ray SDPO workers.
+`run_sdpo.sh` defaults `TOKENIZERS_PARALLELISM=false` for Ray `turn_sdpo` workers.
 `run_sdpo.sh` also prints a launch summary and watchdog heartbeats to stdout, and warns if trainer logs stay unchanged for too long.
 Useful knobs when checking for stalls:
 - `SDPO_MONITOR_INTERVAL_SEC` (default `120`)

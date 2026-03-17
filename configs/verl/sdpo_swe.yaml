@@ -1,4 +1,4 @@
-# verl/SDPO config for step-SDPO SWE-agent training
+# verl/SDPO config for turn-SDPO SWE-agent training
 # Extends lasgroup/SDPO's sdpo.yaml with SWE-bench-specific settings
 #
 # Hardware target: single node, 8× A100/H100 GPUs
@@ -61,7 +61,7 @@ actor_rollout_ref:
       loss_mode: sdpo
     loss_agg_mode: token-mean
 
-    # -- Self-distillation (step-SDPO) ----------------------------------------
+    # -- Self-distillation (turn-SDPO) ----------------------------------------
     self_distillation:
       full_logit_distillation: true
       alpha: 0.5                              # JSD = 0.5 * fwd_KL + 0.5 * rev_KL

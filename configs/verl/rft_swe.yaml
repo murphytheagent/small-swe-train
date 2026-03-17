@@ -1,11 +1,11 @@
 # verl config for RFT (Rejection Fine-Tuning) pre-training stage
 # Supervised cross-entropy on formatted tool-call trajectories from SWE-smith.
-# Think tokens are EXCLUDED from loss (§6 masking policy).
+# Assistant-generated action tokens are included in loss (§6 masking policy).
 #
 # Hardware target: single node, variable GPU count
 # Model: Qwen3-4B-Instruct-2507 with LoRA
 #
-# This stage must pass format quality gates before entering step-SDPO.
+# This stage must pass format quality gates before entering turn-SDPO.
 # Gate thresholds are in configs/runtime/phase_transition_gates.v1.json.
 
 defaults:

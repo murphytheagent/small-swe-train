@@ -29,6 +29,7 @@ from trainer.rft_multiturn_dataset import (
 from trainer.rft_runtime import OnPolicyRFTRuntimeRequest, collect_onpolicy_rft_runtime_batch
 
 _GLOBAL_STEP_PATTERN = re.compile(r"^global_step_(\d+)$")
+_STEP_DIR_PATTERN = re.compile(r"^rft_step_(\d+)$")
 _VERL_SFT_TRAINER_DOC = (
     "https://github.com/lasgroup/SDPO/blob/main/verl/trainer/fsdp_sft_trainer.py"
 )
@@ -68,6 +69,8 @@ _MODEL_ARTIFACT_FILE_NAMES = {
     "pytorch_model.bin",
     "pytorch_model.bin.index.json",
 }
+_RFT_RUNTIME_LOOP_MANIFEST_FILE_NAME = "rft_runtime_loop_manifest.json"
+_RFT_LATEST_COMMITTED_CHECKPOINT_FILE_NAME = "rft_latest_committed_checkpoint.json"
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,18 @@ class LoraMergeSpec:
     rank: int
     alpha: int
     target_modules: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LatestCommittedCheckpoint:
+    stage: str
+    committed_step_index: int
+    latest_hf_checkpoint: Path
+    latest_vllm_checkpoint: Path
+    resume_model_path: Path
+    selection_contract: Mapping[str, Any]
+    correctness_contract: str
+    committed_utc: str
 
 
 class VLLMServerController:
@@ -369,6 +384,226 @@ def _append_vllm_debug_snapshot(*, log_path: Path, label: str) -> None:
         handle.write("\n")
 
 
+def _runtime_loop_manifest_path(output_dir: Path) -> Path:
+    return output_dir / _RFT_RUNTIME_LOOP_MANIFEST_FILE_NAME
+
+
+def _latest_committed_checkpoint_path(output_dir: Path) -> Path:
+    return output_dir / _RFT_LATEST_COMMITTED_CHECKPOINT_FILE_NAME
+
+
+def _selection_contract_for_rft() -> dict[str, Any]:
+    return {
+        "mode": "format_first_rft",
+        "require_terminal": True,
+        "require_format_valid": True,
+    }
+
+
+def _load_existing_step_summaries(output_dir: Path, *, committed_step_index: int) -> list[dict[str, Any]]:
+    if committed_step_index < 0:
+        return []
+
+    summaries: list[dict[str, Any]] = []
+    for step_index in range(committed_step_index + 1):
+        summary_path = output_dir / f"rft_step_{step_index:05d}" / "rft_step_summary.json"
+        payload = _load_json_mapping(summary_path)
+        if payload is None:
+            continue
+        summaries.append(payload)
+    return summaries
+
+
+def _load_existing_runtime_manifest(
+    *,
+    output_dir: Path,
+    default_config: Mapping[str, Any],
+    committed_step_index: int,
+) -> dict[str, Any]:
+    if committed_step_index < 0:
+        return {
+            "generated_utc": _utc_now(),
+            "config": dict(default_config),
+            "steps": [],
+        }
+
+    manifest_path = _runtime_loop_manifest_path(output_dir)
+    payload = _load_json_mapping(manifest_path)
+    if payload is None:
+        return {
+            "generated_utc": _utc_now(),
+            "config": dict(default_config),
+            "steps": _load_existing_step_summaries(
+                output_dir,
+                committed_step_index=committed_step_index,
+            ),
+        }
+
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        steps = []
+    if committed_step_index >= 0:
+        steps = steps[: committed_step_index + 1]
+
+    normalized_steps: list[dict[str, Any]] = []
+    seen_step_indexes: set[int] = set()
+    for raw_step in steps:
+        if not isinstance(raw_step, Mapping):
+            continue
+        parsed_step = dict(raw_step)
+        step_index = parsed_step.get("step_index")
+        if not isinstance(step_index, int):
+            continue
+        if step_index < 0 or step_index > committed_step_index or step_index in seen_step_indexes:
+            continue
+        seen_step_indexes.add(step_index)
+        normalized_steps.append(parsed_step)
+
+    for step_index in range(committed_step_index + 1):
+        if step_index in seen_step_indexes:
+            continue
+        step_summary_path = output_dir / f"rft_step_{step_index:05d}" / "rft_step_summary.json"
+        recovered = _load_json_mapping(step_summary_path)
+        if recovered is None:
+            continue
+        recovered_step_index = recovered.get("step_index")
+        if recovered_step_index != step_index:
+            continue
+        normalized_steps.append(recovered)
+
+    normalized_steps.sort(key=lambda item: int(item.get("step_index", 0)))
+
+    payload["config"] = dict(default_config)
+    payload["steps"] = normalized_steps
+    return dict(payload)
+
+
+def _load_latest_committed_checkpoint(output_dir: Path) -> LatestCommittedCheckpoint | None:
+    payload = _load_json_mapping(_latest_committed_checkpoint_path(output_dir))
+    if payload is None:
+        return None
+
+    stage = str(payload.get("stage", "")).strip() or "format_rft"
+    committed_step_index = _require_non_negative_int(
+        payload.get("committed_step_index"),
+        label="committed_step_index",
+    )
+    latest_hf_checkpoint = _require_existing_path(
+        payload.get("latest_hf_checkpoint"),
+        label="latest_hf_checkpoint",
+    )
+    latest_vllm_checkpoint = _require_existing_path(
+        payload.get("latest_vllm_checkpoint"),
+        label="latest_vllm_checkpoint",
+    )
+    resume_model_path = _require_existing_path(
+        payload.get("resume_model_path"),
+        label="resume_model_path",
+    )
+    selection_contract_raw = payload.get("selection_contract")
+    selection_contract = (
+        dict(selection_contract_raw)
+        if isinstance(selection_contract_raw, Mapping)
+        else _selection_contract_for_rft()
+    )
+    correctness_contract = str(payload.get("correctness_contract", "")).strip() or "heuristic"
+    committed_utc = str(payload.get("committed_utc", "")).strip() or _utc_now()
+    return LatestCommittedCheckpoint(
+        stage=stage,
+        committed_step_index=committed_step_index,
+        latest_hf_checkpoint=latest_hf_checkpoint,
+        latest_vllm_checkpoint=latest_vllm_checkpoint,
+        resume_model_path=resume_model_path,
+        selection_contract=selection_contract,
+        correctness_contract=correctness_contract,
+        committed_utc=committed_utc,
+    )
+
+
+def _build_latest_committed_checkpoint_payload(
+    *,
+    step_index: int,
+    latest_hf_checkpoint: Path,
+    latest_vllm_checkpoint: Path,
+) -> dict[str, Any]:
+    return {
+        "stage": "format_rft",
+        "committed_step_index": int(step_index),
+        "latest_hf_checkpoint": str(latest_hf_checkpoint),
+        "latest_vllm_checkpoint": str(latest_vllm_checkpoint),
+        "resume_model_path": str(latest_vllm_checkpoint),
+        "selection_contract": _selection_contract_for_rft(),
+        "correctness_contract": "heuristic",
+        "committed_utc": _utc_now(),
+    }
+
+
+def _load_json_mapping(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise RuntimeError(f"Expected mapping payload in {path}.")
+    return dict(payload)
+
+
+def _require_existing_path(value: Any, *, label: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(f"Latest committed checkpoint is missing `{label}`.")
+    path = Path(value).resolve()
+    if not path.exists():
+        raise RuntimeError(
+            "Latest committed checkpoint is incomplete: "
+            f"`{label}` does not exist at {path}."
+        )
+    return path
+
+
+def _require_non_negative_int(value: Any, *, label: str) -> int:
+    if isinstance(value, bool):
+        raise RuntimeError(f"Latest committed checkpoint `{label}` must be a non-negative integer.")
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = int(value.strip())
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Latest committed checkpoint `{label}` must be a non-negative integer."
+            ) from exc
+        if parsed >= 0:
+            return parsed
+    raise RuntimeError(f"Latest committed checkpoint `{label}` must be a non-negative integer.")
+
+
+def _discover_existing_step_dirs(
+    output_dir: Path,
+    *,
+    max_step_index: int | None = None,
+) -> list[Path]:
+    if not output_dir.is_dir():
+        return []
+
+    discovered: list[tuple[int, Path]] = []
+    for path in output_dir.iterdir():
+        if not path.is_dir():
+            continue
+        match = _STEP_DIR_PATTERN.match(path.name)
+        if match is None:
+            continue
+        step_index = int(match.group(1))
+        if max_step_index is not None and step_index > max_step_index:
+            continue
+        discovered.append((step_index, path))
+    discovered.sort(key=lambda item: item[0])
+    return [path for _, path in discovered]
+
+
+def _append_unique_path(paths: list[Path], path: Path) -> None:
+    if path not in paths:
+        paths.append(path)
+
+
 def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     vllm_logs = config.output_dir / "vllm_server.log"
@@ -389,30 +624,51 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         config_name=config.config_name,
         trainer_overrides=config.trainer_overrides,
     )
-    runtime_manifest: dict[str, Any] = {
-        "generated_utc": _utc_now(),
-        "config": {
-            "rft_steps": config.rft_steps,
-            "samples_per_task": config.samples_per_task,
-            "task_batch_size": config.task_batch_size,
-            "eval_split_fraction": config.eval_split_fraction,
-            "eval_min_rows": config.eval_min_rows,
-            "collector_max_in_flight_tasks": collector_max_in_flight_tasks,
-            "collector_max_turns_per_attempt": collector_max_turns_per_attempt,
-            "sft_num_epoch_per_batch": config.sft_num_epoch_per_batch,
-            "checkpoint_keep_last": config.checkpoint_keep_last,
-            "train_batch_size": config.train_batch_size,
-            "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
-            "trainer_data_max_length": trainer_data_max_length,
-            "data_config_name": config.data_config_name,
-            "turn_generator_mode": config.turn_generator_mode,
-            "initial_model": config.initial_model,
-            "vllm_base_url": config.vllm_base_url,
-            "vllm_served_model": config.vllm_served_model,
-            "manage_vllm": config.manage_vllm,
-        },
-        "steps": [],
+    default_manifest_config = {
+        "rft_steps": config.rft_steps,
+        "samples_per_task": config.samples_per_task,
+        "task_batch_size": config.task_batch_size,
+        "eval_split_fraction": config.eval_split_fraction,
+        "eval_min_rows": config.eval_min_rows,
+        "collector_max_in_flight_tasks": collector_max_in_flight_tasks,
+        "collector_max_turns_per_attempt": collector_max_turns_per_attempt,
+        "sft_num_epoch_per_batch": config.sft_num_epoch_per_batch,
+        "checkpoint_keep_last": config.checkpoint_keep_last,
+        "train_batch_size": config.train_batch_size,
+        "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
+        "trainer_data_max_length": trainer_data_max_length,
+        "data_config_name": config.data_config_name,
+        "turn_generator_mode": config.turn_generator_mode,
+        "initial_model": config.initial_model,
+        "vllm_base_url": config.vllm_base_url,
+        "vllm_served_model": config.vllm_served_model,
+        "manage_vllm": config.manage_vllm,
     }
+    latest_committed_checkpoint = _load_latest_committed_checkpoint(config.output_dir)
+    committed_step_index = (
+        latest_committed_checkpoint.committed_step_index
+        if latest_committed_checkpoint is not None
+        else -1
+    )
+    runtime_manifest = _load_existing_runtime_manifest(
+        output_dir=config.output_dir,
+        default_config=default_manifest_config,
+        committed_step_index=committed_step_index,
+    )
+    runtime_manifest["latest_committed_checkpoint_path"] = str(
+        _latest_committed_checkpoint_path(config.output_dir)
+    )
+    runtime_manifest["resume_mode"] = (
+        "latest_committed_outer_loop_checkpoint"
+        if latest_committed_checkpoint is not None
+        else "fresh_run"
+    )
+    runtime_manifest["resume_start_step_index"] = committed_step_index + 1
+    runtime_manifest["latest_committed_step_index"] = (
+        latest_committed_checkpoint.committed_step_index
+        if latest_committed_checkpoint is not None
+        else None
+    )
 
     if config.dry_run:
         _print_dry_run_plan(
@@ -422,17 +678,33 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         return
 
     tokenizer = _load_tokenizer(config.initial_model)
-    current_model_path = config.initial_model
+    current_model_path = (
+        str(latest_committed_checkpoint.resume_model_path)
+        if latest_committed_checkpoint is not None
+        else config.initial_model
+    )
+    start_step_index = committed_step_index + 1
+    if start_step_index >= config.rft_steps:
+        runtime_manifest["final_model_path"] = current_model_path
+        runtime_manifest["completed_utc"] = _utc_now()
+        _write_json(_runtime_loop_manifest_path(config.output_dir), runtime_manifest)
+        return
     vllm_controller = VLLMServerController(config=config, log_path=vllm_logs)
-    run_step_dirs: list[Path] = []
-    checkpoint_step_dirs: list[Path] = []
+    existing_step_dirs = _discover_existing_step_dirs(
+        config.output_dir,
+        max_step_index=committed_step_index,
+    )
+    run_step_dirs: list[Path] = list(existing_step_dirs)
+    checkpoint_step_dirs: list[Path] = [
+        step_dir for step_dir in existing_step_dirs if (step_dir / "trainer_checkpoints").is_dir()
+    ]
     wandb_run = _init_rft_runtime_loop_wandb_run(config=config)
 
     try:
         if config.manage_vllm:
             vllm_controller.start(model_path=current_model_path)
 
-        for step_index in range(config.rft_steps):
+        for step_index in range(start_step_index, config.rft_steps):
             step_start = time.monotonic()
             step_dir = config.output_dir / f"rft_step_{step_index:05d}"
             collector_dir = step_dir / "collector_artifacts"
@@ -441,7 +713,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             trainer_checkpoint_root = step_dir / "trainer_checkpoints"
             reset_step_artifacts(step_dir)
             step_dir.mkdir(parents=True, exist_ok=True)
-            run_step_dirs.append(step_dir)
+            _append_unique_path(run_step_dirs, step_dir)
 
             runtime_overrides: dict[str, int] = {
                 "task_batch_size": config.task_batch_size,
@@ -502,6 +774,12 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             trainer_metrics: dict[str, float | int] = {}
             trainer_skipped = False
             skip_reason: str | None = None
+            pending_latest_committed_checkpoint_payload: dict[str, Any] | None = None
+            pending_latest_committed_step_index = (
+                latest_committed_checkpoint.committed_step_index
+                if latest_committed_checkpoint is not None
+                else None
+            )
 
             if selected_count_after_max_length_filter < 1:
                 trainer_skipped = True
@@ -607,12 +885,23 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                             checkpoint_dir=latest_hf_checkpoint,
                             trainer_overrides=config.trainer_overrides,
                         )
+                        pending_latest_committed_checkpoint_payload = (
+                            _build_latest_committed_checkpoint_payload(
+                                step_index=step_index,
+                                latest_hf_checkpoint=latest_hf_checkpoint,
+                                latest_vllm_checkpoint=latest_vllm_checkpoint,
+                            )
+                        )
+                        pending_latest_committed_step_index = step_index
+                        runtime_manifest["latest_committed_step_index"] = (
+                            pending_latest_committed_step_index
+                        )
                         pruned_global_step_checkpoints = prune_old_global_step_checkpoints(
                             checkpoint_root=trainer_checkpoint_root,
                             keep_last=config.checkpoint_keep_last,
                         )
                         current_model_path = str(latest_vllm_checkpoint)
-                        checkpoint_step_dirs.append(step_dir)
+                        _append_unique_path(checkpoint_step_dirs, step_dir)
 
                         # Restart vLLM only when another collection step remains.
                         # Restarting after the final step adds unnecessary startup cost
@@ -625,13 +914,24 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 pruned_checkpoint_roots = prune_old_step_checkpoints(
                     step_dirs=checkpoint_step_dirs,
                     keep_last=config.checkpoint_keep_last,
+                    protected_step_dirs=(
+                        [config.output_dir / f"rft_step_{pending_latest_committed_step_index:05d}"]
+                        if pending_latest_committed_step_index is not None
+                        else ()
+                    ),
                 )
             pruned_step_payloads = prune_old_step_payloads(
                 step_dirs=run_step_dirs,
                 keep_last=config.checkpoint_keep_last,
+                protected_step_dirs=(
+                    [config.output_dir / f"rft_step_{pending_latest_committed_step_index:05d}"]
+                    if pending_latest_committed_step_index is not None
+                    else ()
+                ),
             )
             step_summary = {
                 "step_index": step_index,
+                "stage": "format_rft",
                 "selected_count": selected_count_raw,
                 "selected_count_raw": selected_count_raw,
                 "selected_count_after_length_filter": selected_count_after_max_length_filter,
@@ -674,15 +974,30 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "latest_vllm_checkpoint": (
                     str(latest_vllm_checkpoint) if latest_vllm_checkpoint else None
                 ),
+                "resume_model_path": current_model_path,
+                "selection_contract": _selection_contract_for_rft(),
+                "correctness_contract": "heuristic",
                 "trainer_command": trainer_command,
                 "pruned_global_step_checkpoints": [
                     str(path) for path in pruned_global_step_checkpoints
                 ],
                 "pruned_checkpoint_roots": [str(path) for path in pruned_checkpoint_roots],
                 "pruned_step_payloads": [str(path) for path in pruned_step_payloads],
+                "latest_committed_step_index": (
+                    pending_latest_committed_step_index
+                ),
             }
             runtime_manifest["steps"].append(step_summary)
             _write_json(step_dir / "rft_step_summary.json", step_summary)
+            _write_json(_runtime_loop_manifest_path(config.output_dir), runtime_manifest)
+            if pending_latest_committed_checkpoint_payload is not None:
+                _write_json(
+                    _latest_committed_checkpoint_path(config.output_dir),
+                    pending_latest_committed_checkpoint_payload,
+                )
+                latest_committed_checkpoint = _load_latest_committed_checkpoint(
+                    config.output_dir
+                )
             _log_rft_runtime_step_to_wandb(wandb_run=wandb_run, step_summary=step_summary)
     finally:
         if config.manage_vllm:
@@ -695,7 +1010,10 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
 
     runtime_manifest["final_model_path"] = current_model_path
     runtime_manifest["completed_utc"] = _utc_now()
-    _write_json(config.output_dir / "rft_runtime_loop_manifest.json", runtime_manifest)
+    runtime_manifest["latest_committed_checkpoint_path"] = str(
+        _latest_committed_checkpoint_path(config.output_dir)
+    )
+    _write_json(_runtime_loop_manifest_path(config.output_dir), runtime_manifest)
 
 
 def build_trainer_step_command(
@@ -1140,7 +1458,12 @@ def _parse_hydra_list_override(raw_value: str) -> tuple[str, ...]:
     return tuple(items)
 
 
-def prune_old_step_checkpoints(*, step_dirs: Sequence[str | Path], keep_last: int) -> list[Path]:
+def prune_old_step_checkpoints(
+    *,
+    step_dirs: Sequence[str | Path],
+    keep_last: int,
+    protected_step_dirs: Sequence[str | Path] = (),
+) -> list[Path]:
     """Delete old per-step trainer checkpoint trees beyond the keep-last window."""
     if keep_last < 1:
         raise ValueError("keep_last must be >= 1 to preserve the current model checkpoint.")
@@ -1149,7 +1472,12 @@ def prune_old_step_checkpoints(*, step_dirs: Sequence[str | Path], keep_last: in
     if len(ordered_step_dirs) <= keep_last:
         return []
 
-    to_prune = ordered_step_dirs[: len(ordered_step_dirs) - keep_last]
+    protected = {Path(item) for item in protected_step_dirs}
+    to_prune = [
+        step_dir
+        for step_dir in ordered_step_dirs[: len(ordered_step_dirs) - keep_last]
+        if step_dir not in protected
+    ]
     pruned: list[Path] = []
     for step_dir in to_prune:
         checkpoint_root = step_dir / "trainer_checkpoints"
@@ -1182,7 +1510,12 @@ def prune_old_global_step_checkpoints(*, checkpoint_root: str | Path, keep_last:
     return pruned
 
 
-def prune_old_step_payloads(*, step_dirs: Sequence[str | Path], keep_last: int) -> list[Path]:
+def prune_old_step_payloads(
+    *,
+    step_dirs: Sequence[str | Path],
+    keep_last: int,
+    protected_step_dirs: Sequence[str | Path] = (),
+) -> list[Path]:
     """Delete old per-step rollout payloads beyond the keep-last window.
 
     Retained summaries (`rft_step_summary.json`) remain in each step directory for
@@ -1195,7 +1528,12 @@ def prune_old_step_payloads(*, step_dirs: Sequence[str | Path], keep_last: int) 
     if len(ordered_step_dirs) <= keep_last:
         return []
 
-    to_prune = ordered_step_dirs[: len(ordered_step_dirs) - keep_last]
+    protected = {Path(item) for item in protected_step_dirs}
+    to_prune = [
+        step_dir
+        for step_dir in ordered_step_dirs[: len(ordered_step_dirs) - keep_last]
+        if step_dir not in protected
+    ]
     pruned: list[Path] = []
     for step_dir in to_prune:
         for relative in (
@@ -1529,9 +1867,11 @@ def _resolve_vllm_api_key() -> str | None:
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(dict(payload), handle, ensure_ascii=True, sort_keys=True, indent=2)
         handle.write("\n")
+    temp_path.replace(path)
 
 
 def _coerce_rows(value: Any) -> list[dict[str, Any]]:

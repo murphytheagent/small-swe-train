@@ -22,7 +22,7 @@ def build_response_mask(labels: Sequence[str], *, stage: MaskStage) -> list[bool
 def inject_response_mask(
     batch: Sequence[Mapping[str, Any]],
     *,
-    stage: MaskStage = "step_sdpo",
+    stage: MaskStage = "turn_sdpo",
     label_field: str = "token_labels",
     output_field: str = "response_mask",
 ) -> list[dict[str, Any]]:

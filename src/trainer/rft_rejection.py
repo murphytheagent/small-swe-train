@@ -28,6 +28,7 @@ def apply_rft_selection(
 
     for row in rows:
         mutable_row = dict(row)
+        mutable_row["stage"] = str(mutable_row.get("stage", "format_rft"))
         rejection_reason = evaluate_rft_rejection_reason(
             mutable_row,
             selection_policy=selection_policy,
@@ -35,13 +36,17 @@ def apply_rft_selection(
 
         if rejection_reason is None:
             mutable_row["rft_selected"] = True
+            mutable_row["stage_accepted"] = True
             mutable_row["rft_label"] = "accept"
+            mutable_row["stage_decision_reason"] = "accepted"
             selected_rows.append(mutable_row)
             continue
 
         mutable_row["rft_selected"] = False
+        mutable_row["stage_accepted"] = False
         mutable_row["rft_label"] = "reject" if selection_policy.relabel_rejected_attempts else "drop"
         mutable_row["rft_rejection_reason"] = rejection_reason
+        mutable_row["stage_decision_reason"] = rejection_reason
         rejected_rows.append(mutable_row)
 
     return RFTSelectionResult(
@@ -80,7 +85,7 @@ def evaluate_rft_rejection_reason(
         fallback=_coerce_bool(row.get("format_valid"), fallback=False),
     )
     final_submit_format_valid = _coerce_bool(
-        row.get("final_submit_format_valid"),
+        row.get("terminal_format_valid", row.get("final_submit_format_valid")),
         fallback=trajectory_format_valid and has_terminal_submit,
     )
     container_init_succeeded = _coerce_bool(

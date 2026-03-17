@@ -123,9 +123,19 @@ def dataproto_to_rows(batch: Any, tokenizer: Any) -> list[dict[str, Any]]:
                 _select_non_tensor(non_tensor_batch, "final_turn_has_submit", index),
                 fallback=False,
             ),
+            "terminal_format_valid": _coerce_bool(
+                _select_non_tensor(non_tensor_batch, "terminal_format_valid", index),
+                fallback=_coerce_bool(
+                    _select_non_tensor(non_tensor_batch, "final_submit_format_valid", index),
+                    fallback=False,
+                ),
+            ),
             "final_submit_format_valid": _coerce_bool(
                 _select_non_tensor(non_tensor_batch, "final_submit_format_valid", index),
-                fallback=False,
+                fallback=_coerce_bool(
+                    _select_non_tensor(non_tensor_batch, "terminal_format_valid", index),
+                    fallback=False,
+                ),
             ),
             "include_student_attempt_for_teacher": _coerce_bool(
                 _select_non_tensor(non_tensor_batch, "include_student_attempt_for_teacher", index),

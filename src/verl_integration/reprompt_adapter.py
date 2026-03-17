@@ -594,7 +594,9 @@ def _extract_verifier_feedback_block(sample: Mapping[str, Any]) -> str:
     resolved = _coerce_optional_bool_flag(sample.get("resolved"))
     verification_missing = _coerce_optional_bool_flag(sample.get("verification_missing"))
     final_turn_has_submit = _coerce_optional_bool_flag(sample.get("final_turn_has_submit"))
-    final_submit_format_valid = _coerce_optional_bool_flag(sample.get("final_submit_format_valid"))
+    final_submit_format_valid = _coerce_optional_bool_flag(
+        sample.get("terminal_format_valid", sample.get("final_submit_format_valid"))
+    )
 
     sections: list[str] = []
     if verification_missing is True:
