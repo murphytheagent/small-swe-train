@@ -2,9 +2,11 @@
 
 Repository for a chat-style SWE training stack with `format_rft`, optional `positive_rft`, and `turn_sdpo` stages.
 
-Latest doc update: 2026-03-09.
+Latest doc update: 2026-03-17.
 
 ## Current status
+- PR #26 (`task/1773739092-rft-heldout-positive`) is the active implementation branch at head `0066a01`; it now aligns looped and direct held-out/positive-RFT behavior, adds the shared-parquet ambiguity guard, and reuses the train partition when the implicit held-out eval split is empty.
+- The focused plus broader RFT regression bundle is green on PR #26, but the latest local `codex review` still degrades into the known `uv`-missing tooling path before a terminal verdict, so the branch is waiting on human or fresh remote review rather than another local code change.
 - PR #18 (`plan/1772102085-current-turn-supervision`) merged into `main` on 2026-03-08 05:02 UTC, so current-turn supervision is now on the base branch.
 - The latest validated E2E execution remains the 8-GPU rerun chain `826` / `827` / `828`; detailed metrics and follow-up notes live in `IMPLEMENTATION_BLUEPRINT.md`.
 - PR #23 remains open as a planning branch, but it is still intentionally blocked by the standing `SWE-rebench` integration constraint.
