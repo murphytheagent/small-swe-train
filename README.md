@@ -6,7 +6,7 @@ Latest doc update: 2026-03-19.
 
 ## Current status
 - PR #26 (`task/1773739092-rft-heldout-positive`) is the active implementation branch at published head `0066a01`; it now aligns looped and direct held-out/positive-RFT behavior, adds the shared-parquet ambiguity guard, and reuses the train partition when the implicit held-out eval split is empty.
-- The local checkout is one docs-only commit ahead at `b1fa665`, so the working tree and the published PR are separate review surfaces.
+- The local checkout now includes a docs-only maintenance refresh beyond the published PR head, so the working tree and the published PR are separate review surfaces.
 - The focused plus broader RFT regression bundle is green on PR #26, but GitHub still shows 2 unresolved non-outdated review threads and the latest bounded local review against `main` again timed out before a terminal verdict, so the branch is still not locally review-cleared.
 - The actual next executable step is still the staged remote E2E run: the scratch checkout and sequential `format_rft 3 -> positive_rft 3` script are ready, and Slurm job `1428` was canceled rather than left pending unattended.
 - PR #18 (`plan/1772102085-current-turn-supervision`) merged into `main` on 2026-03-08 05:02 UTC, so current-turn supervision is now on the base branch.
