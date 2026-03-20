@@ -222,8 +222,11 @@ def test_main_writes_pilot_summary_format_metric_fields(
             del settings, turn_generator
             self._rows = collector_payloads.pop(0)
 
-        def collect_step(self, step_index: int):
+        def collect_step(self, step_index: int, *, row_callback=None):
             del step_index
+            if row_callback is not None:
+                for row in self._rows:
+                    row_callback(row)
             return list(self._rows)
 
     reward_payloads = [
@@ -264,6 +267,145 @@ def test_main_writes_pilot_summary_format_metric_fields(
         "parse_valid_rate": 0.99,
         "terminal_submission_rate": 0.97,
     }
+    assert summary["status"] == "completed"
+    assert summary["pair_row_count"] == 1
+
+
+def test_main_persists_partial_outputs_when_teacher_collection_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pilot = _load_pilot_module()
+    output_dir = tmp_path / "pilot-output"
+
+    monkeypatch.setattr(
+        pilot,
+        "resolve_on_policy_settings",
+        lambda **_: SimpleNamespace(runtime=SimpleNamespace(max_tool_calls_per_turn=4)),
+    )
+    monkeypatch.setattr(
+        pilot,
+        "load_vllm_turn_generator_config",
+        lambda: pilot.VLLMTurnGeneratorConfig(
+            base_url="http://127.0.0.1:8000/v1",
+            model_name="local-model",
+            request_timeout_sec=10,
+            max_tokens=128,
+            temperature=0.0,
+            top_p=1.0,
+            system_prompt="pilot-system",
+        ),
+    )
+    monkeypatch.setattr(pilot, "build_vllm_turn_generator", lambda *_args, **_kwargs: "turn-generator")
+
+    baseline_rows = [
+        {
+            "task_id": "task-1",
+            "attempt_index": 0,
+            "prompt": "Fix task 1",
+            "trajectory_assistant_turns": ["turn-0"],
+            "trajectory_history": ["turn-0"],
+            "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
+            "verification_feedback": "",
+            "verification_error": "",
+            "resolved": True,
+            "final_turn_has_submit": True,
+            "final_submit_format_valid": True,
+            "fail_to_pass_all_passed": True,
+            "pass_to_pass_all_passed": True,
+        },
+        {
+            "task_id": "task-2",
+            "attempt_index": 0,
+            "prompt": "Fix task 2",
+            "trajectory_assistant_turns": ["turn-0"],
+            "trajectory_history": ["turn-0"],
+            "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
+            "verification_feedback": "",
+            "verification_error": "",
+            "resolved": True,
+            "final_turn_has_submit": True,
+            "final_submit_format_valid": True,
+            "fail_to_pass_all_passed": True,
+            "pass_to_pass_all_passed": True,
+        },
+    ]
+    partial_teacher_rows = [
+        {
+            "task_id": "task-1",
+            "attempt_index": 0,
+            "prompt": "Fix task 1",
+            "trajectory_assistant_turns": ["turn-0"],
+            "trajectory_history": ["turn-0"],
+            "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
+            "verification_feedback": "",
+            "verification_error": "",
+            "resolved": True,
+            "final_turn_has_submit": True,
+            "final_submit_format_valid": True,
+            "fail_to_pass_all_passed": True,
+            "pass_to_pass_all_passed": True,
+        }
+    ]
+    collector_payloads = [
+        (baseline_rows, None),
+        (partial_teacher_rows, RuntimeError("teacher collector crashed")),
+    ]
+
+    class _FailingCollector:
+        def __init__(self, *, settings, turn_generator):
+            del settings, turn_generator
+            self._rows, self._error = collector_payloads.pop(0)
+
+        def collect_step(self, step_index: int, *, row_callback=None):
+            del step_index
+            if row_callback is not None:
+                for row in self._rows:
+                    row_callback(row)
+            if self._error is not None:
+                raise self._error
+            return list(self._rows)
+
+    reward_payloads = [
+        ([1.0], {"format_metrics": [{"parse_valid_rate": 1.0, "terminal_submission_rate": 1.0}]}),
+        ([1.0], {"format_metrics": [{"parse_valid_rate": 1.0, "terminal_submission_rate": 1.0}]}),
+        ([1.0], {"format_metrics": [{"parse_valid_rate": 1.0, "terminal_submission_rate": 1.0}]}),
+    ]
+
+    def _fake_reward_fn(rows, *, max_tool_calls):
+        del rows, max_tool_calls
+        return reward_payloads.pop(0)
+
+    monkeypatch.setattr(pilot, "OnPolicyRolloutCollector", _FailingCollector)
+    monkeypatch.setattr(pilot, "reward_fn", _fake_reward_fn)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_teacher_reprompt_pilot.py",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="teacher collector crashed"):
+        pilot.main()
+
+    baseline_lines = (output_dir / "baseline_rollout_rows.jsonl").read_text(encoding="utf-8").splitlines()
+    teacher_lines = (output_dir / "teacher_rollout_rows.jsonl").read_text(encoding="utf-8").splitlines()
+    pair_lines = (output_dir / "pair_rewards.jsonl").read_text(encoding="utf-8").splitlines()
+    summary = json.loads((output_dir / "pilot_summary.json").read_text(encoding="utf-8"))
+
+    assert len(baseline_lines) == 2
+    assert len(teacher_lines) == 1
+    assert len(pair_lines) == 1
+    assert summary["status"] == "failed"
+    assert summary["phase"] == "collecting_teacher"
+    assert summary["baseline_row_count"] == 2
+    assert summary["teacher_row_count"] == 1
+    assert summary["pair_row_count"] == 1
+    assert summary["missing_teacher_rows"] == 1
+    assert summary["error"] == "teacher collector crashed"
 
 
 def test_resolve_teacher_reprompt_turn_index_supports_dynamic_middle() -> None:

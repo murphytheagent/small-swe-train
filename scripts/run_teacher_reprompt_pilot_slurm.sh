@@ -162,7 +162,7 @@ if [[ "${DEFAULT_TP_SIZE}" -lt 1 ]]; then
   DEFAULT_TP_SIZE="1"
 fi
 TP_SIZE="${PILOT_VLLM_TP_SIZE:-${DEFAULT_TP_SIZE}}"
-MAX_IN_FLIGHT_TASKS="${PILOT_MAX_IN_FLIGHT_TASKS:-$(( TP_SIZE * 8 ))}"
+MAX_IN_FLIGHT_TASKS="${PILOT_MAX_IN_FLIGHT_TASKS:-$(( TP_SIZE * 16 ))}"
 
 export SMALL_SWE_VLLM_BASE_URL="${SMALL_SWE_VLLM_BASE_URL:-http://127.0.0.1:8000/v1}"
 export SMALL_SWE_VLLM_MODEL="${SMALL_SWE_VLLM_MODEL:-${SERVED_MODEL}}"
@@ -232,7 +232,7 @@ PILOT_CMD=(
   "${PYTHON_BIN}" scripts/run_teacher_reprompt_pilot.py
   --output-dir "${OUTPUT_DIR}"
   --task-batch-size "${PILOT_TASK_BATCH_SIZE:-1024}"
-  --attempts-per-task "${PILOT_ATTEMPTS_PER_TASK:-8}"
+  --attempts-per-task "${PILOT_ATTEMPTS_PER_TASK:-4}"
   --max-in-flight-tasks "${MAX_IN_FLIGHT_TASKS}"
   --teacher-reprompt-turn-index "${TURN_INDEX_VALUE}"
   --teacher-reprompt-turn-index-mode "${TURN_INDEX_MODE}"

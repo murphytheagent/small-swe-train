@@ -689,7 +689,7 @@ def test_teacher_reprompt_pilot_slurm_script_dry_run_uses_all_visible_gpus_for_t
         },
     )
     assert "--tensor-parallel-size 8" in result.stdout
-    assert "--max-in-flight-tasks 64" in result.stdout
+    assert "--max-in-flight-tasks 128" in result.stdout
 
 
 def test_teacher_reprompt_pilot_slurm_script_dry_run_accepts_fixed_kv_cache_overrides() -> None:
@@ -718,7 +718,7 @@ def test_teacher_reprompt_pilot_slurm_script_dry_run_succeeds_without_user_env()
     )
     assert result.returncode == 0, result.stderr
     assert "--tensor-parallel-size 8" in result.stdout
-    assert "--max-in-flight-tasks 64" in result.stdout
+    assert "--max-in-flight-tasks 128" in result.stdout
 
 
 def test_teacher_reprompt_pilot_slurm_script_dry_run_normalizes_negative_index_to_dynamic_middle() -> None:
@@ -744,6 +744,7 @@ def test_teacher_reprompt_pilot_slurm_script_dry_run_uses_larger_default_task_ba
         },
     )
     assert "--task-batch-size 1024" in result.stdout
+    assert "--attempts-per-task 4" in result.stdout
 
 
 def test_teacher_reprompt_pilot_slurm_script_dry_run_load_latest_rft_checkpoint_overrides_model_everywhere(

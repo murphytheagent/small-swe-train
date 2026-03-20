@@ -9,7 +9,7 @@ This note covers GPU-using scripts under `scripts/` and the resource requests th
 | `run_rft.sh` | Variable (recommend 8) | `8 x GPUs` | `64G x GPUs` | `24:00:00` | RFT loop uses `NPROC_PER_NODE`; scales by GPU count. |
 | `run_rft_onpolicy_rollout_proof.sh` | Variable (recommend 8) | `8 x GPUs` | `64G x GPUs` | `08:00:00` | Direct proof path, also keyed by GPU count. |
 | `run_sdpo.sh` | **8 required** | 64 | 512G | `24:00:00` | `configs/verl/sdpo_swe.yaml` is the `turn_sdpo` launcher and is 8-GPU tuned (`fsdp_size=8`, rollout TP/DP layout). |
-| `run_teacher_reprompt_pilot_slurm.sh` | Variable (recommend 8) | `8 x GPUs` | `32G x GPUs` | `12:00:00` | Pilot ablations run with vLLM tensor parallel; set `PILOT_VLLM_TP_SIZE == requested GPUs`. |
+| `run_teacher_reprompt_pilot_slurm.sh` | Variable (recommend 8) | `8 x GPUs` | `32G x GPUs` | `24:00:00` | Pilot ablations run with vLLM tensor parallel; set `PILOT_VLLM_TP_SIZE == requested GPUs`. |
 | `run_flash_attn_rebuild.sh` | 0 (default) | 8 | 128G | `03:00:00` | Build job defaults to no GPU request; override if your site requires one. |
 
 ## Shared Setup
@@ -311,6 +311,8 @@ This launcher starts a local vLLM OpenAI endpoint and runs
 `--tensor-parallel-size` to the Slurm GPU allocation (`SLURM_GPUS_ON_NODE`), so
 requesting `--gres=gpu:x` yields `tensor-parallel-size=x`. For ablations, set
 `PILOT_VLLM_TP_SIZE=${GPUS}` explicitly.
+The launcher defaults to `PILOT_ATTEMPTS_PER_TASK=4` and
+`PILOT_MAX_IN_FLIGHT_TASKS=PILOT_VLLM_TP_SIZE * 16` unless you override them.
 If `PILOT_TEACHER_TURN_INDEX=-1` is provided, the launcher auto-normalizes to
 `--teacher-reprompt-turn-index-mode dynamic_middle`, which now samples one
 eligible student turn uniformly at random.
@@ -381,6 +383,13 @@ Practical order for OOM reduction:
 4. Only then try `PILOT_VLLM_KV_CACHE_MEMORY_BYTES` or
    `PILOT_VLLM_NUM_GPU_BLOCKS_OVERRIDE`.
 
+Crash resilience:
+- The pilot now appends `baseline_rollout_rows.jsonl`,
+  `teacher_rollout_rows.jsonl`, and `pair_rewards.jsonl` as attempts finish.
+- `pilot_summary.json` is also updated incrementally with row counts, current
+  metrics, phase, and failure status, so killed jobs still leave partial
+  artifacts under `outputs/teacher_reprompt_pilot/job<SLURM_JOB_ID>`.
+
 Use only Slurm submissions for this launcher. The two canonical launch patterns
 below are the intended ones. For RFT artifacts, swap `RFT_SELECTOR` between
 `--load-latest-rft-checkpoint`, `--rft-manifest "$MANIFEST"`, and
@@ -401,7 +410,7 @@ sbatch \
   --gres="gpu:${GPUS}" \
   --cpus-per-task="${CPUS}" \
   --mem="${MEM}" \
-  --time=12:00:00 \
+  --time=24:00:00 \
   --job-name=teacher-reprompt-pilot \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
@@ -432,7 +441,7 @@ sbatch \
   --gres="gpu:${GPUS}" \
   --cpus-per-task="${CPUS}" \
   --mem="${MEM}" \
-  --time=12:00:00 \
+  --time=24:00:00 \
   --job-name=teacher-reprompt-qwen35 \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \

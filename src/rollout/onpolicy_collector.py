@@ -191,7 +191,12 @@ class OnPolicyRolloutCollector:
     def settings(self) -> OnPolicySettings:
         return self._settings
 
-    def collect_step(self, step_index: int) -> list[RolloutRow]:
+    def collect_step(
+        self,
+        step_index: int,
+        *,
+        row_callback: Callable[[RolloutRow], None] | None = None,
+    ) -> list[RolloutRow]:
         if step_index < 0:
             raise ValueError("step_index must be >= 0")
 
@@ -214,6 +219,7 @@ class OnPolicyRolloutCollector:
                     task=task,
                     runtime=runtime,
                     batch_container_count=max_workers,
+                    row_callback=row_callback,
                 )
         else:
             future_to_position = {}
@@ -226,6 +232,7 @@ class OnPolicyRolloutCollector:
                         task=task,
                         runtime=runtime,
                         batch_container_count=max_workers,
+                        row_callback=row_callback,
                     )
                     future_to_position[future] = task_position
 
@@ -248,6 +255,7 @@ class OnPolicyRolloutCollector:
         task: TaskSample,
         runtime: OnPolicyRuntimeConfig,
         batch_container_count: int,
+        row_callback: Callable[[RolloutRow], None] | None = None,
     ) -> list[RolloutRow]:
         rows: list[RolloutRow] = []
         for attempt_index in range(runtime.attempts_per_task):
@@ -271,6 +279,8 @@ class OnPolicyRolloutCollector:
                     executor=executor,
                 )
                 rows.append(row)
+                if row_callback is not None:
+                    row_callback(row)
             finally:
                 pool.release_all()
         return rows

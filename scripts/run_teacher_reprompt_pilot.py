@@ -7,7 +7,9 @@ import argparse
 import json
 import os
 import random
-from dataclasses import dataclass, replace
+import threading
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any, Mapping, Sequence
@@ -551,9 +553,25 @@ def extract_format_metrics(*, reward_info: Mapping[str, Any]) -> dict[str, float
     return metrics
 
 
-def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(payload), ensure_ascii=True, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, path)
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    _atomic_write_text(
+        path,
+        json.dumps(dict(payload), ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+    )
 
 
 def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -562,6 +580,225 @@ def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         for row in rows:
             handle.write(json.dumps(dict(row), ensure_ascii=True, sort_keys=True))
             handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _row_key(row: Mapping[str, Any]) -> tuple[str, int] | None:
+    task_id = str(row.get("task_id", "")).strip()
+    if not task_id:
+        return None
+    return task_id, int(row.get("attempt_index", 0) or 0)
+
+
+def _empty_pair_reward_summary() -> dict[str, Any]:
+    return {
+        "pair_count": 0,
+        "student_mean_reward": 0.0,
+        "teacher_mean_reward": 0.0,
+        "mean_reward_delta": 0.0,
+        "improved_count": 0,
+        "worsened_count": 0,
+        "tied_count": 0,
+    }
+
+
+@dataclass
+class _FormatMetricAccumulator:
+    row_count: int = 0
+    metric_totals: dict[str, float] = field(default_factory=dict)
+
+    def add(self, metrics: Mapping[str, float]) -> None:
+        self.row_count += 1
+        for key, value in metrics.items():
+            normalized_key = str(key)
+            self.metric_totals[normalized_key] = self.metric_totals.get(normalized_key, 0.0) + float(value)
+
+    def snapshot(self) -> dict[str, float]:
+        if self.row_count <= 0:
+            return {}
+        return {
+            key: float(total / self.row_count)
+            for key, total in sorted(self.metric_totals.items())
+        }
+
+
+class PilotPartialWriter:
+    """Append pilot rows incrementally so long-running jobs leave partial artifacts."""
+
+    def __init__(
+        self,
+        *,
+        output_dir: Path,
+        summary_seed: Mapping[str, Any],
+        max_tool_calls: int,
+    ) -> None:
+        self._output_dir = output_dir
+        self._summary_seed = dict(summary_seed)
+        self._max_tool_calls = int(max_tool_calls)
+        self._lock = threading.Lock()
+        self._phase = "initializing"
+        self._status = "running"
+        self._error = ""
+
+        self._baseline_metrics = _FormatMetricAccumulator()
+        self._teacher_metrics = _FormatMetricAccumulator()
+        self._baseline_row_count = 0
+        self._teacher_row_count = 0
+        self._baseline_reward_map: dict[tuple[str, int], float] = {}
+        self._teacher_reward_map: dict[tuple[str, int], float] = {}
+        self._baseline_key_order: list[tuple[str, int]] = []
+        self._paired_keys: set[tuple[str, int]] = set()
+        self._pair_records: list[dict[str, Any]] = []
+
+        self._baseline_rows_path = self._output_dir / "baseline_rollout_rows.jsonl"
+        self._teacher_rows_path = self._output_dir / "teacher_rollout_rows.jsonl"
+        self._pair_rewards_path = self._output_dir / "pair_rewards.jsonl"
+        self._summary_path = self._output_dir / "pilot_summary.json"
+
+        self._initialize_output_files()
+
+    def _initialize_output_files(self) -> None:
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(self._baseline_rows_path, "")
+        _atomic_write_text(self._teacher_rows_path, "")
+        _atomic_write_text(self._pair_rewards_path, "")
+        self._baseline_handle = self._baseline_rows_path.open("a", encoding="utf-8")
+        self._teacher_handle = self._teacher_rows_path.open("a", encoding="utf-8")
+        self._pair_handle = self._pair_rewards_path.open("a", encoding="utf-8")
+        with self._lock:
+            self._write_summary_locked()
+
+    def close(self) -> None:
+        for handle in (self._baseline_handle, self._teacher_handle, self._pair_handle):
+            handle.close()
+
+    def set_phase(self, phase: str) -> None:
+        with self._lock:
+            self._phase = str(phase).strip() or self._phase
+            self._write_summary_locked()
+
+    def make_row_callback(self, phase: str):
+        normalized_phase = str(phase).strip().lower()
+
+        def _callback(row: Mapping[str, Any]) -> None:
+            self.record_row(phase=normalized_phase, row=row)
+
+        return _callback
+
+    def record_row(self, *, phase: str, row: Mapping[str, Any]) -> None:
+        rewards, reward_info = reward_fn([row], max_tool_calls=self._max_tool_calls)
+        reward_value = float(rewards[0]) if rewards else 0.0
+        format_metrics = extract_format_metrics(reward_info=reward_info)
+        key = _row_key(row)
+
+        with self._lock:
+            if phase == "baseline":
+                self._baseline_row_count += 1
+                self._append_jsonl_row_locked(self._baseline_handle, row)
+                self._baseline_metrics.add(format_metrics)
+                if key is not None:
+                    if key not in self._baseline_reward_map:
+                        self._baseline_key_order.append(key)
+                    self._baseline_reward_map[key] = reward_value
+            elif phase == "teacher":
+                self._teacher_row_count += 1
+                self._append_jsonl_row_locked(self._teacher_handle, row)
+                self._teacher_metrics.add(format_metrics)
+                if key is not None:
+                    self._teacher_reward_map[key] = reward_value
+                    self._append_pair_locked(
+                        task_id=key[0],
+                        attempt_index=key[1],
+                        student_reward=float(self._baseline_reward_map.get(key, 0.0)),
+                        teacher_reward=reward_value,
+                        teacher_row_missing=False,
+                    )
+            else:
+                raise ValueError(f"Unsupported pilot partial-write phase: {phase!r}")
+
+            self._write_summary_locked()
+
+    def finalize_completed(self) -> dict[str, Any]:
+        with self._lock:
+            self._phase = "completed"
+            self._status = "completed"
+            self._append_missing_pairs_locked()
+            return self._write_summary_locked()
+
+    def mark_failed(self, error: str) -> dict[str, Any]:
+        with self._lock:
+            self._status = "failed"
+            self._error = str(error).strip()
+            return self._write_summary_locked()
+
+    def _append_jsonl_row_locked(self, handle: Any, row: Mapping[str, Any]) -> None:
+        handle.write(json.dumps(dict(row), ensure_ascii=True, sort_keys=True))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    def _append_pair_locked(
+        self,
+        *,
+        task_id: str,
+        attempt_index: int,
+        student_reward: float,
+        teacher_reward: float,
+        teacher_row_missing: bool,
+    ) -> None:
+        key = (task_id, int(attempt_index))
+        if key in self._paired_keys:
+            return
+        record = {
+            "task_id": task_id,
+            "attempt_index": int(attempt_index),
+            "student_reward": float(student_reward),
+            "teacher_reward": float(teacher_reward),
+            "reward_delta": float(teacher_reward) - float(student_reward),
+            "teacher_row_missing": bool(teacher_row_missing),
+        }
+        self._paired_keys.add(key)
+        self._pair_records.append(record)
+        self._append_jsonl_row_locked(self._pair_handle, record)
+
+    def _append_missing_pairs_locked(self) -> None:
+        for task_id, attempt_index in self._baseline_key_order:
+            key = (task_id, attempt_index)
+            if key in self._paired_keys:
+                continue
+            self._append_pair_locked(
+                task_id=task_id,
+                attempt_index=attempt_index,
+                student_reward=float(self._baseline_reward_map.get(key, 0.0)),
+                teacher_reward=float(self._teacher_reward_map.get(key, 0.0)),
+                teacher_row_missing=True,
+            )
+
+    def _write_summary_locked(self) -> dict[str, Any]:
+        summary = dict(self._summary_seed)
+        summary.update(
+            {
+                "status": self._status,
+                "phase": self._phase,
+                "last_updated_utc": _utc_timestamp(),
+                "baseline_row_count": self._baseline_row_count,
+                "teacher_row_count": self._teacher_row_count,
+                "pair_row_count": len(self._pair_records),
+                "missing_teacher_rows": max(len(self._baseline_key_order) - len(self._paired_keys), 0),
+                "baseline_format_metrics": self._baseline_metrics.snapshot(),
+                "teacher_format_metrics": self._teacher_metrics.snapshot(),
+                "reward_summary": (
+                    summarize_pair_rewards(self._pair_records)
+                    if self._pair_records
+                    else _empty_pair_reward_summary()
+                ),
+            }
+        )
+        if self._error:
+            summary["error"] = self._error
+        _write_json(self._summary_path, summary)
+        return summary
 
 
 def _discover_latest_rft_manifest(*, project_root: Path) -> Path | None:
@@ -707,115 +944,72 @@ def main() -> None:
         vllm_config = replace(vllm_config, model_name=resolved_rft_checkpoint)
     student_vllm_config, teacher_vllm_config = _resolve_pilot_vllm_configs(base_config=vllm_config)
     student_turn_generator = build_vllm_turn_generator(student_vllm_config)
-
-    baseline_collector = OnPolicyRolloutCollector(
-        settings=settings,
-        turn_generator=student_turn_generator,
-    )
-    baseline_rows = [dict(row) for row in baseline_collector.collect_step(int(args.step_index))]
-    baseline_trace_map = _build_baseline_trace_map(baseline_rows)
-
-    teacher_turn_generator = _build_teacher_turn_generator(
-        baseline_trace_map=baseline_trace_map,
-        fallback_turn_generator=student_turn_generator,
-        vllm_config=teacher_vllm_config,
-        teacher_reprompt_turn_index=int(args.teacher_reprompt_turn_index),
-        teacher_reprompt_turn_index_mode=turn_index_mode,
-        max_reprompt_len=int(args.max_reprompt_len),
-        num_recent_raw_blocks=int(args.num_recent_raw_blocks),
-        turn_supervision_mode=turn_supervision_mode,
-        verifier_feedback_mode=str(args.verifier_feedback_mode),
-    )
-    teacher_collector = OnPolicyRolloutCollector(
-        settings=settings,
-        turn_generator=teacher_turn_generator,
-    )
-    teacher_rows = [dict(row) for row in teacher_collector.collect_step(int(args.step_index))]
-
-    teacher_map: dict[tuple[str, int], dict[str, Any]] = {}
-    for row in teacher_rows:
-        task_id = str(row.get("task_id", "")).strip()
-        if not task_id:
-            continue
-        attempt_index = int(row.get("attempt_index", 0) or 0)
-        teacher_map[(task_id, attempt_index)] = row
-
-    baseline_rewards, _baseline_info = reward_fn(
-        baseline_rows,
+    writer = PilotPartialWriter(
+        output_dir=Path(args.output_dir),
+        summary_seed={
+            "data_config_name": str(args.data_config_name),
+            "step_index": int(args.step_index),
+            "task_batch_size": int(args.task_batch_size),
+            "attempts_per_task": int(args.attempts_per_task),
+            "teacher_reprompt_turn_index": int(args.teacher_reprompt_turn_index),
+            "teacher_reprompt_turn_index_mode": turn_index_mode,
+            "turn_supervision_mode": str(args.turn_supervision_mode),
+            "verifier_feedback_mode": str(args.verifier_feedback_mode),
+            "verify_submissions": bool(args.verify_submissions),
+            "verifier_timeout_sec": int(args.verifier_timeout_sec),
+            "max_reprompt_len": int(args.max_reprompt_len),
+            "num_recent_raw_blocks": int(args.num_recent_raw_blocks),
+            "vllm_model_name": str(vllm_config.model_name),
+            "student_temperature": float(student_vllm_config.temperature),
+            "teacher_temperature": float(teacher_vllm_config.temperature),
+            "rft_checkpoint_override": resolved_rft_checkpoint,
+            "rft_manifest_path": str(resolved_rft_manifest) if resolved_rft_manifest is not None else None,
+        },
         max_tool_calls=settings.runtime.max_tool_calls_per_turn,
     )
-    teacher_rewards, _teacher_info = reward_fn(
-        teacher_rows,
-        max_tool_calls=settings.runtime.max_tool_calls_per_turn,
-    )
-    baseline_format_metrics = extract_format_metrics(reward_info=_baseline_info)
-    teacher_format_metrics = extract_format_metrics(reward_info=_teacher_info)
-    baseline_reward_map = {
-        (str(row.get("task_id", "")).strip(), int(row.get("attempt_index", 0) or 0)): float(
-            baseline_rewards[index]
-        )
-        for index, row in enumerate(baseline_rows)
-    }
-    teacher_reward_map = {
-        (str(row.get("task_id", "")).strip(), int(row.get("attempt_index", 0) or 0)): float(
-            teacher_rewards[index]
-        )
-        for index, row in enumerate(teacher_rows)
-    }
 
-    pairs: list[dict[str, Any]] = []
-    for baseline_row in baseline_rows:
-        task_id = str(baseline_row.get("task_id", "")).strip()
-        if not task_id:
-            continue
-        attempt_index = int(baseline_row.get("attempt_index", 0) or 0)
-        key = (task_id, attempt_index)
-        teacher_row = teacher_map.get(key)
-        student_reward = float(baseline_reward_map.get(key, 0.0))
-        teacher_reward = float(teacher_reward_map.get(key, 0.0))
-        pairs.append(
-            {
-                "task_id": task_id,
-                "attempt_index": attempt_index,
-                "student_reward": student_reward,
-                "teacher_reward": teacher_reward,
-                "reward_delta": teacher_reward - student_reward,
-                "teacher_row_missing": teacher_row is None,
-            }
+    try:
+        writer.set_phase("collecting_baseline")
+        baseline_collector = OnPolicyRolloutCollector(
+            settings=settings,
+            turn_generator=student_turn_generator,
         )
+        baseline_rows = [
+            dict(row)
+            for row in baseline_collector.collect_step(
+                int(args.step_index),
+                row_callback=writer.make_row_callback("baseline"),
+            )
+        ]
+        baseline_trace_map = _build_baseline_trace_map(baseline_rows)
 
-    summary = {
-        "data_config_name": str(args.data_config_name),
-        "step_index": int(args.step_index),
-        "task_batch_size": int(args.task_batch_size),
-        "attempts_per_task": int(args.attempts_per_task),
-        "teacher_reprompt_turn_index": int(args.teacher_reprompt_turn_index),
-        "teacher_reprompt_turn_index_mode": turn_index_mode,
-        "turn_supervision_mode": str(args.turn_supervision_mode),
-        "verifier_feedback_mode": str(args.verifier_feedback_mode),
-        "verify_submissions": bool(args.verify_submissions),
-        "verifier_timeout_sec": int(args.verifier_timeout_sec),
-        "max_reprompt_len": int(args.max_reprompt_len),
-        "num_recent_raw_blocks": int(args.num_recent_raw_blocks),
-        "vllm_model_name": str(vllm_config.model_name),
-        "student_temperature": float(student_vllm_config.temperature),
-        "teacher_temperature": float(teacher_vllm_config.temperature),
-        "rft_checkpoint_override": resolved_rft_checkpoint,
-        "rft_manifest_path": str(resolved_rft_manifest) if resolved_rft_manifest is not None else None,
-        "baseline_row_count": len(baseline_rows),
-        "teacher_row_count": len(teacher_rows),
-        "missing_teacher_rows": int(sum(1 for item in pairs if item["teacher_row_missing"])),
-        "baseline_format_metrics": baseline_format_metrics,
-        "teacher_format_metrics": teacher_format_metrics,
-        "reward_summary": summarize_pair_rewards(pairs),
-    }
+        writer.set_phase("collecting_teacher")
+        teacher_turn_generator = _build_teacher_turn_generator(
+            baseline_trace_map=baseline_trace_map,
+            fallback_turn_generator=student_turn_generator,
+            vllm_config=teacher_vllm_config,
+            teacher_reprompt_turn_index=int(args.teacher_reprompt_turn_index),
+            teacher_reprompt_turn_index_mode=turn_index_mode,
+            max_reprompt_len=int(args.max_reprompt_len),
+            num_recent_raw_blocks=int(args.num_recent_raw_blocks),
+            turn_supervision_mode=turn_supervision_mode,
+            verifier_feedback_mode=str(args.verifier_feedback_mode),
+        )
+        teacher_collector = OnPolicyRolloutCollector(
+            settings=settings,
+            turn_generator=teacher_turn_generator,
+        )
+        teacher_collector.collect_step(
+            int(args.step_index),
+            row_callback=writer.make_row_callback("teacher"),
+        )
+        summary = writer.finalize_completed()
+    except Exception as exc:
+        writer.mark_failed(str(exc))
+        raise
+    finally:
+        writer.close()
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    _write_jsonl(output_dir / "baseline_rollout_rows.jsonl", baseline_rows)
-    _write_jsonl(output_dir / "teacher_rollout_rows.jsonl", teacher_rows)
-    _write_jsonl(output_dir / "pair_rewards.jsonl", pairs)
-    _write_json(output_dir / "pilot_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=True, sort_keys=True, indent=2))
 
 
