@@ -7,3 +7,5 @@ __pycache__/
 outputs/
 wandb/
 data/sdpo_task_cache/
+# macOS Google Drive folder icons.
+Icon?
