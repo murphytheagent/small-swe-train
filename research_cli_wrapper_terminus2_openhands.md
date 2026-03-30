@@ -1,13 +1,14 @@
 # Research: CLI Wrapper for Terminus2/OpenHands with `small-swe-train` Backend
 
 Generated: 2026-02-26 05:17 UTC
-Updated: 2026-02-26 10:44 UTC (deep consult + codebase-context pass)
+Updated: 2026-03-30 11:20 UTC (refresh against current main gateway scope)
 Status: research draft (implementation-ready plan; no code changes in this PR)
 
 ## Executive Decision Summary
-- Build a dedicated in-repo runtime gateway under `src/runtime_gateway/` as the interoperability boundary.
-- Keep the internal action contract canonical (`bash/search/apply_patch/submit`, JSON args) and do all external mediation at the gateway boundary.
+- Build a dedicated in-repo runtime gateway under `src/runtime_gateway/` as the interoperability boundary in front of the existing OpenAI-compatible serving path.
+- Keep the internal action contract canonical (`bash/read/file_search/text_search/apply_patch/submit`, JSON args) and do all external mediation at the gateway boundary.
 - Use OpenAI-compatible chat API at the gateway edge so Terminus2/OpenHands can integrate without patching their repos.
+- Treat the already-landed `trainer.vllm_api_server_entry` / vLLM OpenAI-compatible server path as substrate, not new work for this PR.
 - Reuse existing parser/schema stack (`turn_parser`, `contracts`, `env_bridge`) for model-output validation before emitting runtime-specific responses.
 - Add deterministic context-window controls in the gateway for inbound/outbound tool-output growth.
 - Add strict telemetry and replay artifacts for parse/adapter/runtime failures.
@@ -17,7 +18,7 @@ Status: research draft (implementation-ready plan; no code changes in this PR)
 
 | Option | Description | Effort | Reliability | Preserves canonical internal JSON | Notes |
 | --- | --- | --- | --- | --- | --- |
-| OpenAI-compat gateway (recommended) | Our service translates external runtime expectations to/from canonical schema | Medium | High | Yes | Best isolation of drift |
+| OpenAI-compat gateway (recommended) | Our gateway sits in front of the existing OpenAI-compatible vLLM server and translates external runtime expectations to/from canonical schema | Medium | High | Yes | Best isolation of drift |
 | Native runtime plugin | Build runtime-specific plugins/forks | High | Medium | Yes | High maintenance burden |
 | Direct prompt shim | Try to force direct prompt-level compatibility only | Low | Low | Partial | brittle and hard to audit |
 
@@ -29,7 +30,7 @@ Status: research draft (implementation-ready plan; no code changes in this PR)
 | Canonical assistant turn parsing (`turn_parser.py`) | Yes | None | Low |
 | Bridge execution + response serialization (`env_bridge.py`) | Yes | None | Low |
 | OpenAI-compatible model server entry (`vllm_api_server_entry.py`) | Yes | None | Low |
-| Runtime-gateway service layer | No | `src/runtime_gateway/*` | High |
+| Runtime-gateway mediation layer over that server surface | No | `src/runtime_gateway/*` | High |
 | External-runtime request/response adapters | No | Terminus2/OpenHands adapter modules | High |
 | Gateway-side context protection for external runtime history | Partial (only internal loop has truncation policy) | inbound guard + budget enforcement | High |
 | Gateway observability/replay tooling | No | structured logs + replay bundle | High |
@@ -64,7 +65,7 @@ Status: research draft (implementation-ready plan; no code changes in this PR)
 - Canonical core:
   - normalizes history/messages into canonical internal representation,
   - builds canonical prompt contract,
-  - calls upstream model endpoint,
+  - calls the existing OpenAI-compatible vLLM endpoint,
   - parses/validates returned tool calls via existing internal parser/schema.
 - Adapter egress:
   - converts canonical output into runtime-specific response payloads.
@@ -73,7 +74,7 @@ Status: research draft (implementation-ready plan; no code changes in this PR)
 
 ### Internal canonical contract (unchanged)
 - Tool calls remain JSON with canonical tool names and args:
-  - `{"tool":"bash","args":{...}}`, `{"tool":"search","args":{...}}`, `{"tool":"apply_patch","args":{...}}`, `{"tool":"submit","args":{...}}`.
+  - `{"tool":"bash","args":{...}}`, `{"tool":"read","args":{...}}`, `{"tool":"file_search","args":{...}}`, `{"tool":"text_search","args":{...}}`, `{"tool":"apply_patch","args":{...}}`, `{"tool":"submit","args":{...}}`.
 - Preserve existing invariants (`submit` terminal singleton, schema-required args, max tool-call count policy).
 
 ### Terminus2 mapping
@@ -81,7 +82,9 @@ Status: research draft (implementation-ready plan; no code changes in this PR)
 - Outbound: Terminus2 parser-compatible JSON/XML payload.
 - Canonical-to-Terminus2 strategy:
   - `bash` -> command/keystroke action entries,
-  - `search` -> command/keystroke action entries,
+  - `read` -> native file-read entry when available, else deterministic command-path fallback,
+  - `file_search` -> native file-discovery entry when available, else deterministic command-path fallback,
+  - `text_search` -> native content-search entry when available, else deterministic command-path fallback,
   - `apply_patch` -> patch-apply command sequence,
   - `submit` -> terminal completion mapping.
 
@@ -89,7 +92,9 @@ Status: research draft (implementation-ready plan; no code changes in this PR)
 - Inbound: OpenAI-like chat payload and runtime tool capabilities.
 - Outbound: OpenAI tool-call style responses compatible with OpenHands runtime expectations.
 - P0 mapping target:
-  - map canonical tool calls to command execution path first,
+  - map canonical tool calls to the existing six-tool surface first,
+  - use native OpenHands actions where they line up cleanly,
+  - fall back to command execution only where a native mapping is missing,
   - refine to richer native actions in later phase when runtime schema stability is validated.
 
 ## Tool-Format Mediation Strategy
