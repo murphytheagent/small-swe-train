@@ -1,6 +1,6 @@
 # SWE-smith + SWE-rebench integration milestones
 
-Last updated: 2026-03-03 UTC.
+Last updated: 2026-03-30 UTC.
 Owner thread: Slack `1772422639.171219`.
 
 ## Goal
@@ -21,8 +21,9 @@ Datasets in scope:
 Current codebase constraints:
 - `src/env/task_dataset.py` requires non-empty `problem_statement`, `fail_to_pass`, and `pass_to_pass`.
 - `src/verl_integration/submission_verifier.py` is Python/pytest-specific.
-- `src/prompts/runtime_messages.py` currently renders full target lists into the initial prompt.
-- `src/rollout/onpolicy_collector.py` applies `raw["patch"]` directly when present.
+- `src/prompts/runtime_messages.py` now renders only the task objective in the initial user prompt, so large verifier target lists no longer bloat the first-turn prompt body.
+- High-cardinality verifier targets still flow through structured task metadata (`reward_model.ground_truth` and related task rows), so future multi-language adapters still need bounded preview/report rules instead of dumping raw target arrays back into prompts or logs.
+- `src/rollout/onpolicy_collector.py` still applies task-init patches directly when present, so rebench-style patch semantics must stay explicit.
 
 These assumptions are safe for current SWE-smith-py settings, but block robust multi-language + rebench ingestion.
 
@@ -38,9 +39,9 @@ Implementation scope:
   - `bug_patch` (apply before rollout),
   - `gold_fix_patch` (never auto-apply for training attempts).
 - Introduce verifier backend interface with language-aware dispatch (`python`, `go`, `js`, `ts`, `command`).
-- Add prompt target-render guardrail for very large test lists:
-  - bounded inline preview in prompt,
-  - full list kept in structured metadata.
+- Add bounded verifier-target preview/report guardrails for very large test lists:
+  - keep the initial prompt focused on the task objective,
+  - keep the full verifier target plan in structured metadata.
 
 Expected touchpoints:
 - `src/env/task_dataset.py`
@@ -87,7 +88,7 @@ Out of scope:
 
 ### Milestone 2: gated SWE-smith-js + SWE-smith-ts integration
 Delivery boundary:
-- Add JS/TS adapters and verifier backends with prompt/test-target safeguards; still gated by non-default config.
+- Add JS/TS adapters and verifier backends with bounded verifier-target preview/report safeguards; still gated by non-default config.
 
 Implementation scope:
 - Add dataset configs for JS/TS.
