@@ -1,17 +1,18 @@
 # Research: SWE-bench-Verified Adapter for `small-swe-train`
 
 Generated: 2026-02-26 10:27 UTC
-Updated: 2026-02-26 10:31 UTC (deep consult + codebase-context pass)
+Updated: 2026-03-30 11:18 UTC (refresh against current main tool surface)
 Status: research draft (implementation-ready plan; no code changes in this PR)
 
 ## Executive Decision Summary
-- Keep the canonical internal tool contract unchanged: `bash`, `search`, `apply_patch`, `submit`.
+- Keep the canonical internal tool contract unchanged: `bash`, `read`, `file_search`, `text_search`, `apply_patch`, `submit`.
 - Keep current parser and bridge path unchanged (`turn_parser` -> `env_bridge` -> executor); build adapter around it.
 - Split implementation into two strict layers: execution adapter (run + trace + patch extraction) and scoring adapter (official harness run + merge).
 - Use the official SWE-bench harness as the default scoring backend; treat Harbor/TerminalBench wrappers as optional execution conveniences only.
 - Extract `model_patch` from container git state (`git diff`) at episode end, not from tool arguments.
 - Introduce an explicit failure taxonomy that separates model formatting/tooling failures from infrastructure failures.
 - Preserve a single normalized prediction schema and derive harness JSONL from it.
+- Treat the richer read/search split as part of the stable runtime surface; the adapter should preserve those traces rather than collapsing back to a legacy single-search abstraction.
 - Gate rollout with deterministic artifacts and negative tests for leakage and schema drift.
 
 ## Gap Analysis Against Current Codebase
