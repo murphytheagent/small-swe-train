@@ -41,8 +41,8 @@ It is "make the existing forward-vs-reverse balance conditional on token entropy
 
 The original EOPD objective gates on the teacher distribution's token entropy:
 
-- `L_EOPD,t = L_OPD,t + I[H_t^te > τ] L_FKL,t`
-- `H_t^te = -Σ_x π_te(x|c_t) log π_te(x|c_t)`
+- `L_EOPD,t = L_OPD,t + I[H_t^te > tau] L_FKL,t`
+- `H_t^te = -sum_x pi_te(x|c_t) log pi_te(x|c_t)`
 
 So the first ablation here should use teacher-side entropy.
 A student-entropy gate can exist later, but it is a different experiment.
