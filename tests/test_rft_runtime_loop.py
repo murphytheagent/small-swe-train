@@ -834,6 +834,66 @@ def test_run_loop_resumes_from_latest_committed_checkpoint(
     assert [step["step_index"] for step in manifest["steps"]] == [0, 1]
 
 
+def test_run_loop_rejects_stage_switch_when_resuming_latest_committed_checkpoint(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "runtime"
+    previous_step_dir = output_dir / "rft_step_00000"
+    previous_hf = previous_step_dir / "trainer_checkpoints" / "global_step_1" / "huggingface"
+    previous_vllm = previous_step_dir / "trainer_checkpoints" / "global_step_1" / "huggingface_vllm_merged"
+    previous_hf.mkdir(parents=True)
+    previous_vllm.mkdir(parents=True)
+    (output_dir / rft_runtime_loop._RFT_LATEST_COMMITTED_CHECKPOINT_FILE_NAME).write_text(
+        json.dumps(
+            {
+                "stage": "format_rft",
+                "committed_step_index": 0,
+                "latest_hf_checkpoint": str(previous_hf),
+                "latest_vllm_checkpoint": str(previous_vllm),
+                "resume_model_path": str(previous_vllm),
+                "selection_contract": {"mode": "format_first_rft"},
+                "correctness_contract": "heuristic",
+                "committed_utc": "2026-03-16 00:00 UTC",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=2,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=1,
+        train_batch_size=1,
+        output_dir=output_dir,
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=False,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+        eval_split_fraction=0.0,
+        stage_name="positive_rft",
+    )
+
+    with pytest.raises(ValueError, match="different stage_name"):
+        rft_runtime_loop.run_rft_runtime_loop(config)
+
+
 def test_run_loop_resume_fails_closed_when_latest_commit_is_incomplete(tmp_path: Path) -> None:
     output_dir = tmp_path / "runtime"
     output_dir.mkdir(parents=True)

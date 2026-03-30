@@ -730,6 +730,15 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         if latest_committed_checkpoint is not None
         else None
     )
+    if latest_committed_checkpoint is not None:
+        resumed_stage_name = resolve_rft_stage_name(latest_committed_checkpoint.stage)
+        if resumed_stage_name != resolved_stage_name:
+            raise ValueError(
+                "Refusing to resume a committed run with a different stage_name: "
+                f"latest checkpoint stage={resumed_stage_name!r}, "
+                f"requested stage_name={resolved_stage_name!r}. "
+                "Use a fresh output directory for a new stage."
+            )
 
     if config.dry_run:
         _print_dry_run_plan(

@@ -607,7 +607,7 @@ def split_sdpo_task_rows_for_eval(
 
     ranked_indexes = sorted(
         range(total),
-        key=lambda row_index: _stable_split_rank(copied_rows[row_index], row_index=row_index),
+        key=lambda row_index: _stable_split_rank(copied_rows[row_index]),
     )
     eval_indexes = set(ranked_indexes[:eval_rows_target])
 
@@ -762,11 +762,7 @@ def split_task_samples_for_eval(
 
     ranked_indexes = sorted(
         range(total),
-        key=lambda row_index: _stable_split_token(
-            task_id=copied_tasks[row_index].task_id,
-            image_name=copied_tasks[row_index].image_name,
-            row_index=row_index,
-        ),
+        key=lambda row_index: _stable_task_sample_split_rank(copied_tasks[row_index]),
     )
     eval_indexes = set(ranked_indexes[:eval_rows_target])
 
@@ -783,15 +779,98 @@ def split_task_samples_for_eval(
     return train_tasks, eval_tasks
 
 
-def _stable_split_rank(row: Mapping[str, Any], *, row_index: int) -> str:
-    task_id = str(row.get("task_id", "")).strip()
+def _stable_split_rank(row: Mapping[str, Any]) -> str:
+    explicit_task_id = _resolve_explicit_task_id(row)
     image_name = str(row.get("image_name", "")).strip()
-    return _stable_split_token(task_id=task_id, image_name=image_name, row_index=row_index)
+    prompt_text = _extract_task_prompt_text(row)
+    fail_to_pass = _extract_task_targets(row, keys=("fail_to_pass", "FAIL_TO_PASS"))
+    pass_to_pass = _extract_task_targets(row, keys=("pass_to_pass", "PASS_TO_PASS"))
+    return _stable_split_token(
+        explicit_task_id=explicit_task_id,
+        image_name=image_name,
+        prompt_text=prompt_text,
+        fail_to_pass=fail_to_pass,
+        pass_to_pass=pass_to_pass,
+    )
 
 
-def _stable_split_token(*, task_id: str, image_name: str, row_index: int) -> str:
-    token = f"{task_id}|{image_name}|{row_index}"
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+def _stable_task_sample_split_rank(task: TaskSample) -> str:
+    return _stable_split_token(
+        explicit_task_id=_resolve_explicit_task_id(task.raw),
+        image_name=task.image_name,
+        prompt_text=task.problem_statement,
+        fail_to_pass=task.fail_to_pass,
+        pass_to_pass=task.pass_to_pass,
+    )
+
+
+def _resolve_explicit_task_id(row: Mapping[str, Any]) -> str:
+    for key in ("instance_id", "problem_id"):
+        raw_value = row.get(key)
+        if isinstance(raw_value, str):
+            normalized = raw_value.strip()
+            if normalized:
+                return normalized
+    return ""
+
+
+def _extract_task_prompt_text(row: Mapping[str, Any]) -> str:
+    problem_statement = row.get("problem_statement")
+    if isinstance(problem_statement, str):
+        return problem_statement.strip()
+
+    prompt = row.get("prompt")
+    if isinstance(prompt, Sequence) and not isinstance(prompt, (str, bytes)):
+        prompt_chunks: list[str] = []
+        for item in prompt:
+            if not isinstance(item, Mapping):
+                continue
+            content = item.get("content")
+            if isinstance(content, str) and content.strip():
+                prompt_chunks.append(content.strip())
+        if prompt_chunks:
+            return "\n".join(prompt_chunks)
+    return ""
+
+
+def _extract_task_targets(row: Mapping[str, Any], *, keys: Sequence[str]) -> list[str]:
+    for key in keys:
+        if key in row:
+            return _normalize_test_targets(row.get(key))
+
+    reward_model = row.get("reward_model")
+    if isinstance(reward_model, Mapping):
+        ground_truth = reward_model.get("ground_truth")
+        if isinstance(ground_truth, Mapping):
+            for key in keys:
+                if key in ground_truth:
+                    return _normalize_test_targets(ground_truth.get(key))
+    return []
+
+
+def _stable_split_token(
+    *,
+    explicit_task_id: str,
+    image_name: str,
+    prompt_text: str,
+    fail_to_pass: Any,
+    pass_to_pass: Any,
+) -> str:
+    normalized_image_name = image_name.strip()
+    if explicit_task_id:
+        identity_payload: dict[str, Any] = {
+            "task_id": explicit_task_id,
+            "image_name": normalized_image_name,
+        }
+    else:
+        identity_payload = {
+            "image_name": normalized_image_name,
+            "problem_statement": prompt_text.strip(),
+            "fail_to_pass": _normalize_test_targets(fail_to_pass),
+            "pass_to_pass": _normalize_test_targets(pass_to_pass),
+        }
+    encoded = json.dumps(identity_payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _coerce_sdpo_prompt_char_limit(value: int | None) -> int | None:

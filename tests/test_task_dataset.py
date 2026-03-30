@@ -8,6 +8,7 @@ import pytest
 from config import OnPolicyDataConfig, OnPolicyDatasetColumns
 import env.task_dataset as dataset_module
 from env.task_dataset import (
+    TaskSample,
     build_sdpo_task_rows,
     load_task_batch,
     preload_sdpo_task_rows_to_parquet,
@@ -106,6 +107,53 @@ def test_split_task_samples_for_eval_is_deterministic() -> None:
     assert [task.task_id for task in eval_a] == [task.task_id for task in eval_b]
     assert train_a
     assert eval_a
+
+
+def test_split_task_samples_for_eval_keeps_duplicate_logical_tasks_together() -> None:
+    duplicate_a = TaskSample(
+        task_id="synthetic:0",
+        image_name="img:dup",
+        problem_statement="Fix duplicated task",
+        fail_to_pass=["tests/test_bug.py::test_fix"],
+        pass_to_pass=["tests/test_ok.py::test_regression"],
+        raw={},
+    )
+    duplicate_b = TaskSample(
+        task_id="synthetic:1",
+        image_name="img:dup",
+        problem_statement="Fix duplicated task",
+        fail_to_pass=["tests/test_bug.py::test_fix"],
+        pass_to_pass=["tests/test_ok.py::test_regression"],
+        raw={},
+    )
+    other_a = TaskSample(
+        task_id="other:0",
+        image_name="img:other-a",
+        problem_statement="Other task A",
+        fail_to_pass=["tests/test_bug.py::test_a"],
+        pass_to_pass=["tests/test_ok.py::test_a"],
+        raw={},
+    )
+    other_b = TaskSample(
+        task_id="other:1",
+        image_name="img:other-b",
+        problem_statement="Other task B",
+        fail_to_pass=["tests/test_bug.py::test_b"],
+        pass_to_pass=["tests/test_ok.py::test_b"],
+        raw={},
+    )
+
+    train_tasks, eval_tasks = split_task_samples_for_eval(
+        [duplicate_a, duplicate_b, other_a, other_b],
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    train_ids = {task.task_id for task in train_tasks}
+    eval_ids = {task.task_id for task in eval_tasks}
+    duplicate_ids = {"synthetic:0", "synthetic:1"}
+
+    assert duplicate_ids.issubset(train_ids) or duplicate_ids.issubset(eval_ids)
 
 
 def test_load_task_batch_supports_deterministic_train_eval_partitions() -> None:
@@ -654,6 +702,52 @@ def test_split_sdpo_task_rows_for_eval_is_deterministic_and_non_empty() -> None:
     assert [row["task_id"] for row in eval_a] == [row["task_id"] for row in eval_b]
     assert train_a
     assert eval_a
+
+
+def test_split_sdpo_task_rows_for_eval_keeps_duplicate_logical_tasks_together() -> None:
+    duplicate_prompt = [{"role": "user", "content": "Fix duplicated task"}]
+    rows = [
+        {
+            "task_id": "synthetic:0",
+            "image_name": "img:dup",
+            "prompt": duplicate_prompt,
+            "fail_to_pass": ["tests/test_bug.py::test_fix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+        },
+        {
+            "task_id": "synthetic:1",
+            "image_name": "img:dup",
+            "prompt": duplicate_prompt,
+            "fail_to_pass": ["tests/test_bug.py::test_fix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+        },
+        {
+            "task_id": "other:0",
+            "image_name": "img:other-a",
+            "prompt": [{"role": "user", "content": "Other task A"}],
+            "fail_to_pass": ["tests/test_bug.py::test_a"],
+            "pass_to_pass": ["tests/test_ok.py::test_a"],
+        },
+        {
+            "task_id": "other:1",
+            "image_name": "img:other-b",
+            "prompt": [{"role": "user", "content": "Other task B"}],
+            "fail_to_pass": ["tests/test_bug.py::test_b"],
+            "pass_to_pass": ["tests/test_ok.py::test_b"],
+        },
+    ]
+
+    train_rows, eval_rows = split_sdpo_task_rows_for_eval(
+        rows,
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    train_ids = {str(row["task_id"]) for row in train_rows}
+    eval_ids = {str(row["task_id"]) for row in eval_rows}
+    duplicate_ids = {"synthetic:0", "synthetic:1"}
+
+    assert duplicate_ids.issubset(train_ids) or duplicate_ids.issubset(eval_ids)
 
 
 def test_preload_sdpo_task_rows_split_to_parquet_writes_train_and_val(
