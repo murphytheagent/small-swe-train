@@ -386,6 +386,7 @@ RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS:-}"
 RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT="${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT:-}"
 RFT_EVAL_SPLIT_FRACTION="${RFT_EVAL_SPLIT_FRACTION:-}"
 RFT_EVAL_MIN_ROWS="${RFT_EVAL_MIN_ROWS:-}"
+RFT_STAGE_NAME="${RFT_STAGE_NAME:-format_rft}"
 RFT_DATA_CONFIG_NAME="${RFT_DATA_CONFIG_NAME:-on_policy_swe_smith}"
 RFT_TURN_GENERATOR_MODE="${RFT_TURN_GENERATOR_MODE:-default}"
 
@@ -620,6 +621,29 @@ fi
 RFT_RUN_LABEL="${RFT_RUN_LABEL:-${DEFAULT_RFT_RUN_LABEL}}"
 RFT_OUTPUT_DIR="${RFT_OUTPUT_DIR:-${RFT_OUTPUT_ROOT}/${RFT_RUN_LABEL}}"
 RFT_INITIAL_MODEL="${RFT_INITIAL_MODEL:-${DEFAULT_VLLM_MODEL}}"
+RFT_STAGE_NAME="$(_to_lower_ascii "${RFT_STAGE_NAME}")"
+case "${RFT_STAGE_NAME}" in
+  format|format_rft)
+    RFT_STAGE_NAME="format_rft"
+    RFT_SELECTION_REQUIRE_TERMINAL="true"
+    RFT_SELECTION_REQUIRE_FORMAT_VALID="true"
+    RFT_SELECTION_REQUIRE_RESOLVED="false"
+    RFT_SELECTION_REJECT_ON_INVALID_FINAL_SUBMIT="true"
+    RFT_VERIFY_SUBMISSIONS="false"
+    ;;
+  positive|positive_rft)
+    RFT_STAGE_NAME="positive_rft"
+    RFT_SELECTION_REQUIRE_TERMINAL="false"
+    RFT_SELECTION_REQUIRE_FORMAT_VALID="false"
+    RFT_SELECTION_REQUIRE_RESOLVED="true"
+    RFT_SELECTION_REJECT_ON_INVALID_FINAL_SUBMIT="false"
+    RFT_VERIFY_SUBMISSIONS="true"
+    ;;
+  *)
+    echo "Unsupported RFT_STAGE_NAME=${RFT_STAGE_NAME}. Expected format_rft or positive_rft."
+    exit 1
+    ;;
+esac
 
 if [[ "${RFT_ADAPTATION_MODE}" != "lora" ]]; then
   echo "run_rft.sh currently supports only RFT_ADAPTATION_MODE=lora (resolved: ${RFT_ADAPTATION_MODE})."
@@ -710,10 +734,18 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
     actor_rollout_ref.model.lora.alpha="${RFT_LORA_ALPHA}"
     actor_rollout_ref.model.lora.target_modules="${RFT_LORA_TARGET_MODULES_HYDRA}"
     ++data.on_policy.total_steps="${RFT_STEPS}"
+    +data.on_policy.stage_name="${RFT_STAGE_NAME}"
+    +data.on_policy.task_eval_split_fraction="${RFT_EVAL_SPLIT_FRACTION}"
+    +data.on_policy.task_eval_min_rows="${RFT_EVAL_MIN_ROWS}"
     +data.on_policy.runtime_overrides.task_batch_size="${RFT_TASK_BATCH_SIZE}"
     +data.on_policy.runtime_overrides.attempts_per_task="${SAMPLES_PER_TASK}"
     +data.on_policy.runtime_overrides.max_in_flight_tasks="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}"
     +data.on_policy.runtime_overrides.max_turns_per_attempt="${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT}"
+    +data.on_policy.runtime_overrides.verify_submissions="${RFT_VERIFY_SUBMISSIONS}"
+    +data.on_policy.rft_handoff_overrides.selection.require_terminal="${RFT_SELECTION_REQUIRE_TERMINAL}"
+    +data.on_policy.rft_handoff_overrides.selection.require_format_valid="${RFT_SELECTION_REQUIRE_FORMAT_VALID}"
+    +data.on_policy.rft_handoff_overrides.selection.require_resolved="${RFT_SELECTION_REQUIRE_RESOLVED}"
+    +data.on_policy.rft_handoff_overrides.selection.reject_on_invalid_final_submit="${RFT_SELECTION_REJECT_ON_INVALID_FINAL_SUBMIT}"
     "$@"
   )
 
@@ -753,6 +785,7 @@ LOOP_CMD=(
   --train-batch-size "${RFT_TRAIN_BATCH_SIZE}"
   --eval-split-fraction "${RFT_EVAL_SPLIT_FRACTION}"
   --eval-min-rows "${RFT_EVAL_MIN_ROWS}"
+  --stage-name "${RFT_STAGE_NAME}"
   --output-dir "${RFT_OUTPUT_DIR}"
   --data-config-name "${RFT_DATA_CONFIG_NAME}"
   --turn-generator-mode "${RFT_TURN_GENERATOR_MODE}"

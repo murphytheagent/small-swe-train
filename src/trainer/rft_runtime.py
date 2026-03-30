@@ -26,6 +26,11 @@ class OnPolicyRFTRuntimeRequest:
     data_overrides: Mapping[str, Any] | None = None
     handoff_overrides: Mapping[str, Any] | None = None
     output_dir: str | None = None
+    task_partition: str = "all"
+    task_eval_split_fraction: float = 0.0
+    task_eval_min_rows: int = 0
+    verify_submissions: bool = False
+    stage_name: str = "format_rft"
 
 
 def collect_onpolicy_rft_runtime_batch(
@@ -34,12 +39,19 @@ def collect_onpolicy_rft_runtime_batch(
     tokenizer: SupportsOffsetsTokenizer,
 ) -> dict[str, Any]:
     """Collect rollouts and build one RFT SFT batch via the live runtime path."""
-    runtime_overrides = _resolve_rft_runtime_overrides(request.runtime_overrides)
+    runtime_overrides = _resolve_rft_runtime_overrides(
+        request.runtime_overrides,
+        verify_submissions=request.verify_submissions,
+    )
     collector = build_onpolicy_collector(
         data_config_name=request.data_config_name,
         runtime_overrides=runtime_overrides,
         data_overrides=request.data_overrides,
         turn_generator=_resolve_turn_generator(request.turn_generator_mode),
+        task_partition=request.task_partition,
+        task_eval_split_fraction=request.task_eval_split_fraction,
+        task_eval_min_rows=request.task_eval_min_rows,
+        stage_name=request.stage_name,
     )
 
     resolved_output_dir = _normalized_output_dir(request.output_dir)
@@ -71,10 +83,11 @@ def collect_onpolicy_rft_runtime_batch(
 
 def _resolve_rft_runtime_overrides(
     runtime_overrides: Mapping[str, Any] | None,
+    *,
+    verify_submissions: bool,
 ) -> dict[str, Any]:
     resolved = dict(runtime_overrides or {})
-    # Keep RFT runtime rollouts lightweight: verifier runs are reserved for the pilot.
-    resolved["verify_submissions"] = False
+    resolved["verify_submissions"] = bool(verify_submissions)
     return resolved
 
 
@@ -118,6 +131,11 @@ def _build_runtime_manifest_payload(
         "turn_generator_mode": request.turn_generator_mode,
         "total_steps": int(request.total_steps),
         "start_step_index": int(request.start_step_index),
+        "task_partition": str(request.task_partition),
+        "task_eval_split_fraction": float(request.task_eval_split_fraction),
+        "task_eval_min_rows": int(request.task_eval_min_rows),
+        "verify_submissions": bool(request.verify_submissions),
+        "stage_name": str(request.stage_name),
         "rollout_count": len(rollout_rows),
         "selected_count": len(selected_rows),
         "rejected_count": len(rejected_rows),

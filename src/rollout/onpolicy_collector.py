@@ -178,6 +178,10 @@ class OnPolicyRolloutCollector:
         executor_factory: ExecutorFactory | None = None,
         attempt_resolver: AttemptResolver | None = None,
         monotonic_clock: Callable[[], float] | None = None,
+        task_partition: str = "all",
+        task_eval_split_fraction: float = 0.0,
+        task_eval_min_rows: int = 0,
+        stage_name: str = "format_rft",
     ) -> None:
         self._settings = settings
         self._turn_generator = turn_generator or _default_turn_generator
@@ -186,6 +190,11 @@ class OnPolicyRolloutCollector:
         self._executor_factory = executor_factory or _default_executor_factory
         self._attempt_resolver = attempt_resolver or _default_attempt_resolver
         self._monotonic_clock = monotonic_clock or time.monotonic
+        self._task_partition = task_partition
+        self._task_eval_split_fraction = task_eval_split_fraction
+        self._task_eval_min_rows = task_eval_min_rows
+        normalized_stage_name = str(stage_name).strip()
+        self._stage_name = normalized_stage_name or "format_rft"
 
     @property
     def settings(self) -> OnPolicySettings:
@@ -206,6 +215,9 @@ class OnPolicyRolloutCollector:
             batch_size=runtime.task_batch_size,
             config=self._settings.data,
             dataset_loader=self._dataset_loader,
+            task_partition=self._task_partition,
+            eval_split_fraction=self._task_eval_split_fraction,
+            min_eval_rows=self._task_eval_min_rows,
         )
 
         max_workers = max(1, min(runtime.max_in_flight_tasks, runtime.env_pool_size, len(tasks)))
@@ -470,7 +482,7 @@ class OnPolicyRolloutCollector:
             raw_prompt_messages.append({"role": "user", "content": initial_user_message})
 
         row: RolloutRow = {
-            "stage": "format_rft",
+            "stage": self._stage_name,
             "prompt": task.problem_statement,
             "assistant_response": row_assistant_response,
             "tool_output": tool_output,

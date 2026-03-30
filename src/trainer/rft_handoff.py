@@ -35,6 +35,10 @@ def build_onpolicy_collector(
     data_config_name: str = DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
     runtime_overrides: Mapping[str, Any] | None = None,
     data_overrides: Mapping[str, Any] | None = None,
+    task_partition: str = "all",
+    task_eval_split_fraction: float = 0.0,
+    task_eval_min_rows: int = 0,
+    stage_name: str = "format_rft",
     dataset_loader: DatasetLoader | None = None,
     pool_factory: PoolFactory | None = None,
     executor_factory: ExecutorFactory | None = None,
@@ -53,6 +57,10 @@ def build_onpolicy_collector(
         pool_factory=pool_factory,
         executor_factory=executor_factory,
         attempt_resolver=attempt_resolver,
+        task_partition=task_partition,
+        task_eval_split_fraction=task_eval_split_fraction,
+        task_eval_min_rows=task_eval_min_rows,
+        stage_name=stage_name,
     )
 
 
@@ -99,28 +107,30 @@ def collect_rft_sft_batch_for_steps(
         output_dir=output_dir,
     )
     rollout_rows = _flatten_rollout_steps(rollout_steps)
-    if not rollout_rows:
-        raise ValueError("No on-policy rollout rows were collected.")
-
-    preprocessed_rows = preprocess_trajectories(
-        rollout_rows,
-        max_tool_calls=collector.settings.runtime.max_tool_calls_per_turn,
-        tokenizer=tokenizer,
-    )
-    merged_rows = merge_rollout_and_preprocessed_rows(rollout_rows, preprocessed_rows)
-
     handoff_settings = resolve_rft_handoff_settings(overrides=handoff_overrides)
-    selected_rows, rejected_rows = select_rft_attempt_rows(
-        merged_rows,
-        selection_policy=handoff_settings.selection,
-    )
-    if selected_rows:
-        sft_batch = build_verl_sft_batch(
-            selected_rows,
-            handoff_settings=handoff_settings,
+    if rollout_rows:
+        preprocessed_rows = preprocess_trajectories(
+            rollout_rows,
+            max_tool_calls=collector.settings.runtime.max_tool_calls_per_turn,
             tokenizer=tokenizer,
         )
+        merged_rows = merge_rollout_and_preprocessed_rows(rollout_rows, preprocessed_rows)
+
+        selected_rows, rejected_rows = select_rft_attempt_rows(
+            merged_rows,
+            selection_policy=handoff_settings.selection,
+        )
+        if selected_rows:
+            sft_batch = build_verl_sft_batch(
+                selected_rows,
+                handoff_settings=handoff_settings,
+                tokenizer=tokenizer,
+            )
+        else:
+            sft_batch = _build_empty_verl_sft_batch(handoff_settings=handoff_settings)
     else:
+        selected_rows = []
+        rejected_rows = []
         sft_batch = _build_empty_verl_sft_batch(handoff_settings=handoff_settings)
     dataproto_payload = build_dataproto_compatible_payload(sft_batch)
 

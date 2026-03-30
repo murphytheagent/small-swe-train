@@ -8,6 +8,7 @@ import pytest
 from config import OnPolicyDataConfig, OnPolicyDatasetColumns
 import env.task_dataset as dataset_module
 from env.task_dataset import (
+    TaskSample,
     build_sdpo_task_rows,
     load_task_batch,
     preload_sdpo_task_rows_to_parquet,
@@ -15,6 +16,7 @@ from env.task_dataset import (
     resolve_on_policy_bad_task_cache_path,
     resolve_sdpo_task_rows_cache_path,
     resolve_sdpo_task_split_cache_paths,
+    split_task_samples_for_eval,
     split_sdpo_task_rows_for_eval,
 )
 from prompts.runtime_messages import build_onpolicy_initial_user_message
@@ -67,6 +69,179 @@ def test_load_task_batch_is_step_deterministic_with_wraparound() -> None:
 
     assert [sample.task_id for sample in batch] == ["task-2", "task-0"]
     assert batch[0].problem_statement == "p2"
+
+
+def test_split_task_samples_for_eval_is_deterministic() -> None:
+    rows = [
+        {
+            "task_id": f"task-{index}",
+            "image_name": f"img:{index}",
+            "problem_statement": f"p{index}",
+            "FAIL_TO_PASS": [f"f{index}"],
+            "PASS_TO_PASS": [f"p{index}"],
+        }
+        for index in range(4)
+    ]
+    tasks = [
+        load_task_batch(
+            step_index=index,
+            batch_size=1,
+            config=_config(),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )[0]
+        for index in range(4)
+    ]
+
+    train_a, eval_a = split_task_samples_for_eval(
+        tasks,
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+    train_b, eval_b = split_task_samples_for_eval(
+        tasks,
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    assert [task.task_id for task in train_a] == [task.task_id for task in train_b]
+    assert [task.task_id for task in eval_a] == [task.task_id for task in eval_b]
+    assert train_a
+    assert eval_a
+
+
+def test_split_task_samples_for_eval_keeps_duplicate_logical_tasks_together() -> None:
+    duplicate_a = TaskSample(
+        task_id="synthetic:0",
+        image_name="img:dup",
+        problem_statement="Fix duplicated task",
+        fail_to_pass=["tests/test_bug.py::test_fix"],
+        pass_to_pass=["tests/test_ok.py::test_regression"],
+        raw={},
+    )
+    duplicate_b = TaskSample(
+        task_id="synthetic:1",
+        image_name="img:dup",
+        problem_statement="Fix duplicated task",
+        fail_to_pass=["tests/test_bug.py::test_fix"],
+        pass_to_pass=["tests/test_ok.py::test_regression"],
+        raw={},
+    )
+    other_a = TaskSample(
+        task_id="other:0",
+        image_name="img:other-a",
+        problem_statement="Other task A",
+        fail_to_pass=["tests/test_bug.py::test_a"],
+        pass_to_pass=["tests/test_ok.py::test_a"],
+        raw={},
+    )
+    other_b = TaskSample(
+        task_id="other:1",
+        image_name="img:other-b",
+        problem_statement="Other task B",
+        fail_to_pass=["tests/test_bug.py::test_b"],
+        pass_to_pass=["tests/test_ok.py::test_b"],
+        raw={},
+    )
+
+    train_tasks, eval_tasks = split_task_samples_for_eval(
+        [duplicate_a, duplicate_b, other_a, other_b],
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    train_ids = {task.task_id for task in train_tasks}
+    eval_ids = {task.task_id for task in eval_tasks}
+    duplicate_ids = {"synthetic:0", "synthetic:1"}
+
+    assert duplicate_ids.issubset(train_ids) or duplicate_ids.issubset(eval_ids)
+
+
+def test_load_task_batch_supports_deterministic_train_eval_partitions() -> None:
+    rows = [
+        {
+            "task_id": f"task-{index}",
+            "image_name": f"img:{index}",
+            "problem_statement": f"p{index}",
+            "FAIL_TO_PASS": [f"f{index}"],
+            "PASS_TO_PASS": [f"p{index}"],
+        }
+        for index in range(4)
+    ]
+
+    train_batch = load_task_batch(
+        step_index=0,
+        batch_size=3,
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="train",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+    eval_batch = load_task_batch(
+        step_index=0,
+        batch_size=1,
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="eval",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    assert len(train_batch) == 3
+    assert len(eval_batch) == 1
+    assert {sample.task_id for sample in train_batch}.isdisjoint(
+        {sample.task_id for sample in eval_batch}
+    )
+
+
+def test_load_task_batch_wraps_partitioned_batches_when_heldout_split_is_smaller_than_batch() -> None:
+    rows = [
+        {
+            "task_id": f"task-{index}",
+            "image_name": f"img:{index}",
+            "problem_statement": f"p{index}",
+            "FAIL_TO_PASS": [f"f{index}"],
+            "PASS_TO_PASS": [f"p{index}"],
+        }
+        for index in range(4)
+    ]
+
+    eval_batch = load_task_batch(
+        step_index=0,
+        batch_size=3,
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="eval",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    assert len(eval_batch) == 3
+    assert len({sample.task_id for sample in eval_batch}) == 1
+
+
+def test_load_task_batch_allows_empty_eval_partition_when_holdout_resolves_to_zero_rows() -> None:
+    rows = [
+        {
+            "task_id": "task-0",
+            "image_name": "img:0",
+            "problem_statement": "p0",
+            "FAIL_TO_PASS": ["f0"],
+            "PASS_TO_PASS": ["p0"],
+        }
+    ]
+
+    eval_batch = load_task_batch(
+        step_index=0,
+        batch_size=1,
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="eval",
+        eval_split_fraction=0.25,
+        min_eval_rows=0,
+    )
+
+    assert eval_batch == []
 
 
 def test_load_task_batch_rejects_missing_required_columns() -> None:
@@ -527,6 +702,52 @@ def test_split_sdpo_task_rows_for_eval_is_deterministic_and_non_empty() -> None:
     assert [row["task_id"] for row in eval_a] == [row["task_id"] for row in eval_b]
     assert train_a
     assert eval_a
+
+
+def test_split_sdpo_task_rows_for_eval_keeps_duplicate_logical_tasks_together() -> None:
+    duplicate_prompt = [{"role": "user", "content": "Fix duplicated task"}]
+    rows = [
+        {
+            "task_id": "synthetic:0",
+            "image_name": "img:dup",
+            "prompt": duplicate_prompt,
+            "fail_to_pass": ["tests/test_bug.py::test_fix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+        },
+        {
+            "task_id": "synthetic:1",
+            "image_name": "img:dup",
+            "prompt": duplicate_prompt,
+            "fail_to_pass": ["tests/test_bug.py::test_fix"],
+            "pass_to_pass": ["tests/test_ok.py::test_regression"],
+        },
+        {
+            "task_id": "other:0",
+            "image_name": "img:other-a",
+            "prompt": [{"role": "user", "content": "Other task A"}],
+            "fail_to_pass": ["tests/test_bug.py::test_a"],
+            "pass_to_pass": ["tests/test_ok.py::test_a"],
+        },
+        {
+            "task_id": "other:1",
+            "image_name": "img:other-b",
+            "prompt": [{"role": "user", "content": "Other task B"}],
+            "fail_to_pass": ["tests/test_bug.py::test_b"],
+            "pass_to_pass": ["tests/test_ok.py::test_b"],
+        },
+    ]
+
+    train_rows, eval_rows = split_sdpo_task_rows_for_eval(
+        rows,
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    train_ids = {str(row["task_id"]) for row in train_rows}
+    eval_ids = {str(row["task_id"]) for row in eval_rows}
+    duplicate_ids = {"synthetic:0", "synthetic:1"}
+
+    assert duplicate_ids.issubset(train_ids) or duplicate_ids.issubset(eval_ids)
 
 
 def test_preload_sdpo_task_rows_split_to_parquet_writes_train_and_val(

@@ -61,6 +61,8 @@ _DEFAULT_RFT_WANDB_GROUP = "small-swe-rft"
 _TOOL_RESPONSE_PREFIX = "<tool_response>"
 _TRAIN_LOSS_PATTERN = re.compile(r"step:(\d+)\s*-\s*train/loss:([0-9eE+\-.]+)")
 _VAL_LOSS_PATTERN = re.compile(r"step:(\d+)\s*-\s*val/loss:([0-9eE+\-.]+)")
+_FORMAT_RFT_STAGE_NAME = "format_rft"
+_POSITIVE_RFT_STAGE_NAME = "positive_rft"
 _DEFAULT_PROCESS_GROUP_CLEANUP_TIMEOUT_SEC = 5.0
 _DEFAULT_DIAGNOSTIC_COMMAND_TIMEOUT_SEC = 5.0
 _MODEL_ARTIFACT_FILE_NAMES = {
@@ -105,6 +107,7 @@ class RFTLoopConfig:
     collector_max_turns_per_attempt: int | None = None
     eval_split_fraction: float = 0.1
     eval_min_rows: int = 1
+    stage_name: str = _FORMAT_RFT_STAGE_NAME
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,34 @@ class LatestCommittedCheckpoint:
     selection_contract: Mapping[str, Any]
     correctness_contract: str
     committed_utc: str
+
+
+def resolve_rft_stage_name(stage_name: str) -> str:
+    normalized = stage_name.strip().lower()
+    if normalized in {"", "default", "format", _FORMAT_RFT_STAGE_NAME}:
+        return _FORMAT_RFT_STAGE_NAME
+    if normalized in {"positive", _POSITIVE_RFT_STAGE_NAME}:
+        return _POSITIVE_RFT_STAGE_NAME
+    raise ValueError("stage_name must be one of: format_rft, positive_rft.")
+
+
+def resolve_rft_stage_handoff_overrides(stage_name: str) -> dict[str, Any]:
+    resolved_stage_name = resolve_rft_stage_name(stage_name)
+    if resolved_stage_name == _POSITIVE_RFT_STAGE_NAME:
+        return {
+            "selection": {
+                "require_terminal": False,
+                "require_format_valid": False,
+                "require_resolved": True,
+                "reject_on_invalid_final_submit": False,
+            }
+        }
+    return {}
+
+
+def resolve_rft_stage_verify_submissions(stage_name: str) -> bool:
+    resolved_stage_name = resolve_rft_stage_name(stage_name)
+    return resolved_stage_name == _POSITIVE_RFT_STAGE_NAME
 
 
 class VLLMServerController:
@@ -400,6 +431,26 @@ def _selection_contract_for_rft() -> dict[str, Any]:
     }
 
 
+def resolve_rft_stage_selection_contract(stage_name: str) -> dict[str, Any]:
+    resolved_stage_name = resolve_rft_stage_name(stage_name)
+    if resolved_stage_name == _POSITIVE_RFT_STAGE_NAME:
+        return {
+            "mode": "positive_rft",
+            "require_terminal": False,
+            "require_format_valid": False,
+            "require_resolved": True,
+            "reject_on_invalid_final_submit": False,
+        }
+    return _selection_contract_for_rft()
+
+
+def resolve_rft_stage_correctness_contract(stage_name: str) -> str:
+    resolved_stage_name = resolve_rft_stage_name(stage_name)
+    if resolved_stage_name == _POSITIVE_RFT_STAGE_NAME:
+        return "verifier"
+    return "heuristic"
+
+
 def _load_existing_step_summaries(output_dir: Path, *, committed_step_index: int) -> list[dict[str, Any]]:
     if committed_step_index < 0:
         return []
@@ -504,9 +555,12 @@ def _load_latest_committed_checkpoint(output_dir: Path) -> LatestCommittedCheckp
     selection_contract = (
         dict(selection_contract_raw)
         if isinstance(selection_contract_raw, Mapping)
-        else _selection_contract_for_rft()
+        else resolve_rft_stage_selection_contract(stage)
     )
-    correctness_contract = str(payload.get("correctness_contract", "")).strip() or "heuristic"
+    correctness_contract = (
+        str(payload.get("correctness_contract", "")).strip()
+        or resolve_rft_stage_correctness_contract(stage)
+    )
     committed_utc = str(payload.get("committed_utc", "")).strip() or _utc_now()
     return LatestCommittedCheckpoint(
         stage=stage,
@@ -522,18 +576,20 @@ def _load_latest_committed_checkpoint(output_dir: Path) -> LatestCommittedCheckp
 
 def _build_latest_committed_checkpoint_payload(
     *,
+    stage_name: str,
     step_index: int,
     latest_hf_checkpoint: Path,
     latest_vllm_checkpoint: Path,
 ) -> dict[str, Any]:
+    resolved_stage_name = resolve_rft_stage_name(stage_name)
     return {
-        "stage": "format_rft",
+        "stage": resolved_stage_name,
         "committed_step_index": int(step_index),
         "latest_hf_checkpoint": str(latest_hf_checkpoint),
         "latest_vllm_checkpoint": str(latest_vllm_checkpoint),
         "resume_model_path": str(latest_vllm_checkpoint),
-        "selection_contract": _selection_contract_for_rft(),
-        "correctness_contract": "heuristic",
+        "selection_contract": resolve_rft_stage_selection_contract(resolved_stage_name),
+        "correctness_contract": resolve_rft_stage_correctness_contract(resolved_stage_name),
         "committed_utc": _utc_now(),
     }
 
@@ -606,6 +662,9 @@ def _append_unique_path(paths: list[Path], path: Path) -> None:
 
 def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    resolved_stage_name = resolve_rft_stage_name(config.stage_name)
+    stage_handoff_overrides = resolve_rft_stage_handoff_overrides(resolved_stage_name)
+    stage_verify_submissions = resolve_rft_stage_verify_submissions(resolved_stage_name)
     vllm_logs = config.output_dir / "vllm_server.log"
     collector_max_in_flight_tasks = config.collector_max_in_flight_tasks
     if collector_max_in_flight_tasks is None:
@@ -628,6 +687,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         "rft_steps": config.rft_steps,
         "samples_per_task": config.samples_per_task,
         "task_batch_size": config.task_batch_size,
+        "stage_name": resolved_stage_name,
+        "verify_submissions": stage_verify_submissions,
         "eval_split_fraction": config.eval_split_fraction,
         "eval_min_rows": config.eval_min_rows,
         "collector_max_in_flight_tasks": collector_max_in_flight_tasks,
@@ -669,6 +730,15 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         if latest_committed_checkpoint is not None
         else None
     )
+    if latest_committed_checkpoint is not None:
+        resumed_stage_name = resolve_rft_stage_name(latest_committed_checkpoint.stage)
+        if resumed_stage_name != resolved_stage_name:
+            raise ValueError(
+                "Refusing to resume a committed run with a different stage_name: "
+                f"latest checkpoint stage={resumed_stage_name!r}, "
+                f"requested stage_name={resolved_stage_name!r}. "
+                "Use a fresh output directory for a new stage."
+            )
 
     if config.dry_run:
         _print_dry_run_plan(
@@ -708,6 +778,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             step_start = time.monotonic()
             step_dir = config.output_dir / f"rft_step_{step_index:05d}"
             collector_dir = step_dir / "collector_artifacts"
+            collector_train_dir = collector_dir / "train"
+            collector_eval_dir = collector_dir / "eval"
             train_parquet_path = step_dir / "accepted_trajectories.parquet"
             eval_parquet_path = step_dir / "accepted_trajectories_eval.parquet"
             trainer_checkpoint_root = step_dir / "trainer_checkpoints"
@@ -728,40 +800,51 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 total_steps=1,
                 start_step_index=step_index,
                 runtime_overrides=runtime_overrides,
-                output_dir=str(collector_dir),
+                handoff_overrides=stage_handoff_overrides,
+                output_dir=str(collector_train_dir),
+                task_partition=(
+                    "train" if config.eval_split_fraction > 0.0 else "all"
+                ),
+                task_eval_split_fraction=config.eval_split_fraction,
+                task_eval_min_rows=config.eval_min_rows,
+                verify_submissions=stage_verify_submissions,
+                stage_name=resolved_stage_name,
             )
-            collect_start = time.monotonic()
-            handoff = collect_onpolicy_rft_runtime_batch(
+            collect_train_start = time.monotonic()
+            train_handoff = collect_onpolicy_rft_runtime_batch(
                 request=request,
                 tokenizer=tokenizer,
             )
-            collect_duration_sec = time.monotonic() - collect_start
-            selected_rows = _coerce_rows(handoff.get("selected_rows"))
-            rejected_rows = _coerce_rows(handoff.get("rejected_rows"))
-            selected_count_raw = len(selected_rows)
+            train_collect_duration_sec = time.monotonic() - collect_train_start
+            train_selected_rows = _coerce_rows(train_handoff.get("selected_rows"))
+            train_rejected_rows = _coerce_rows(train_handoff.get("rejected_rows"))
+            selected_count_raw = len(train_selected_rows)
             avg_generation_length_raw = compute_average_generation_length(
-                selected_rows=selected_rows,
+                selected_rows=train_selected_rows,
                 tokenizer=tokenizer,
             )
             (
-                selected_rows,
+                train_selected_rows,
                 selected_rows_over_max_length_dropped,
             ) = filter_selected_rows_by_token_length(
-                selected_rows=selected_rows,
+                selected_rows=train_selected_rows,
                 tokenizer=tokenizer,
                 max_sequence_length=trainer_data_max_length,
             )
-            selected_count_after_max_length_filter = len(selected_rows)
+            selected_count_after_max_length_filter = len(train_selected_rows)
             avg_generation_length = compute_average_generation_length(
-                selected_rows=selected_rows,
+                selected_rows=train_selected_rows,
                 tokenizer=tokenizer,
             )
             selected_count_for_train_raw = 0
             selected_count_for_train = 0
+            eval_selected_count_raw = 0
+            eval_selected_count_after_length_filter = 0
             selected_count_for_eval_raw = 0
             selected_count_for_eval = 0
             selected_rows_upsampled = 0
             selected_rows_eval_upsampled = 0
+            eval_selected_rows_over_max_length_dropped = 0
             eval_split_fallback_to_train = False
             resolved_val_parquet_path = train_parquet_path
             effective_train_batch_size: int | None = None
@@ -780,16 +863,50 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 if latest_committed_checkpoint is not None
                 else None
             )
+            eval_collect_duration_sec = 0.0
+            eval_selected_rows: list[dict[str, Any]] = []
+            eval_rejected_rows: list[dict[str, Any]] = []
+
+            if config.eval_split_fraction > 0.0:
+                eval_request = OnPolicyRFTRuntimeRequest(
+                    data_config_name=config.data_config_name,
+                    turn_generator_mode=config.turn_generator_mode,
+                    total_steps=1,
+                    start_step_index=step_index,
+                    runtime_overrides=runtime_overrides,
+                    handoff_overrides=stage_handoff_overrides,
+                    output_dir=str(collector_eval_dir),
+                    task_partition="eval",
+                    task_eval_split_fraction=config.eval_split_fraction,
+                    task_eval_min_rows=config.eval_min_rows,
+                    verify_submissions=stage_verify_submissions,
+                    stage_name=resolved_stage_name,
+                )
+                collect_eval_start = time.monotonic()
+                eval_handoff = collect_onpolicy_rft_runtime_batch(
+                    request=eval_request,
+                    tokenizer=tokenizer,
+                )
+                eval_collect_duration_sec = time.monotonic() - collect_eval_start
+                eval_selected_rows = _coerce_rows(eval_handoff.get("selected_rows"))
+                eval_rejected_rows = _coerce_rows(eval_handoff.get("rejected_rows"))
+                eval_selected_count_raw = len(eval_selected_rows)
+                (
+                    eval_selected_rows,
+                    eval_selected_rows_over_max_length_dropped,
+                ) = filter_selected_rows_by_token_length(
+                    selected_rows=eval_selected_rows,
+                    tokenizer=tokenizer,
+                    max_sequence_length=trainer_data_max_length,
+                )
+                eval_selected_count_after_length_filter = len(eval_selected_rows)
 
             if selected_count_after_max_length_filter < 1:
                 trainer_skipped = True
                 skip_reason = "no_selected_rows_after_length_filter"
             else:
-                selected_rows_for_train, selected_rows_for_eval = split_selected_rows_for_eval(
-                    selected_rows,
-                    eval_split_fraction=config.eval_split_fraction,
-                    min_eval_rows=config.eval_min_rows,
-                )
+                selected_rows_for_train = list(train_selected_rows)
+                selected_rows_for_eval = list(eval_selected_rows)
                 selected_count_for_train_raw = len(selected_rows_for_train)
                 selected_count_for_eval_raw = len(selected_rows_for_eval)
                 selected_count_for_eval = selected_count_for_eval_raw
@@ -887,6 +1004,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                         )
                         pending_latest_committed_checkpoint_payload = (
                             _build_latest_committed_checkpoint_payload(
+                                stage_name=resolved_stage_name,
                                 step_index=step_index,
                                 latest_hf_checkpoint=latest_hf_checkpoint,
                                 latest_vllm_checkpoint=latest_vllm_checkpoint,
@@ -931,13 +1049,18 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             )
             step_summary = {
                 "step_index": step_index,
-                "stage": "format_rft",
+                "stage": resolved_stage_name,
                 "selected_count": selected_count_raw,
                 "selected_count_raw": selected_count_raw,
                 "selected_count_after_length_filter": selected_count_after_max_length_filter,
                 "avg_generation_length_raw": avg_generation_length_raw,
                 "avg_generation_length": avg_generation_length,
                 "selected_rows_over_max_length_dropped": selected_rows_over_max_length_dropped,
+                "eval_selected_count_raw": eval_selected_count_raw,
+                "eval_selected_count_after_length_filter": eval_selected_count_after_length_filter,
+                "eval_selected_rows_over_max_length_dropped": (
+                    eval_selected_rows_over_max_length_dropped
+                ),
                 "selected_count_for_train_raw": selected_count_for_train_raw,
                 "selected_count_for_train": selected_count_for_train,
                 "selected_count_for_eval_raw": selected_count_for_eval_raw,
@@ -945,12 +1068,18 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "selected_rows_upsampled": selected_rows_upsampled,
                 "selected_rows_eval_upsampled": selected_rows_eval_upsampled,
                 "eval_split_fallback_to_train": eval_split_fallback_to_train,
-                "rejected_count": len(rejected_rows),
+                "rejected_count": len(train_rejected_rows),
+                "train_rejected_count": len(train_rejected_rows),
+                "eval_rejected_count": len(eval_rejected_rows),
                 "trainer_skipped": trainer_skipped,
                 "skip_reason": skip_reason,
                 "effective_train_batch_size": effective_train_batch_size,
                 "effective_eval_batch_size": effective_eval_batch_size,
-                "collector_duration_sec": collect_duration_sec,
+                "collector_duration_sec": (
+                    train_collect_duration_sec + eval_collect_duration_sec
+                ),
+                "collector_train_duration_sec": train_collect_duration_sec,
+                "collector_eval_duration_sec": eval_collect_duration_sec,
                 "trainer_duration_sec": trainer_duration_sec,
                 "inner_train_step_first": trainer_metrics.get("train_step_first"),
                 "inner_train_loss_first": trainer_metrics.get("train_loss_first"),
@@ -975,8 +1104,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                     str(latest_vllm_checkpoint) if latest_vllm_checkpoint else None
                 ),
                 "resume_model_path": current_model_path,
-                "selection_contract": _selection_contract_for_rft(),
-                "correctness_contract": "heuristic",
+                "selection_contract": resolve_rft_stage_selection_contract(resolved_stage_name),
+                "correctness_contract": resolve_rft_stage_correctness_contract(resolved_stage_name),
                 "trainer_command": trainer_command,
                 "pruned_global_step_checkpoints": [
                     str(path) for path in pruned_global_step_checkpoints
@@ -1602,9 +1731,11 @@ def _print_dry_run_plan(
     *,
     collector_max_in_flight_tasks: int,
 ) -> None:
+    resolved_stage_name = resolve_rft_stage_name(config.stage_name)
     preview_steps = min(config.rft_steps, 2)
     print(
         "# [dry-run] planned RFT loop",
+        f"stage_name={resolved_stage_name}",
         f"steps={config.rft_steps}",
         f"samples_per_task={config.samples_per_task}",
         f"task_batch_size={config.task_batch_size}",
@@ -2136,6 +2267,10 @@ def _log_rft_runtime_step_to_wandb(*, wandb_run: Any | None, step_summary: Mappi
         "rft/avg_generation_length_raw": step_summary.get("avg_generation_length_raw"),
         "rft/avg_generation_length": step_summary.get("avg_generation_length"),
         "rft/rejected_count": step_summary.get("rejected_count"),
+        "rft/eval_selected_count_after_length_filter": step_summary.get(
+            "eval_selected_count_after_length_filter"
+        ),
+        "rft/eval_rejected_count": step_summary.get("eval_rejected_count"),
         "rft/trainer_skipped": int(bool(step_summary.get("trainer_skipped", False))),
         "rft/collector_duration_sec": step_summary.get("collector_duration_sec"),
         "rft/trainer_duration_sec": step_summary.get("trainer_duration_sec"),
@@ -2550,7 +2685,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         type=float,
         default=0.1,
         help=(
-            "fraction of selected rows to reserve for val/eval parquet in each step; "
+            "fraction of tasks to reserve for a deterministic held-out eval partition; "
             "must satisfy 0.0 <= value < 1.0."
         ),
     )
@@ -2559,10 +2694,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         type=int,
         default=1,
         help=(
-            "minimum number of held-out eval rows when split fraction is positive and "
-            "at least two selected rows are available."
+            "minimum number of held-out eval tasks when split fraction is positive and "
+            "at least two valid tasks are available."
         ),
     )
+    parser.add_argument("--stage-name", default=_FORMAT_RFT_STAGE_NAME)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--data-config-name", default="on_policy_swe_smith")
     parser.add_argument("--turn-generator-mode", default="default")
@@ -2613,6 +2749,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         raise ValueError("--nnodes must be >= 1.")
     if args.nproc_per_node < 1:
         raise ValueError("--nproc-per-node must be >= 1.")
+    resolved_stage_name = resolve_rft_stage_name(str(args.stage_name))
 
     return RFTLoopConfig(
         project_root=Path(args.project_root).resolve(),
@@ -2653,6 +2790,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         ),
         eval_split_fraction=float(args.eval_split_fraction),
         eval_min_rows=int(args.eval_min_rows),
+        stage_name=resolved_stage_name,
     )
 
 
