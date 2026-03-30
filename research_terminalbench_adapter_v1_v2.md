@@ -1,11 +1,11 @@
 # Research: TerminalBench Adapter Plan (v1 + v2)
 
 Generated: 2026-02-26 05:17 UTC
-Updated: 2026-02-26 10:36 UTC (deep consult + codebase-context pass)
+Updated: 2026-03-30 11:18 UTC (refresh against current main tool surface)
 Status: research draft (implementation-ready plan; no code changes in this PR)
 
 ## Executive Decision Summary
-- Keep `small-swe-train` internal runtime contract unchanged (`bash/search/apply_patch/submit`, JSON tool-call payloads).
+- Keep `small-swe-train` internal runtime contract unchanged (`bash/read/file_search/text_search/apply_patch/submit`, JSON tool-call payloads).
 - Add a shared TerminalBench adapter core plus version-specific adapters for v1 and v2.
 - Run benchmark-faithful scoring per version, then normalize into one cross-version result schema.
 - Keep raw version-specific scorer outputs in artifacts; never collapse away benchmark semantics.
