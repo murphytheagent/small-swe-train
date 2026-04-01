@@ -2,16 +2,15 @@
 
 Repository for a chat-style SWE training stack with `format_rft`, optional `positive_rft`, and `turn_sdpo` stages.
 
-Latest doc update: 2026-03-29.
+Latest doc update: 2026-04-01.
 
 ## Current status
-- PR #26 (`task/1773739092-rft-heldout-positive`) is the active implementation branch on published head `dbbb2ea`; the underlying code surface still aligns looped and direct held-out/positive-RFT behavior, adds the shared-parquet ambiguity guard, reuses the train partition when the implicit held-out eval split is empty, and now also carries the later docs-only PR-status refreshes on top of the earlier `.gitignore` hygiene commit.
-- The focused plus broader RFT regression bundle is green on PR #26, but GitHub still shows 2 unresolved non-outdated review threads and the latest bounded local review against `main` again timed out before a terminal verdict, so the branch is still not locally review-cleared.
-- The actual next executable step is still the staged remote E2E run: the scratch checkout and sequential `format_rft 3 -> positive_rft 3` script are ready, and Slurm job `1428` was canceled rather than left pending unattended.
+- `main` now carries the held-out / positive-RFT fixes from merged PR `#26` (`1281994`) plus the docs-first planning stack from PRs `#14`-`#17`, `#23`, and `#27` (`c2831a6`, `d171bbf`, `940cc8e`, `be3f3d1`, `4c38d6a`, `ae492c6`). There is no open GitHub PR surface left on this repo.
+- The real missing artifact is still the staged remote `format_rft 3 -> positive_rft 3` run. The scratch checkout and launcher remain ready at `/data/scratch/murphy/projects/worktrees/small-swe-train-1773739092/tmp/run_format_positive_e2e.sh`.
+- The old queue note in earlier maintenance docs is stale: `wth-gpu-01` is now `mixed`, with only `zhijianliu`'s 1-GPU job `1942` scheduled through `2026-04-01 14:27 UTC`, so the next step is a readiness check plus requeue rather than waiting for a full-node blocker to disappear.
+- Wangzhi's latest instruction is to queue the job once readiness is confirmed and then let him monitor completion; there is no need to babysit the queue from here.
 - PR #18 (`plan/1772102085-current-turn-supervision`) merged into `main` on 2026-03-08 05:02 UTC, so current-turn supervision is now on the base branch.
 - The latest validated E2E execution remains the 8-GPU rerun chain `826` / `827` / `828`; detailed metrics and follow-up notes live in `IMPLEMENTATION_BLUEPRINT.md`.
-- PR #23 remains open as a planning branch, but it is still intentionally blocked by the standing `SWE-rebench` integration constraint.
-- Legacy research PRs #14-#17 remain open/unstable and are not current merge candidates.
 
 Canonical staged pipeline:
 - `format_rft`
