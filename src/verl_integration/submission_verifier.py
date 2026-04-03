@@ -7,7 +7,10 @@ import shlex
 from typing import Any, Mapping, Sequence
 
 from env.runtime_protocol import ToolRequest
-from env.shell_helpers import build_python_interpreter_resolver_shell
+from env.shell_helpers import (
+    build_executable_resolver_shell,
+    build_python_interpreter_resolver_shell,
+)
 from verifier_utils import normalize_verifier_kind, normalize_verifier_targets
 
 _MIN_PER_TEST_TIMEOUT_SEC = 180
@@ -20,12 +23,27 @@ _VERIFY_SCRIPT = """import json
 import os
 import re
 import subprocess
+import shutil
 
 targets = json.loads(os.environ.get("SMALL_SWE_TESTS_JSON", "[]"))
 repo_root = os.environ.get("TASK_REPO_ROOT") or os.environ.get("SMALL_SWE_REPO_ROOT", ".")
 verifier_kind = os.environ.get("SMALL_SWE_VERIFIER_KIND", "pytest").strip().lower()
 pybin = os.environ.get("SMALL_SWE_PYBIN", "python3")
+gobin = os.environ.get("SMALL_SWE_GO_BIN", "").strip()
 per_test_timeout = int(os.environ.get("SMALL_SWE_PER_TEST_TIMEOUT_SEC", "120"))
+
+
+def _resolve_executable(env_value: str, command_names: tuple[str, ...], fallback_paths: tuple[str, ...]) -> str:
+    if env_value:
+        return env_value
+    for command_name in command_names:
+        resolved = shutil.which(command_name)
+        if resolved:
+            return resolved
+    for candidate in fallback_paths:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
 
 results: dict[str, bool] = {}
 failures: dict[str, dict[str, object]] = {}
@@ -40,7 +58,14 @@ for raw_name in targets:
     if verifier_kind == "pytest":
         command = [pybin, "-m", "pytest", "-q", test_name]
     elif verifier_kind == "go_test":
-        command = ["go", "test", "./...", "-count=1", "-run", "^" + re.escape(test_name) + "$"]
+        resolved_go = _resolve_executable(
+            gobin,
+            ("go",),
+            ("/usr/local/go/bin/go", "/usr/lib/go/bin/go", "/opt/go/bin/go"),
+        )
+        if not resolved_go:
+            raise FileNotFoundError("go")
+        command = [resolved_go, "test", "./...", "-count=1", "-run", "^" + re.escape(test_name) + "$"]
     else:
         group_error = f"unsupported verifier kind: {verifier_kind}"
         results[test_name] = False
@@ -343,13 +368,21 @@ def _build_verifier_shell_command(
         "exit 2; "
         "fi; "
     )
+    if verifier_kind == "go_test":
+        prefix += build_executable_resolver_shell(
+            var_name="gobin",
+            command_names=("go",),
+            fallback_paths=("/usr/local/go/bin/go", "/usr/lib/go/bin/go", "/opt/go/bin/go"),
+            not_found_message="Go executable missing in task container.",
+        )
     suffix = (
         f"SMALL_SWE_TESTS_JSON={shlex.quote(tests_json)} "
         f"SMALL_SWE_PER_TEST_TIMEOUT_SEC={int(max(per_test_timeout_sec, 1))} "
         f"SMALL_SWE_VERIFIER_KIND={shlex.quote(verifier_kind)} "
         'TASK_REPO_ROOT="${repo_root}" '
         'SMALL_SWE_PYBIN="${pybin}" '
-        '"${pybin}" -'
+        + ('SMALL_SWE_GO_BIN="${gobin}" ' if verifier_kind == "go_test" else "")
+        + '"${pybin}" -'
     )
     return prefix + build_python_interpreter_resolver_shell(var_name="pybin") + suffix
 

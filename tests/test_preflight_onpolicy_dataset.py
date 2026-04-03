@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 from config import OnPolicyDataConfig, OnPolicyDatasetColumns
 import env.preflight_onpolicy_dataset as preflight_module
-from env.shell_helpers import build_python_interpreter_resolver_shell
+from env.shell_helpers import (
+    build_executable_resolver_shell,
+    build_python_interpreter_resolver_shell,
+)
 
 
 def _config() -> OnPolicyDataConfig:
@@ -54,6 +57,18 @@ def test_probe_command_falls_back_from_python3_to_python() -> None:
     assert build_python_interpreter_resolver_shell(var_name="pybin") in command
     assert '"${pybin}" - <<' in command
     assert "SMALL_SWE_PREFLIGHT_VERIFIER_KIND" in command
+
+
+def test_probe_command_resolves_go_binary_from_common_paths() -> None:
+    command = preflight_module._build_probe_command(verifier_kind="go_test")
+
+    assert build_executable_resolver_shell(
+        var_name="gobin",
+        command_names=("go",),
+        fallback_paths=("/usr/local/go/bin/go", "/usr/lib/go/bin/go", "/opt/go/bin/go"),
+        not_found_message="Go executable missing in task container.",
+    ) in command
+    assert 'SMALL_SWE_PREFLIGHT_GO_BIN="${gobin}"' in command
 
 
 def test_resolve_cache_path_scopes_noncanonical_probe_settings(tmp_path: Path) -> None:

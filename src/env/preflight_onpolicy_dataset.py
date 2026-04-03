@@ -17,7 +17,10 @@ from config import (
 from env.container_pool import BatchContainerPool
 from env.docker_executor import DockerToolExecutor
 from env.runtime_protocol import ToolRequest
-from env.shell_helpers import build_python_interpreter_resolver_shell
+from env.shell_helpers import (
+    build_executable_resolver_shell,
+    build_python_interpreter_resolver_shell,
+)
 from env.task_dataset import (
     ON_POLICY_BAD_TASK_CACHE_SCHEMA_VERSION,
     TaskSample,
@@ -37,11 +40,43 @@ def _build_probe_command(
     selectors: Sequence[str] | None = None,
 ) -> str:
     selectors_json = json.dumps([str(selector) for selector in (selectors or ())], ensure_ascii=True)
+    go_resolver = ""
+    go_prefix = ""
+    if verifier_kind == "go_test":
+        go_resolver = build_executable_resolver_shell(
+            var_name="gobin",
+            command_names=("go",),
+            fallback_paths=("/usr/local/go/bin/go", "/usr/lib/go/bin/go", "/opt/go/bin/go"),
+            not_found_message="Go executable missing in task container.",
+        )
+        go_prefix = 'SMALL_SWE_PREFLIGHT_GO_BIN="${gobin}" '
+    node_resolver = ""
+    node_prefix = ""
+    if verifier_kind == "node_test":
+        node_resolver = (
+            build_executable_resolver_shell(
+                var_name="nodebin",
+                command_names=("node",),
+                fallback_paths=("/usr/local/bin/node", "/usr/bin/node", "/opt/node/bin/node"),
+                not_found_message="Node executable missing in task container.",
+            )
+            + build_executable_resolver_shell(
+                var_name="npmbin",
+                command_names=("npm",),
+                fallback_paths=("/usr/local/bin/npm", "/usr/bin/npm", "/opt/node/bin/npm"),
+                not_found_message="npm executable missing in task container.",
+            )
+        )
+        node_prefix = 'SMALL_SWE_PREFLIGHT_NODE_BIN="${nodebin}" SMALL_SWE_PREFLIGHT_NPM_BIN="${npmbin}" '
     return (
         "set -eu; "
         + build_python_interpreter_resolver_shell(var_name="pybin")
+        + go_resolver
+        + node_resolver
         + f"SMALL_SWE_PREFLIGHT_VERIFIER_KIND={json.dumps(verifier_kind)} "
         + f"SMALL_SWE_PREFLIGHT_SELECTORS_JSON={json.dumps(selectors_json)} "
+        + go_prefix
+        + node_prefix
         + '''"${pybin}" - <<'PY'
 import importlib.util
 import json
@@ -54,6 +89,9 @@ import re
 repo_root = os.environ.get("TASK_REPO_ROOT", "")
 verifier_kind = os.environ.get("SMALL_SWE_PREFLIGHT_VERIFIER_KIND", "pytest").strip().lower()
 selectors = json.loads(os.environ.get("SMALL_SWE_PREFLIGHT_SELECTORS_JSON", "[]"))
+gobin = os.environ.get("SMALL_SWE_PREFLIGHT_GO_BIN", "").strip()
+nodebin = os.environ.get("SMALL_SWE_PREFLIGHT_NODE_BIN", "").strip()
+npmbin = os.environ.get("SMALL_SWE_PREFLIGHT_NPM_BIN", "").strip()
 try:
     selectors = json.loads(selectors) if isinstance(selectors, str) else selectors
 except json.JSONDecodeError:
@@ -65,15 +103,43 @@ selector_valid = True
 selector_error = ""
 missing_selectors: list[str] = []
 
+
+def _resolve_executable(env_value: str, command_names: tuple[str, ...], fallback_paths: tuple[str, ...]) -> str:
+    if env_value:
+        return env_value
+    for command_name in command_names:
+        resolved = shutil.which(command_name)
+        if resolved:
+            return resolved
+    for candidate in fallback_paths:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
+
 if verifier_kind == "pytest":
     runner_available = importlib.util.find_spec("pytest") is not None
     runner_label = "pytest"
 elif verifier_kind == "go_test":
-    runner_available = shutil.which("go") is not None
-    runner_label = "go"
+    resolved_go = _resolve_executable(
+        gobin,
+        ("go",),
+        ("/usr/local/go/bin/go", "/usr/lib/go/bin/go", "/opt/go/bin/go"),
+    )
+    runner_available = bool(resolved_go)
+    runner_label = resolved_go or "go"
 elif verifier_kind == "node_test":
-    runner_available = shutil.which("node") is not None and shutil.which("npm") is not None
-    runner_label = "node+npm"
+    resolved_node = _resolve_executable(
+        nodebin,
+        ("node",),
+        ("/usr/local/bin/node", "/usr/bin/node", "/opt/node/bin/node"),
+    )
+    resolved_npm = _resolve_executable(
+        npmbin,
+        ("npm",),
+        ("/usr/local/bin/npm", "/usr/bin/npm", "/opt/node/bin/npm"),
+    )
+    runner_available = bool(resolved_node and resolved_npm)
+    runner_label = f"{resolved_node or 'node'}+{resolved_npm or 'npm'}"
 elif verifier_kind == "command":
     runner_available = True
     runner_label = "shell"
@@ -98,7 +164,7 @@ if repo_root and os.path.exists(repo_root) and runner_available and selectors:
                 selector_error = completed.stderr.strip() or completed.stdout.strip() or f"pytest collect failed with exit code {completed.returncode}"
         elif verifier_kind == "go_test":
             regex = "^(?:" + "|".join(re.escape(selector) for selector in selectors) + ")$" if selectors else "^$"
-            command = ["go", "test", "./...", "-run", "^$", "-list", regex]
+            command = [resolved_go, "test", "./...", "-run", "^$", "-list", regex]
             completed = subprocess.run(
                 command,
                 cwd=repo_root,

@@ -11,7 +11,10 @@ import sys
 import pytest
 
 from env.runtime_protocol import ToolResponse
-from env.shell_helpers import build_python_interpreter_resolver_shell
+from env.shell_helpers import (
+    build_executable_resolver_shell,
+    build_python_interpreter_resolver_shell,
+)
 from verl_integration.submission_verifier import (
     _VERIFY_SCRIPT,
     _build_verifier_shell_command,
@@ -172,6 +175,22 @@ def test_build_verifier_shell_command_uses_shared_python_resolution() -> None:
 
     assert build_python_interpreter_resolver_shell(var_name="pybin") in command
     assert 'SMALL_SWE_PYBIN="${pybin}"' in command
+
+
+def test_build_verifier_shell_command_resolves_go_binary_from_common_paths() -> None:
+    command = _build_verifier_shell_command(
+        tests_json='["TestBug"]',
+        per_test_timeout_sec=180,
+        verifier_kind="go_test",
+    )
+
+    assert build_executable_resolver_shell(
+        var_name="gobin",
+        command_names=("go",),
+        fallback_paths=("/usr/local/go/bin/go", "/usr/lib/go/bin/go", "/opt/go/bin/go"),
+        not_found_message="Go executable missing in task container.",
+    ) in command
+    assert 'SMALL_SWE_GO_BIN="${gobin}"' in command
 
 
 def test_run_submission_verifier_parses_large_json_payload_from_full_stdout() -> None:
@@ -410,3 +429,46 @@ def test_verify_script_runs_all_tests_after_a_failure(tmp_path: Path) -> None:
         "-q",
         "test_ordering.py::test_first_fail",
     ]
+
+
+def test_verify_script_uses_explicit_go_binary_when_path_missing(tmp_path: Path) -> None:
+    fake_go = tmp_path / "fake-go"
+    log_path = tmp_path / "fake-go.log"
+    fake_go.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                'printf "%s\\n" "$*" >> "$FAKE_GO_LOG"',
+                "exit 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_go.chmod(0o755)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _VERIFY_SCRIPT],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "FAKE_GO_LOG": str(log_path),
+            "PATH": "",
+            "SMALL_SWE_TESTS_JSON": json.dumps(["TestBug"]),
+            "SMALL_SWE_GO_BIN": str(fake_go),
+            "SMALL_SWE_VERIFIER_KIND": "go_test",
+            "TASK_REPO_ROOT": str(tmp_path),
+            "SMALL_SWE_PER_TEST_TIMEOUT_SEC": "30",
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout.strip())
+    assert payload["executed"] == 1
+    assert payload["results"] == {"TestBug": True}
+    logged_command = log_path.read_text(encoding="utf-8").strip().split()
+    assert logged_command[:4] == ["test", "./...", "-count=1", "-run"]
