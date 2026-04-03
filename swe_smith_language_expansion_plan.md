@@ -20,6 +20,7 @@ Out of scope:
 - Integrate later: `SWE-smith-js`, `SWE-smith-ts` after the language-aware verifier path is stable and bounded for large target sets.
 - Keep `SWE-smith-py` as the default path until each added language clears its own dry-run and verifier gates.
 - Treat large verifier target lists as a first-class constraint: the full test plan must stay in structured metadata, while prompts and human-readable reports use bounded previews only.
+- Judge language readiness on selector-valid rows, and keep verifier/backend/setup failures separate from ordinary unresolved-task outcomes.
 
 ## Why this sequencing
 Current codebase constraints:
@@ -36,7 +37,8 @@ Some non-Python SWE-smith tasks will carry very large PASS/FAIL target lists. Th
 Required behavior for every milestone:
 - keep the initial prompt focused on the task objective rather than the full test list,
 - preserve the full verifier target plan in structured metadata,
-- expose only bounded previews and bounded failure summaries in user-visible text and logs.
+- expose only bounded previews and bounded failure summaries in user-visible text and logs,
+- validate selector sets before enablement (dedupe exact duplicate targets, reject `fail_to_pass` / `pass_to_pass` overlap, and fail early on absurd selector payloads).
 
 ## Milestones
 
@@ -47,6 +49,8 @@ Delivery boundary:
 Implementation scope:
 - Add a typed verifier backend interface with language-aware dispatch (`python`, `go`, `js`, `ts`).
 - Add dataset-config plumbing for selecting SWE-smith language variants explicitly.
+- Refactor preflight around `verifier_kind` rather than dataset language labels, with image-level runner checks kept separate from task-level target-smoke probes.
+- Add row-static selector sanity checks before enablement so obviously bad target sets get filtered before runtime verification.
 - Add bounded verifier-target preview/report safeguards so large target lists stay out of the first-turn prompt body.
 - Keep the current `SWE-smith-py` path bit-for-bit equivalent under existing configs.
 
@@ -62,6 +66,7 @@ Acceptance gates:
 - New shared contracts have regression tests for schema validation and fallback behavior.
 - No runtime config flips to a new language yet.
 - Large verifier target lists stay out of the first-turn prompt and produce bounded previews/reports.
+- Selector-invalid rows are accounted for separately from verifier/backend/setup failures and from genuine unresolved-task outcomes.
 
 Out of scope:
 - No default mix change.
@@ -75,7 +80,7 @@ Implementation scope:
 - Add a Go dataset config under `configs/data/`.
 - Map `SWE-smith-go` rows to the normalized task contract.
 - Implement a Go verifier execution strategy.
-- Add deterministic filtering and logging for empty/invalid rows.
+- Add deterministic selector validation and a Go target-smoke preflight before enablement.
 
 Expected touchpoints:
 - `configs/data/`
@@ -89,6 +94,7 @@ Acceptance gates:
 - The on-policy collector verifies with the Go backend without Python-path regressions.
 - Prompt size remains bounded for high-cardinality target cases.
 - Failure payloads stay readable even when the underlying target list is large.
+- Reports distinguish selector-invalid rows, verifier/backend/setup failures, and genuine unresolved-task outcomes.
 
 Out of scope:
 - `SWE-smith-js` and `SWE-smith-ts` are not enabled yet.
@@ -101,6 +107,7 @@ Implementation scope:
 - Add dataset configs for JS and TS.
 - Implement JS/TS verifier command execution strategies.
 - Add strict safeguards for very large PASS/FAIL target arrays.
+- Carry the same selector-validation and verifier-kind preflight rules forward for JS/TS backends.
 - Add cost/time guardrails for high target-count verification.
 
 Expected touchpoints:
@@ -115,6 +122,7 @@ Acceptance gates:
 - Verification runs in bounded mode and reports actionable failure payloads.
 - Python and Go behavior remain unchanged under legacy configs.
 - Very large PASS/FAIL target arrays never get dumped verbatim into prompts or user-visible logs.
+- JS/TS readiness accounting keeps selector-invalid and verifier-unusable rows separate from ordinary unresolved tasks.
 
 Out of scope:
 - No additional dataset families.
