@@ -1928,7 +1928,14 @@ def _load_tokenizer(model_path: str):
 
 
 def _build_models_url(base_url: str) -> str:
-    return base_url.rstrip("/") + "/models"
+    normalized = base_url.strip().rstrip("/")
+    if normalized.endswith("/models"):
+        return normalized
+    if normalized.endswith("/chat/completions"):
+        return normalized[: -len("/chat/completions")] + "/models"
+    if normalized.endswith("/v1"):
+        return normalized + "/models"
+    return normalized + "/v1/models"
 
 
 def _query_http_endpoint_models(
