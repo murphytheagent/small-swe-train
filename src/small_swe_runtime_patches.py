@@ -418,19 +418,20 @@ def _install_ray_worker_local_rank_device_patch() -> None:
     original_setup = Worker._setup_env_cuda_visible_devices
 
     def _small_swe_setup_env_cuda_visible_devices(self):
-        original_setup(self)
         if not ray_noset_visible_devices():
+            original_setup(self)
             return
 
         local_rank = _resolve_local_rank_from_env()
         if local_rank is None:
+            original_setup(self)
             return
 
         os.environ["LOCAL_RANK"] = str(local_rank)
         try:
             get_torch_device().set_device(local_rank)
         except Exception:
-            return
+            original_setup(self)
 
     _small_swe_setup_env_cuda_visible_devices.__name__ = "_small_swe_setup_env_cuda_visible_devices"
     Worker._setup_env_cuda_visible_devices = _small_swe_setup_env_cuda_visible_devices

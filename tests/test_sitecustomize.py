@@ -332,9 +332,54 @@ def test_sitecustomize_sets_local_rank_from_rank_in_ray_noset_mode(monkeypatch) 
     worker = _FakeWorker()
     worker._setup_env_cuda_visible_devices()
 
-    assert calls["base_called"] == 1
+    assert calls["base_called"] == 0
     assert calls["set_device"] == [5]
     assert os.environ["LOCAL_RANK"] == "5"
+
+
+def test_sitecustomize_falls_back_to_base_setup_when_env_local_rank_missing(monkeypatch) -> None:
+    calls = {"base_called": 0, "set_device": []}
+
+    class _FakeWorker:
+        def _setup_env_cuda_visible_devices(self) -> None:
+            calls["base_called"] += 1
+            os.environ["LOCAL_RANK"] = "2"
+
+    class _FakeTorchDevice:
+        def set_device(self, device: int) -> None:
+            calls["set_device"].append(device)
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_single_controller_pkg = types.ModuleType("verl.single_controller")
+    fake_single_controller_base_pkg = types.ModuleType("verl.single_controller.base")
+    fake_worker_module = types.ModuleType("verl.single_controller.base.worker")
+    fake_worker_module.Worker = _FakeWorker
+
+    fake_utils_pkg = types.ModuleType("verl.utils")
+    fake_device_module = types.ModuleType("verl.utils.device")
+    fake_device_module.get_torch_device = lambda: _FakeTorchDevice()
+    fake_ray_utils_module = types.ModuleType("verl.utils.ray_utils")
+    fake_ray_utils_module.ray_noset_visible_devices = lambda env_vars=os.environ: True
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.single_controller", fake_single_controller_pkg)
+    monkeypatch.setitem(sys.modules, "verl.single_controller.base", fake_single_controller_base_pkg)
+    monkeypatch.setitem(sys.modules, "verl.single_controller.base.worker", fake_worker_module)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.device", fake_device_module)
+    monkeypatch.setitem(sys.modules, "verl.utils.ray_utils", fake_ray_utils_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.delenv("RAY_LOCAL_WORLD_SIZE", raising=False)
+    monkeypatch.delenv("LOCAL_WORLD_SIZE", raising=False)
+
+    sitecustomize.apply_small_swe_runtime_patches()
+    worker = _FakeWorker()
+    worker._setup_env_cuda_visible_devices()
+
+    assert calls["base_called"] == 1
+    assert calls["set_device"] == []
+    assert os.environ["LOCAL_RANK"] == "2"
 
 
 def test_sitecustomize_installs_model_type_aware_mistral_regex_default(monkeypatch, tmp_path) -> None:
