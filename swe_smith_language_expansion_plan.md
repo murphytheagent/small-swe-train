@@ -19,6 +19,7 @@ Out of scope:
 - Integrate first: `SWE-smith-go`.
 - Integrate later: `SWE-smith-js`, `SWE-smith-ts` after the language-aware verifier path is stable and bounded for large target sets.
 - Keep `SWE-smith-py` as the default path until each added language clears its own dry-run and verifier gates.
+- Treat large verifier target lists as a first-class constraint: the full test plan must stay in structured metadata, while prompts and human-readable reports use bounded previews only.
 
 ## Why this sequencing
 Current codebase constraints:
@@ -28,6 +29,14 @@ Current codebase constraints:
 - Current runtime configs and regression tests are still centered on the Python path.
 
 Because the language-specific SWE-smith variants stay within the same dataset family, the main missing surface is verifier and config generalization rather than a new dataset-policy program.
+
+## Non-negotiable constraint
+Some non-Python SWE-smith tasks will carry very large PASS/FAIL target lists. That does not fit the current prompt/report surface if we simply dump raw targets into the user-visible text.
+
+Required behavior for every milestone:
+- keep the initial prompt focused on the task objective rather than the full test list,
+- preserve the full verifier target plan in structured metadata,
+- expose only bounded previews and bounded failure summaries in user-visible text and logs.
 
 ## Milestones
 
@@ -52,6 +61,7 @@ Acceptance gates:
 - Existing `SWE-smith-py` behavior remains unchanged by default config.
 - New shared contracts have regression tests for schema validation and fallback behavior.
 - No runtime config flips to a new language yet.
+- Large verifier target lists stay out of the first-turn prompt and produce bounded previews/reports.
 
 Out of scope:
 - No default mix change.
@@ -78,6 +88,7 @@ Acceptance gates:
 - End-to-end dry-run ingestion over the `SWE-smith-go` split succeeds with stable row counts.
 - The on-policy collector verifies with the Go backend without Python-path regressions.
 - Prompt size remains bounded for high-cardinality target cases.
+- Failure payloads stay readable even when the underlying target list is large.
 
 Out of scope:
 - `SWE-smith-js` and `SWE-smith-ts` are not enabled yet.
@@ -103,6 +114,7 @@ Acceptance gates:
 - JS/TS ingestion passes validation with deterministic filtered-row accounting.
 - Verification runs in bounded mode and reports actionable failure payloads.
 - Python and Go behavior remain unchanged under legacy configs.
+- Very large PASS/FAIL target arrays never get dumped verbatim into prompts or user-visible logs.
 
 Out of scope:
 - No additional dataset families.
