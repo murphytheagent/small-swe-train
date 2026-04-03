@@ -4,8 +4,11 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+
+import pytest
 
 from env.runtime_protocol import ToolResponse
 from env.shell_helpers import build_python_interpreter_resolver_shell
@@ -28,6 +31,36 @@ class _FakeExecutor:
         if not self.responses:
             raise AssertionError("Unexpected verifier invocation with no queued response.")
         return self.responses.pop(0)
+
+
+@dataclass
+class _LocalShellExecutor:
+    cwd: Path
+
+    def __post_init__(self) -> None:
+        self.requests: list[object] = []
+
+    def run(self, request):  # noqa: ANN001 - protocol-compatible test shim
+        self.requests.append(request)
+        completed = subprocess.run(
+            ["bash", "-lc", str(request.args["command"])],
+            cwd=self.cwd,
+            input=str(request.args.get("stdin", "")),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=int(request.args.get("timeout_sec", 30)),
+            env={
+                **os.environ,
+                "TASK_REPO_ROOT": str(self.cwd),
+                "SMALL_SWE_REPO_ROOT": str(self.cwd),
+            },
+        )
+        return ToolResponse(
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.returncode,
+        )
 
 
 def test_run_submission_verifier_uses_test_results_for_binary_resolution() -> None:
@@ -134,6 +167,7 @@ def test_build_verifier_shell_command_uses_shared_python_resolution() -> None:
     command = _build_verifier_shell_command(
         tests_json='["tests/test_bug.py::test_fix"]',
         per_test_timeout_sec=180,
+        verifier_kind="pytest",
     )
 
     assert build_python_interpreter_resolver_shell(var_name="pybin") in command
@@ -240,6 +274,83 @@ def test_run_submission_verifier_returns_group_diagnostics() -> None:
         "-q",
         "tests/test_bug.py::test_a",
     ]
+
+
+def test_run_submission_verifier_marks_unimplemented_runtime_verifier_kind_invalid() -> None:
+    executor = _FakeExecutor(responses=[])
+
+    result = run_submission_verifier(
+        executor=executor,
+        fail_to_pass=["tests/smoke.js::testBug"],
+        pass_to_pass=["tests/smoke.js::testRegression"],
+        verifier_timeout_sec=30,
+        final_response="patched",
+        verifier_kind="node_test",
+    )
+
+    assert result["resolved"] is False
+    assert result["infra_invalid"] is True
+    assert result["invalid_reason"] == "verifier_crash"
+    assert "not implemented" in result["verification_feedback"]
+    assert executor.requests == []
+
+
+def test_run_submission_verifier_executes_go_test_targets_locally(tmp_path: Path) -> None:
+    if shutil.which("go") is None:
+        pytest.skip("go toolchain unavailable")
+
+    (tmp_path / "go.mod").write_text("module example.com/sample\n\ngo 1.20\n", encoding="utf-8")
+    (tmp_path / "calc.go").write_text(
+        "\n".join(
+            [
+                "package sample",
+                "",
+                "func add(a, b int) int { return a + b }",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "calc_test.go").write_text(
+        "\n".join(
+            [
+                "package sample",
+                "",
+                'import "testing"',
+                "",
+                "func TestBug(t *testing.T) {",
+                "    if got := add(2, 2); got != 4 {",
+                '        t.Fatalf("want 4, got %d", got)',
+                "    }",
+                "}",
+                "",
+                "func TestRegression(t *testing.T) {",
+                "    if got := add(5, 3); got != 8 {",
+                '        t.Fatalf("want 8, got %d", got)',
+                "    }",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    executor = _LocalShellExecutor(cwd=tmp_path)
+    result = run_submission_verifier(
+        executor=executor,
+        fail_to_pass=["TestBug"],
+        pass_to_pass=["TestRegression"],
+        verifier_timeout_sec=60,
+        final_response="patched",
+        verifier_kind="go_test",
+    )
+
+    assert result["resolved"] is True
+    assert result["verifier_kind"] == "go_test"
+    assert result["infra_invalid"] is False
+    assert result["fail_to_pass_results"] == {"TestBug": True}
+    assert result["pass_to_pass_results"] == {"TestRegression": True}
+    assert len(executor.requests) == 2
 
 
 def test_verify_script_runs_all_tests_after_a_failure(tmp_path: Path) -> None:

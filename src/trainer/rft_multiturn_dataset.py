@@ -33,6 +33,10 @@ def build_multiturn_dataset_records(
             row.get("terminal_format_valid", row.get("final_submit_format_valid")),
             fallback=False,
         )
+        verifier_kind = _require_non_empty_text(
+            row.get("verifier_kind", "pytest"),
+            label=f"{row_label}.verifier_kind",
+        )
         fail_to_pass = _resolve_test_targets_from_row(row, key="fail_to_pass")
         pass_to_pass = _resolve_test_targets_from_row(row, key="pass_to_pass")
         messages = build_multiturn_messages(row, row_index=index)
@@ -47,6 +51,7 @@ def build_multiturn_dataset_records(
             "format_valid": format_valid,
             "final_turn_has_submit": final_turn_has_submit,
             "final_submit_format_valid": final_submit_format_valid,
+            "verifier_kind": verifier_kind,
             "fail_to_pass": fail_to_pass,
             "pass_to_pass": pass_to_pass,
         }
@@ -64,6 +69,7 @@ def build_multiturn_dataset_records(
                 "attempt_index": attempt_index,
                 "step_index": step_index,
                 "turn_index": turn_index,
+                "verifier_kind": verifier_kind,
                 "resolved": resolved,
                 "fail_to_pass": fail_to_pass,
                 "pass_to_pass": pass_to_pass,

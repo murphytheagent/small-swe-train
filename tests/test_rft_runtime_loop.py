@@ -2382,6 +2382,8 @@ def test_filter_selected_rows_by_token_length_drops_overlength_rows() -> None:
     assert dropped_count == 1
     assert len(kept_rows) == 1
     assert kept_rows[0]["task_id"] == "task-short"
+    assert kept_rows[0]["selected_token_count"] > 0
+    assert kept_rows[0]["selected_over_budget"] is False
 
 
 def test_filter_selected_rows_by_token_length_requires_chat_template_tokenizer() -> None:

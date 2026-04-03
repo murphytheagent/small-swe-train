@@ -223,6 +223,19 @@ def _resolve_verifiable_resolution(sample: Mapping[str, Any]) -> dict[str, Any]:
 
     has_expected_tests = bool(fail_expected or pass_expected)
     has_any_signal = fail_signal or pass_signal
+    infra_invalid = _coerce_bool_flag(_lookup_verification_value(sample, "infra_invalid"), fallback=False)
+    invalid_reason = str(_lookup_verification_value(sample, "invalid_reason") or "").strip()
+
+    if infra_invalid:
+        return {
+            "resolved": None,
+            "has_expected_tests": has_expected_tests,
+            "fail_to_pass_verified": fail_verified,
+            "pass_to_pass_verified": pass_verified,
+            "verification_missing": True,
+            "infra_invalid": True,
+            "invalid_reason": invalid_reason or "infra_invalid",
+        }
 
     if not has_any_signal:
         return {
@@ -231,6 +244,8 @@ def _resolve_verifiable_resolution(sample: Mapping[str, Any]) -> dict[str, Any]:
             "fail_to_pass_verified": fail_verified,
             "pass_to_pass_verified": pass_verified,
             "verification_missing": True,
+            "infra_invalid": False,
+            "invalid_reason": "",
         }
 
     fail_result = fail_verified if fail_verified is not None else (False if fail_expected else True)
@@ -241,6 +256,8 @@ def _resolve_verifiable_resolution(sample: Mapping[str, Any]) -> dict[str, Any]:
         "fail_to_pass_verified": bool(fail_result),
         "pass_to_pass_verified": bool(pass_result),
         "verification_missing": False,
+        "infra_invalid": False,
+        "invalid_reason": "",
     }
 
 
@@ -248,6 +265,9 @@ def _verification_feedback(sample: Mapping[str, Any], *, verification: Mapping[s
     explicit_feedback = _lookup_verification_value(sample, "verification_feedback", "reward_feedback", "feedback")
     if isinstance(explicit_feedback, str) and explicit_feedback.strip():
         return explicit_feedback.strip()
+    if bool(verification.get("infra_invalid", False)):
+        invalid_reason = str(verification.get("invalid_reason", "")).strip() or "infra_invalid"
+        return f"Verifier invalid: {invalid_reason}"
     if bool(verification.get("resolved", False)):
         return "Verifier: all FAIL_TO_PASS and PASS_TO_PASS tests passed."
 
@@ -375,7 +395,11 @@ def reward_fn(
         resolved_from_verification = _coerce_optional_bool_flag(verification.get("resolved"))
         has_expected_tests = bool(verification.get("has_expected_tests", False))
         verification_missing = bool(verification.get("verification_missing", False))
-        if resolved_from_verification is None:
+        infra_invalid = bool(verification.get("infra_invalid", False))
+        invalid_reason = str(verification.get("invalid_reason", "")).strip()
+        if infra_invalid:
+            resolved_sources.append(invalid_reason or "infra_invalid")
+        elif resolved_from_verification is None:
             if has_expected_tests:
                 resolved_sources.append("missing_verifier")
             else:
@@ -390,7 +414,9 @@ def reward_fn(
         fail_to_pass_verified.append(fail_verified)
         pass_to_pass_verified.append(pass_verified)
         reward_verification_missing.append(verification_missing)
-        if resolved_sources[-1] != "verifiable_tests":
+        if infra_invalid:
+            verifier_statuses.append("invalid")
+        elif resolved_sources[-1] != "verifiable_tests":
             verifier_statuses.append("missing")
         elif fail_verified and pass_verified:
             verifier_statuses.append("correct")
@@ -398,16 +424,18 @@ def reward_fn(
             verifier_statuses.append("incorrect")
 
         reward_value = 0.0
-        if has_expected_tests:
+        if infra_invalid:
+            reward_value = 0.0
+        elif has_expected_tests:
             # Missing verifier signal on tasks with expected tests is treated as
             # an unresolved verification failure, not a neutral baseline.
             reward_value = -1.0 if verification_missing else 1.0
-        if has_expected_tests and not verification_missing:
+        if not infra_invalid and has_expected_tests and not verification_missing:
             if not fail_verified:
                 reward_value -= 1.0
             if not pass_verified:
                 reward_value -= 1.0
-        if not terminal_submission_ok:
+        if not infra_invalid and not terminal_submission_ok:
             reward_value -= TERMINAL_VALIDITY_PENALTY
         rewards.append(reward_value)
         feedback.append(_verification_feedback(sample, verification=verification))

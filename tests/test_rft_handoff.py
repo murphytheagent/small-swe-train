@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from trainer.rft_handoff import collect_rft_sft_batch_for_steps
+import pytest
+
+from config import resolve_rft_handoff_settings
+from trainer.rft_handoff import (
+    build_verl_sft_batch,
+    collect_rft_sft_batch_for_steps,
+    merge_rollout_and_preprocessed_rows,
+)
 
 
 class _EmptyCollector:
@@ -30,3 +37,58 @@ def test_collect_rft_sft_batch_for_steps_allows_empty_eval_collection(tmp_path: 
     assert summary["rollout_row_count"] == 0
     assert summary["selected_count"] == 0
     assert summary["rejected_count"] == 0
+
+
+def test_merge_rollout_and_preprocessed_rows_preserves_verifier_metadata() -> None:
+    merged = merge_rollout_and_preprocessed_rows(
+        rollout_rows=[
+            {
+                "task_id": "task-1",
+                "attempt_index": 0,
+                "turn_index": 1,
+                "step_index": 2,
+                "resolved": False,
+                "verifier_kind": "go_test",
+                "fail_to_pass": ["TestBug"],
+                "pass_to_pass": ["TestRegression"],
+                "infra_invalid": True,
+                "invalid_reason": "verifier_crash",
+                "hit_generation_cap": True,
+                "image_name": "img:1",
+                "trajectory_format_valid": True,
+                "final_turn_has_submit": True,
+                "final_submit_format_valid": True,
+            }
+        ],
+        preprocessed_rows=[
+            {
+                "input_ids": [1, 2, 3],
+                "action_mask_rft": [1, 1, 1],
+                "token_labels": ["a", "b", "c"],
+                "format_valid": True,
+            }
+        ],
+    )
+
+    assert merged[0]["verifier_kind"] == "go_test"
+    assert merged[0]["infra_invalid"] is True
+    assert merged[0]["invalid_reason"] == "verifier_crash"
+    assert merged[0]["hit_generation_cap"] is True
+
+
+def test_build_verl_sft_batch_rejects_rows_above_handoff_length() -> None:
+    with pytest.raises(ValueError, match="max_sequence_length"):
+        build_verl_sft_batch(
+            [
+                {
+                    "task_id": "task-1",
+                    "attempt_index": 0,
+                    "step_index": 0,
+                    "turn_index": 0,
+                    "input_ids": [1, 2, 3, 4],
+                    "action_mask_rft": [1, 1, 1, 1],
+                    "token_labels": ["a", "b", "c", "d"],
+                }
+            ],
+            handoff_settings=resolve_rft_handoff_settings(overrides={"max_sequence_length": 3}),
+        )

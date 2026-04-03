@@ -49,10 +49,11 @@ def test_main_prints_resolved_path_only(monkeypatch, capsys, tmp_path: Path) -> 
 
 
 def test_probe_command_falls_back_from_python3_to_python() -> None:
-    command = preflight_module._build_probe_command()
+    command = preflight_module._build_probe_command(verifier_kind="pytest")
 
     assert build_python_interpreter_resolver_shell(var_name="pybin") in command
     assert '"${pybin}" - <<' in command
+    assert "SMALL_SWE_PREFLIGHT_VERIFIER_KIND" in command
 
 
 def test_resolve_cache_path_scopes_noncanonical_probe_settings(tmp_path: Path) -> None:

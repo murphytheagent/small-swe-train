@@ -1,4 +1,4 @@
-"""Run SWE FAIL_TO_PASS / PASS_TO_PASS verification inside task containers."""
+"""Run verifier-backed FAIL_TO_PASS / PASS_TO_PASS checks inside task containers."""
 
 from __future__ import annotations
 
@@ -8,31 +8,49 @@ from typing import Any, Mapping, Sequence
 
 from env.runtime_protocol import ToolRequest
 from env.shell_helpers import build_python_interpreter_resolver_shell
+from verifier_utils import normalize_verifier_kind, normalize_verifier_targets
 
 _MIN_PER_TEST_TIMEOUT_SEC = 180
 _MAX_PER_TEST_TIMEOUT_SEC = 1800
 _GROUP_TIMEOUT_BUFFER_SEC = 120
 _MAX_GROUP_TIMEOUT_SEC = 7200
+_SUPPORTED_RUNTIME_VERIFIER_KINDS = {"pytest", "go_test"}
 
 _VERIFY_SCRIPT = """import json
 import os
+import re
 import subprocess
 
-tests = json.loads(os.environ.get("SMALL_SWE_TESTS_JSON", "[]"))
+targets = json.loads(os.environ.get("SMALL_SWE_TESTS_JSON", "[]"))
 repo_root = os.environ.get("TASK_REPO_ROOT") or os.environ.get("SMALL_SWE_REPO_ROOT", ".")
+verifier_kind = os.environ.get("SMALL_SWE_VERIFIER_KIND", "pytest").strip().lower()
 pybin = os.environ.get("SMALL_SWE_PYBIN", "python3")
 per_test_timeout = int(os.environ.get("SMALL_SWE_PER_TEST_TIMEOUT_SEC", "120"))
 
 results: dict[str, bool] = {}
 failures: dict[str, dict[str, object]] = {}
 executed = 0
+group_error = ""
 
-for raw_name in tests:
+for raw_name in targets:
     test_name = str(raw_name).strip()
     if not test_name:
         continue
     executed += 1
-    command = [pybin, "-m", "pytest", "-q", test_name]
+    if verifier_kind == "pytest":
+        command = [pybin, "-m", "pytest", "-q", test_name]
+    elif verifier_kind == "go_test":
+        command = ["go", "test", "./...", "-count=1", "-run", "^" + re.escape(test_name) + "$"]
+    else:
+        group_error = f"unsupported verifier kind: {verifier_kind}"
+        results[test_name] = False
+        failures[test_name] = {
+            "returncode": 2,
+            "unsupported_verifier_kind": verifier_kind,
+            "command": [],
+        }
+        break
+
     try:
         completed = subprocess.run(
             command,
@@ -49,7 +67,16 @@ for raw_name in tests:
                 "returncode": int(completed.returncode),
                 "command": list(command),
             }
-    except subprocess.TimeoutExpired as exc:
+    except FileNotFoundError as exc:
+        failures[test_name] = {
+            "returncode": 127,
+            "command": list(command),
+            "error": str(exc),
+        }
+        results[test_name] = False
+        group_error = f"verifier executable unavailable: {exc}"
+        break
+    except subprocess.TimeoutExpired:
         failures[test_name] = {
             "returncode": 124,
             "timed_out": True,
@@ -65,6 +92,8 @@ print(
             "executed": int(executed),
             "all_passed": bool(all_passed),
             "failures": failures,
+            "error": group_error,
+            "verifier_kind": verifier_kind,
         },
         ensure_ascii=True,
     )
@@ -79,10 +108,12 @@ def run_submission_verifier(
     pass_to_pass: Any,
     verifier_timeout_sec: int,
     final_response: str,
+    verifier_kind: str = "pytest",
 ) -> dict[str, Any]:
     """Verify terminal submission state inside the current task container."""
-    fail_targets = _normalize_test_targets(fail_to_pass)
-    pass_targets = _normalize_test_targets(pass_to_pass)
+    normalized_verifier_kind = normalize_verifier_kind(verifier_kind)
+    fail_targets = normalize_verifier_targets(fail_to_pass)
+    pass_targets = normalize_verifier_targets(pass_to_pass)
 
     requested_timeout_sec = max(int(verifier_timeout_sec), 1)
     per_test_timeout_sec = max(
@@ -94,17 +125,24 @@ def run_submission_verifier(
         tests=fail_targets,
         verifier_timeout_sec=requested_timeout_sec,
         per_test_timeout_sec=per_test_timeout_sec,
+        verifier_kind=normalized_verifier_kind,
     )
     pass_group = _verify_test_group(
         executor=executor,
         tests=pass_targets,
         verifier_timeout_sec=requested_timeout_sec,
         per_test_timeout_sec=per_test_timeout_sec,
+        verifier_kind=normalized_verifier_kind,
     )
 
     fail_passed = bool(fail_group["all_passed"]) if fail_targets else True
     pass_passed = bool(pass_group["all_passed"]) if pass_targets else True
-    resolved = bool(fail_passed and pass_passed)
+    infra_invalid = bool(fail_group.get("infra_invalid", False) or pass_group.get("infra_invalid", False))
+    invalid_reason = (
+        str(fail_group.get("invalid_reason", "")).strip()
+        or str(pass_group.get("invalid_reason", "")).strip()
+    )
+    resolved = bool(fail_passed and pass_passed and not infra_invalid)
     verification_error = "; ".join(
         error
         for error in (
@@ -115,6 +153,7 @@ def run_submission_verifier(
     )
     return {
         "submission_final_response": str(final_response),
+        "verifier_kind": normalized_verifier_kind,
         "fail_to_pass": list(fail_targets),
         "pass_to_pass": list(pass_targets),
         "fail_to_pass_results": dict(fail_group["results"]),
@@ -128,6 +167,8 @@ def run_submission_verifier(
         "fail_to_pass_verified": bool(fail_passed),
         "pass_to_pass_verified": bool(pass_passed),
         "verification_missing": not bool(fail_targets or pass_targets),
+        "infra_invalid": infra_invalid,
+        "invalid_reason": invalid_reason,
         "verification_error": verification_error,
         "resolved": resolved,
         "verification_feedback": _build_feedback(
@@ -136,6 +177,9 @@ def run_submission_verifier(
             fail_to_pass=fail_targets,
             pass_to_pass=pass_targets,
             resolved=resolved,
+            verifier_kind=normalized_verifier_kind,
+            infra_invalid=infra_invalid,
+            invalid_reason=invalid_reason,
         ),
     }
 
@@ -146,6 +190,7 @@ def _verify_test_group(
     tests: Sequence[str],
     verifier_timeout_sec: int,
     per_test_timeout_sec: int,
+    verifier_kind: str,
 ) -> dict[str, Any]:
     if not tests:
         return {
@@ -155,7 +200,15 @@ def _verify_test_group(
             "error": "",
             "failures": {},
             "stderr_tail": "",
+            "infra_invalid": False,
+            "invalid_reason": "",
         }
+    if verifier_kind not in _SUPPORTED_RUNTIME_VERIFIER_KINDS:
+        return _invalid_group_result(
+            tests=tests,
+            error=f"verifier kind {verifier_kind!r} is not implemented in the runtime verifier",
+            invalid_reason="verifier_crash",
+        )
 
     group_timeout_sec = _resolve_group_timeout_sec(
         verifier_timeout_sec=verifier_timeout_sec,
@@ -172,6 +225,7 @@ def _verify_test_group(
             "command": _build_verifier_shell_command(
                 tests_json=tests_json,
                 per_test_timeout_sec=per_test_timeout_sec,
+                verifier_kind=verifier_kind,
             ),
         },
     )
@@ -180,25 +234,31 @@ def _verify_test_group(
     stdout_text = str(response.stdout or "")
     stderr_tail = str(response.stderr or "")[-4000:]
     if int(response.exit_code) != 0:
-        return {
-            "results": {name: False for name in tests},
-            "all_passed": False,
-            "executed": 0,
-            "error": f"verifier command failed with exit code {response.exit_code}",
-            "failures": {},
-            "stderr_tail": stderr_tail,
-        }
+        return _invalid_group_result(
+            tests=tests,
+            error=f"verifier command failed with exit code {response.exit_code}",
+            stderr_tail=stderr_tail,
+            invalid_reason="verifier_crash",
+        )
 
     payload = _decode_verifier_payload(stdout_text)
     if payload is None:
-        return {
-            "results": {name: False for name in tests},
-            "all_passed": False,
-            "executed": 0,
-            "error": "verifier command returned invalid JSON payload",
-            "failures": {},
-            "stderr_tail": stderr_tail,
-        }
+        return _invalid_group_result(
+            tests=tests,
+            error="verifier command returned invalid JSON payload",
+            stderr_tail=stderr_tail,
+            invalid_reason="verifier_crash",
+        )
+
+    payload_error = str(payload.get("error", "")).strip()
+    if payload_error:
+        return _invalid_group_result(
+            tests=tests,
+            error=payload_error,
+            stderr_tail=stderr_tail,
+            invalid_reason="verifier_crash",
+            failures=payload.get("failures"),
+        )
 
     raw_results = payload.get("results")
     result_map: dict[str, bool] = {}
@@ -227,10 +287,43 @@ def _verify_test_group(
         "error": "",
         "stderr_tail": stderr_tail,
         "failures": failure_map,
+        "infra_invalid": False,
+        "invalid_reason": "",
     }
 
 
-def _build_verifier_shell_command(*, tests_json: str, per_test_timeout_sec: int) -> str:
+def _invalid_group_result(
+    *,
+    tests: Sequence[str],
+    error: str,
+    invalid_reason: str,
+    stderr_tail: str = "",
+    failures: Any = None,
+) -> dict[str, Any]:
+    failure_map: dict[str, dict[str, Any]] = {}
+    if isinstance(failures, Mapping):
+        for name in tests:
+            raw_failure = failures.get(name)
+            if isinstance(raw_failure, Mapping):
+                failure_map[name] = dict(raw_failure)
+    return {
+        "results": {name: False for name in tests},
+        "all_passed": False,
+        "executed": 0,
+        "error": error,
+        "failures": failure_map,
+        "stderr_tail": stderr_tail,
+        "infra_invalid": True,
+        "invalid_reason": invalid_reason,
+    }
+
+
+def _build_verifier_shell_command(
+    *,
+    tests_json: str,
+    per_test_timeout_sec: int,
+    verifier_kind: str,
+) -> str:
     prefix = (
         "set -eu; "
         'repo_root="${TASK_REPO_ROOT:-${SMALL_SWE_REPO_ROOT:-}}"; '
@@ -253,6 +346,7 @@ def _build_verifier_shell_command(*, tests_json: str, per_test_timeout_sec: int)
     suffix = (
         f"SMALL_SWE_TESTS_JSON={shlex.quote(tests_json)} "
         f"SMALL_SWE_PER_TEST_TIMEOUT_SEC={int(max(per_test_timeout_sec, 1))} "
+        f"SMALL_SWE_VERIFIER_KIND={shlex.quote(verifier_kind)} "
         'TASK_REPO_ROOT="${repo_root}" '
         'SMALL_SWE_PYBIN="${pybin}" '
         '"${pybin}" -'
@@ -289,37 +383,6 @@ def _decode_verifier_payload(stdout_text: str) -> dict[str, Any] | None:
     return None
 
 
-def _normalize_test_targets(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, Mapping):
-        return [name for name in (str(key).strip() for key in value.keys()) if name]
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        targets: list[str] = []
-        for item in value:
-            name = str(item).strip()
-            if name:
-                targets.append(name)
-        return targets
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return []
-        if stripped.startswith("[") and stripped.endswith("]"):
-            try:
-                parsed = json.loads(stripped)
-            except json.JSONDecodeError:
-                parsed = None
-            if parsed is not None:
-                return _normalize_test_targets(parsed)
-        if "," in stripped:
-            return [chunk for chunk in (part.strip() for part in stripped.split(",")) if chunk]
-        if "\n" in stripped:
-            return [chunk for chunk in (part.strip() for part in stripped.splitlines()) if chunk]
-        return [stripped]
-    return []
-
-
 def _build_feedback(
     *,
     fail_group: Mapping[str, Any],
@@ -327,22 +390,37 @@ def _build_feedback(
     fail_to_pass: Sequence[str],
     pass_to_pass: Sequence[str],
     resolved: bool,
+    verifier_kind: str,
+    infra_invalid: bool,
+    invalid_reason: str,
 ) -> str:
+    if infra_invalid:
+        lines = [
+            f"Verifier invalid ({verifier_kind}): {invalid_reason or 'unknown_invalid_reason'}",
+        ]
+        fail_error = str(fail_group.get("error", "")).strip()
+        pass_error = str(pass_group.get("error", "")).strip()
+        if fail_error:
+            lines.append(f"FAIL_TO_PASS verifier error: {fail_error}")
+        if pass_error:
+            lines.append(f"PASS_TO_PASS verifier error: {pass_error}")
+        return "\n".join(lines).strip()
+
     if resolved:
-        return "Verifier: all FAIL_TO_PASS and PASS_TO_PASS tests passed."
+        return f"Verifier ({verifier_kind}): all FAIL_TO_PASS and PASS_TO_PASS targets passed."
 
     lines: list[str] = []
     if fail_to_pass:
         lines.append(
             "FAIL_TO_PASS passed="
             + str(bool(fail_group.get("all_passed", False)))
-            + f" tests={len(fail_to_pass)}"
+            + f" targets={len(fail_to_pass)}"
         )
     if pass_to_pass:
         lines.append(
             "PASS_TO_PASS passed="
             + str(bool(pass_group.get("all_passed", False)))
-            + f" tests={len(pass_to_pass)}"
+            + f" targets={len(pass_to_pass)}"
         )
 
     fail_error = str(fail_group.get("error", "")).strip()
@@ -355,9 +433,9 @@ def _build_feedback(
     fail_failed_tests = [name for name, passed in dict(fail_group.get("results", {})).items() if not passed]
     pass_failed_tests = [name for name, passed in dict(pass_group.get("results", {})).items() if not passed]
     if fail_failed_tests:
-        lines.append("FAIL_TO_PASS failing tests: " + ", ".join(fail_failed_tests[:5]))
+        lines.append("FAIL_TO_PASS failing targets: " + ", ".join(fail_failed_tests[:5]))
     if pass_failed_tests:
-        lines.append("PASS_TO_PASS failing tests: " + ", ".join(pass_failed_tests[:5]))
+        lines.append("PASS_TO_PASS failing targets: " + ", ".join(pass_failed_tests[:5]))
 
     fail_tail = str(fail_group.get("stderr_tail", "")).strip()
     pass_tail = str(pass_group.get("stderr_tail", "")).strip()

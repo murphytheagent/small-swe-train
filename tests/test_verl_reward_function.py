@@ -214,3 +214,26 @@ def test_reward_fn_coerces_explicit_submission_final_response_to_text() -> None:
     assert rewards == [1.0]
     assert info["terminal_submission"] == [True]
     assert info["terminal_submit_content"] == ["{'summary': 'done'}"]
+
+
+def test_reward_fn_treats_infra_invalid_verifier_runs_as_neutral() -> None:
+    data = [
+        {
+            "response_text": '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
+            "fail_to_pass": ["TestBug"],
+            "pass_to_pass": ["TestRegression"],
+            "tool_output": {
+                "metadata": {
+                    "infra_invalid": True,
+                    "invalid_reason": "verifier_crash",
+                }
+            },
+        }
+    ]
+
+    rewards, info = reward_fn(data)
+
+    assert rewards == [0.0]
+    assert info["resolved_source"] == ["verifier_crash"]
+    assert info["verifier_status"] == ["invalid"]
+    assert info["reward_verification_missing"] == [True]

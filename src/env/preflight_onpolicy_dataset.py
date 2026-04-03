@@ -25,35 +25,121 @@ from env.task_dataset import (
     load_hf_dataset,
     resolve_on_policy_bad_task_cache_path,
 )
+from verifier_utils import normalize_verifier_kind
 
 _DEFAULT_PROBE_TIMEOUT_SEC = 120
 _DEFAULT_MAX_WORKERS = 8
 
 
-def _build_probe_command() -> str:
+def _build_probe_command(
+    *,
+    verifier_kind: str,
+    selectors: Sequence[str] | None = None,
+) -> str:
+    selectors_json = json.dumps([str(selector) for selector in (selectors or ())], ensure_ascii=True)
     return (
         "set -eu; "
         + build_python_interpreter_resolver_shell(var_name="pybin")
+        + f"SMALL_SWE_PREFLIGHT_VERIFIER_KIND={json.dumps(verifier_kind)} "
+        + f"SMALL_SWE_PREFLIGHT_SELECTORS_JSON={json.dumps(selectors_json)} "
         + '''"${pybin}" - <<'PY'
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 import sys
+import re
 
 repo_root = os.environ.get("TASK_REPO_ROOT", "")
+verifier_kind = os.environ.get("SMALL_SWE_PREFLIGHT_VERIFIER_KIND", "pytest").strip().lower()
+selectors = json.loads(os.environ.get("SMALL_SWE_PREFLIGHT_SELECTORS_JSON", "[]"))
+try:
+    selectors = json.loads(selectors) if isinstance(selectors, str) else selectors
+except json.JSONDecodeError:
+    selectors = []
+selectors = [str(selector).strip() for selector in selectors if str(selector).strip()]
+runner_available = False
+runner_label = ""
+selector_valid = True
+selector_error = ""
+missing_selectors: list[str] = []
+
+if verifier_kind == "pytest":
+    runner_available = importlib.util.find_spec("pytest") is not None
+    runner_label = "pytest"
+elif verifier_kind == "go_test":
+    runner_available = shutil.which("go") is not None
+    runner_label = "go"
+elif verifier_kind == "node_test":
+    runner_available = shutil.which("node") is not None and shutil.which("npm") is not None
+    runner_label = "node+npm"
+elif verifier_kind == "command":
+    runner_available = True
+    runner_label = "shell"
+else:
+    selector_valid = False
+    selector_error = f"unsupported verifier kind: {verifier_kind}"
+
+if repo_root and os.path.exists(repo_root) and runner_available and selectors:
+    try:
+        if verifier_kind == "pytest":
+            command = [os.environ.get("SMALL_SWE_PYBIN", sys.executable), "-m", "pytest", "--collect-only", "-q", *selectors]
+            completed = subprocess.run(
+                command,
+                cwd=repo_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120,
+            )
+            selector_valid = completed.returncode == 0
+            if not selector_valid:
+                selector_error = completed.stderr.strip() or completed.stdout.strip() or f"pytest collect failed with exit code {completed.returncode}"
+        elif verifier_kind == "go_test":
+            regex = "^(?:" + "|".join(re.escape(selector) for selector in selectors) + ")$" if selectors else "^$"
+            command = ["go", "test", "./...", "-run", "^$", "-list", regex]
+            completed = subprocess.run(
+                command,
+                cwd=repo_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120,
+            )
+            if completed.returncode != 0:
+                selector_valid = False
+                selector_error = completed.stderr.strip() or completed.stdout.strip() or f"go test -list failed with exit code {completed.returncode}"
+            else:
+                listed = {line.strip() for line in completed.stdout.splitlines() if line.strip() in selectors}
+                missing_selectors = [selector for selector in selectors if selector not in listed]
+                selector_valid = not missing_selectors
+                if missing_selectors:
+                    selector_error = "missing selectors: " + ", ".join(missing_selectors[:10])
+        else:
+            selector_valid = False
+            selector_error = f"selector probe unsupported for verifier kind: {verifier_kind}"
+    except Exception as exc:
+        selector_valid = False
+        selector_error = str(exc)
+
 payload = {
     "conda_default_env": os.environ.get("CONDA_DEFAULT_ENV", ""),
     "repo_root": repo_root,
     "repo_root_exists": bool(repo_root) and os.path.exists(repo_root),
     "sys_executable": sys.executable,
     "pytest_importable": importlib.util.find_spec("pytest") is not None,
+    "verifier_kind": verifier_kind,
+    "runner_available": bool(runner_available),
+    "runner_label": runner_label,
+    "selector_count": len(selectors),
+    "selector_valid": bool(selector_valid),
+    "selector_error": selector_error,
+    "missing_selectors": missing_selectors,
 }
 print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
 PY'''
     )
-
-
-_PROBE_COMMAND = _build_probe_command()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -138,21 +224,25 @@ def _iter_dataset_tasks(
 
 
 def _classify_probe_record(record: Mapping[str, Any]) -> tuple[str, str]:
-    if not bool(record.get("probe_ok", False)):
+    if not bool(record.get("image_probe_ok", False)):
         return "bad", "probe_command_failed"
-    payload = record.get("probe_payload")
+    payload = record.get("image_probe_payload")
     if not isinstance(payload, Mapping):
         return "bad", "invalid_probe_payload"
     if not bool(payload.get("repo_root_exists", False)):
         return "bad", "repo_root_missing"
-    if not bool(payload.get("pytest_importable", False)):
-        return "bad", "pytest_unavailable"
+    if not bool(payload.get("runner_available", False)):
+        return "bad", "runner_unavailable"
+    task_payload = record.get("task_probe_payload")
+    if isinstance(task_payload, Mapping) and not bool(task_payload.get("selector_valid", True)):
+        return "bad", "selector_invalid"
     return "ok", ""
 
 
-def _probe_image_task(
+def _probe_task(
     *,
     task: TaskSample,
+    verifier_kind: str,
     probe_timeout_sec: int,
 ) -> dict[str, Any]:
     pool = BatchContainerPool(
@@ -162,10 +252,14 @@ def _probe_image_task(
     record: dict[str, Any] = {
         "task_id": task.task_id,
         "image_name": task.image_name,
-        "probe_ok": False,
-        "probe_payload": None,
-        "probe_exit_code": None,
-        "probe_stderr": "",
+        "image_probe_ok": False,
+        "image_probe_payload": None,
+        "image_probe_exit_code": None,
+        "image_probe_stderr": "",
+        "task_probe_ok": False,
+        "task_probe_payload": None,
+        "task_probe_exit_code": None,
+        "task_probe_stderr": "",
     }
     try:
         handles = pool.acquire([task])
@@ -178,21 +272,40 @@ def _probe_image_task(
             ToolRequest(
                 tool="bash",
                 args={
-                    "command": _PROBE_COMMAND,
+                    "command": _build_probe_command(verifier_kind=verifier_kind),
                     "timeout_sec": max(int(probe_timeout_sec), 1),
                 },
             )
         )
-        record["probe_exit_code"] = int(response.exit_code)
-        record["probe_stderr"] = str(response.stderr or "").strip()
+        record["image_probe_exit_code"] = int(response.exit_code)
+        record["image_probe_stderr"] = str(response.stderr or "").strip()
         if response.exit_code == 0:
             payload = _decode_probe_payload(str(response.stdout or ""))
-            record["probe_payload"] = payload
-            record["probe_ok"] = payload is not None
+            record["image_probe_payload"] = payload
+            record["image_probe_ok"] = payload is not None
+            if payload is not None and bool(payload.get("runner_available", False)):
+                selector_response = executor.run(
+                    ToolRequest(
+                        tool="bash",
+                        args={
+                            "command": _build_probe_command(
+                                verifier_kind=verifier_kind,
+                                selectors=[*task.fail_to_pass, *task.pass_to_pass],
+                            ),
+                            "timeout_sec": max(int(probe_timeout_sec), 1),
+                        },
+                    )
+                )
+                record["task_probe_exit_code"] = int(selector_response.exit_code)
+                record["task_probe_stderr"] = str(selector_response.stderr or "").strip()
+                if selector_response.exit_code == 0:
+                    task_payload = _decode_probe_payload(str(selector_response.stdout or ""))
+                    record["task_probe_payload"] = task_payload
+                    record["task_probe_ok"] = task_payload is not None
     except Exception as exc:
-        record["probe_stderr"] = str(exc)
-        record["probe_exit_code"] = 1
-        record["probe_ok"] = False
+        record["image_probe_stderr"] = str(exc)
+        record["image_probe_exit_code"] = 1
+        record["image_probe_ok"] = False
     finally:
         pool.release_all()
 
@@ -211,36 +324,46 @@ def scan_dataset_for_bad_verifier_tasks(
     max_images: int | None = None,
 ) -> dict[str, Any]:
     tasks = _iter_dataset_tasks(config=config, dataset_loader=dataset_loader)
-    representatives_by_image: dict[str, TaskSample] = {}
-    for task in tasks:
-        if task.image_name not in representatives_by_image:
-            representatives_by_image[task.image_name] = task
-
-    representative_tasks = list(representatives_by_image.values())
+    selected_tasks = list(tasks)
     if max_images is not None:
-        representative_tasks = representative_tasks[: max(int(max_images), 0)]
-    selected_images = {task.image_name for task in representative_tasks}
-    selected_tasks = [task for task in tasks if task.image_name in selected_images]
+        selected_image_names = []
+        seen_images: set[str] = set()
+        for task in selected_tasks:
+            if task.image_name in seen_images:
+                continue
+            seen_images.add(task.image_name)
+            selected_image_names.append(task.image_name)
+            if len(selected_image_names) >= max(int(max_images), 0):
+                break
+        selected_image_name_set = set(selected_image_names)
+        selected_tasks = [task for task in selected_tasks if task.image_name in selected_image_name_set]
 
-    records_by_image: dict[str, dict[str, Any]] = {}
+    records: list[dict[str, Any]] = []
+    if max_images is not None:
+        probed_image_count = len({task.image_name for task in selected_tasks})
+    else:
+        probed_image_count = len({task.image_name for task in tasks})
     with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as executor:
         futures = {
             executor.submit(
-                _probe_image_task,
+                _probe_task,
                 task=task,
+                verifier_kind=normalize_verifier_kind(config.verifier_kind),
                 probe_timeout_sec=probe_timeout_sec,
-            ): task.image_name
-            for task in representative_tasks
+            ): task.task_id
+            for task in selected_tasks
         }
         for future in as_completed(futures):
             record = future.result()
-            records_by_image[str(record["image_name"])] = record
+            records.append(record)
 
-    ordered_records = [records_by_image[task.image_name] for task in representative_tasks]
+    ordered_records = sorted(records, key=lambda item: (str(item.get("image_name", "")), str(item.get("task_id", ""))))
     bad_image_names = sorted(
-        image_name
-        for image_name, record in records_by_image.items()
-        if str(record.get("status", "")).strip().lower() == "bad"
+        {
+            str(record.get("image_name", "")).strip()
+            for record in ordered_records
+            if str(record.get("status", "")).strip().lower() == "bad"
+        }
     )
     bad_image_name_set = set(bad_image_names)
     bad_task_ids = sorted(
@@ -255,7 +378,7 @@ def scan_dataset_for_bad_verifier_tasks(
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "probe_timeout_sec": int(probe_timeout_sec),
         "scanned_task_count": len(selected_tasks),
-        "probed_image_count": len(representative_tasks),
+        "probed_image_count": probed_image_count,
         "bad_task_ids": bad_task_ids,
         "bad_image_names": bad_image_names,
         "records": ordered_records,

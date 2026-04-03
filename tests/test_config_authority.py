@@ -259,11 +259,20 @@ def test_on_policy_data_defaults_load_from_configs_data() -> None:
     data_defaults = config.on_policy_data_defaults()
     assert isinstance(data_defaults.get("dataset_id"), str)
     assert str(data_defaults["dataset_id"]).strip()
+    assert data_defaults["patch_is_bug_introducing"] is True
+    assert data_defaults["verifier_kind"] == "pytest"
     columns = data_defaults.get("columns")
     assert isinstance(columns, Mapping)
     for key in ("image_name", "problem_statement", "fail_to_pass", "pass_to_pass"):
         assert isinstance(columns.get(key), str)
         assert str(columns[key]).strip()
+
+
+def test_on_policy_go_data_defaults_load_from_configs_data() -> None:
+    data_defaults = config.on_policy_data_defaults("on_policy_swe_smith_go")
+    assert data_defaults["dataset_id"] == "SWE-bench/SWE-smith-go"
+    assert data_defaults["patch_is_bug_introducing"] is True
+    assert data_defaults["verifier_kind"] == "go_test"
 
 
 def test_sdpo_config_disables_runtime_prompt_length_filter() -> None:
@@ -289,6 +298,8 @@ def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     runtime_defaults = config.rft_runtime_defaults()
     loop_defaults = runtime_defaults["loop"]
     assert settings.data.dataset_id == data_defaults["dataset_id"]
+    assert settings.data.patch_is_bug_introducing is True
+    assert settings.data.verifier_kind == "pytest"
     assert settings.runtime.task_batch_size == loop_defaults["task_batch_size"]
     assert settings.runtime.attempts_per_task == loop_defaults["samples_per_task"]
     assert settings.runtime.env_pool_size == settings.runtime.task_batch_size

@@ -218,6 +218,7 @@ def merge_rollout_and_preprocessed_rows(
                 "turn_index": rollout_row.get("turn_index", 0),
                 "step_index": rollout_row.get("step_index", 0),
                 "resolved": rollout_row.get("resolved", False),
+                "verifier_kind": rollout_row.get("verifier_kind", "pytest"),
                 "fail_to_pass": fail_to_pass,
                 "pass_to_pass": pass_to_pass,
                 "is_terminal": rollout_row.get("is_terminal", False),
@@ -225,6 +226,9 @@ def merge_rollout_and_preprocessed_rows(
                 "bridge_error": rollout_row.get("bridge_error", ""),
                 "timeout_error": rollout_row.get("timeout_error", ""),
                 "executor_error": rollout_row.get("executor_error", ""),
+                "infra_invalid": rollout_row.get("infra_invalid", False),
+                "invalid_reason": rollout_row.get("invalid_reason", ""),
+                "hit_generation_cap": rollout_row.get("hit_generation_cap", False),
                 "container_init_succeeded": rollout_row.get("container_init_succeeded", False),
                 "exit_code": rollout_row.get("exit_code"),
                 "tool_name": rollout_row.get("tool_name", ""),
@@ -285,6 +289,16 @@ def build_verl_sft_batch(
             row.get("token_labels"),
             length_hint=len(input_ids),
         )
+
+        if (
+            len(input_ids) > padded_limit
+            or len(action_mask) > padded_limit
+            or len(token_labels) > padded_limit
+        ):
+            raise ValueError(
+                f"rows[{index}] exceeds rft_handoff.max_sequence_length={padded_limit}; "
+                "selected rows should be filtered before handoff."
+            )
 
         truncated_length = min(len(input_ids), len(action_mask), len(token_labels), padded_limit)
         input_ids = input_ids[:truncated_length]
