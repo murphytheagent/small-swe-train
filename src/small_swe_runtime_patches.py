@@ -237,6 +237,46 @@ def _clear_cached_flash_attn_modules() -> None:
             sys.modules.pop(name, None)
 
 
+def _resolved_flash_attn_fallback_impl() -> str | None:
+    value = os.environ.get("SMALL_SWE_FALLBACK_ATTN_IMPL", "sdpa")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _install_transformers_flash_attn_fallback_patch() -> None:
+    try:
+        from transformers import AutoModelForCausalLM
+        from transformers import utils as transformers_utils
+        from transformers.utils import import_utils as transformers_import_utils
+    except Exception:
+        return
+
+    def _not_available() -> bool:
+        return False
+
+    transformers_utils.is_flash_attn_2_available = _not_available
+    transformers_import_utils.is_flash_attn_2_available = _not_available
+
+    current = AutoModelForCausalLM.from_pretrained
+    if getattr(current, "_small_swe_flash_attn_fallback_patch", False):
+        return
+
+    original_from_pretrained = current
+
+    def _small_swe_from_pretrained(*args: Any, **kwargs: Any):
+        current_attn_impl = str(kwargs.get("attn_implementation", "")).strip().lower()
+        fallback = _resolved_flash_attn_fallback_impl()
+        if fallback and (not current_attn_impl or current_attn_impl == "flash_attention_2"):
+            kwargs["attn_implementation"] = fallback
+        return original_from_pretrained(*args, **kwargs)
+
+    _small_swe_from_pretrained.__name__ = "_small_swe_from_pretrained"
+    setattr(_small_swe_from_pretrained, "_small_swe_flash_attn_fallback_patch", True)
+    AutoModelForCausalLM.from_pretrained = _small_swe_from_pretrained
+
+
 def _try_apply_sdpo_runtime_patch() -> None:
     ray_trainer_module = sys.modules.get("verl.trainer.ppo.ray_trainer")
     if ray_trainer_module is None:
@@ -1071,6 +1111,7 @@ def apply_small_swe_runtime_patches() -> None:
         _clear_cached_flash_attn_modules()
         _install_flash_attn_find_spec_guard()
         _install_flash_attn_import_guard()
+        _install_transformers_flash_attn_fallback_patch()
     if _coerce_bool_env("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", default=False):
         _install_self_distillation_config_compat_patch()
         _install_ray_worker_local_rank_device_patch()

@@ -72,6 +72,38 @@ def test_sitecustomize_preserves_existing_import_wrapper(monkeypatch) -> None:
     assert calls["count"] >= 1
 
 
+def test_sitecustomize_patches_transformers_flash_attn_fallback(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeAutoModelForCausalLM:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            del args
+            captured.update(kwargs)
+            return kwargs
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoModelForCausalLM = _FakeAutoModelForCausalLM
+    fake_transformers_utils = types.ModuleType("transformers.utils")
+    fake_transformers_utils.is_flash_attn_2_available = lambda: True
+    fake_import_utils = types.ModuleType("transformers.utils.import_utils")
+    fake_import_utils.is_flash_attn_2_available = lambda: True
+    fake_transformers_utils.import_utils = fake_import_utils
+
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "transformers.utils", fake_transformers_utils)
+    monkeypatch.setitem(sys.modules, "transformers.utils.import_utils", fake_import_utils)
+    monkeypatch.setenv("SMALL_SWE_HIDE_EXTERNAL_FLASH_ATTN", "1")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+    payload = _FakeAutoModelForCausalLM.from_pretrained("fake-model")
+
+    assert payload["attn_implementation"] == "sdpa"
+    assert captured["attn_implementation"] == "sdpa"
+    assert fake_transformers_utils.is_flash_attn_2_available() is False
+    assert fake_import_utils.is_flash_attn_2_available() is False
+
+
 def test_sitecustomize_can_install_sdpo_patch_import_guard(monkeypatch) -> None:
     calls = {"count": 0, "module": None}
 
