@@ -2,6 +2,7 @@
 
 Last updated: 2026-04-03 UTC.
 Owner thread: Slack `1775202373.974779`.
+Companion plan: `microcoder_transfer_plan.md` covers the verifier/data-quality/length-policy work that should land before or alongside language expansion.
 
 ## Goal
 Integrate the non-Python SWE-smith language variants into `small-swe-train` without destabilizing the current `SWE-smith-py` training path.
@@ -16,6 +17,7 @@ Out of scope:
 - changing the default training mix before the new verifier paths are proven
 
 ## Decision summary
+- Reuse the shared verifier/data-quality contract from `microcoder_transfer_plan.md` rather than inventing a second policy path for non-Python SWE-smith rows.
 - Integrate first: `SWE-smith-go`.
 - Integrate later: `SWE-smith-js`, `SWE-smith-ts` after the language-aware verifier path is stable and bounded for large target sets.
 - Keep `SWE-smith-py` as the default path until each added language clears its own dry-run and verifier gates.
