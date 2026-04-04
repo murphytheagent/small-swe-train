@@ -1,0 +1,294 @@
+"""CLI helper that materializes rollout-backed on-policy difficulty bands."""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import json
+import math
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME, resolve_on_policy_settings
+from env.task_dataset import (
+    TaskSample,
+    load_task_samples,
+    resolve_on_policy_difficulty_band_cache_path,
+)
+from runtime_paths import resolve_on_policy_difficulty_band_cache_dir
+from trainer.rft_runtime import OnPolicyRFTRuntimeRequest, collect_onpolicy_rft_runtime_batch
+from trainer.rft_runtime_loop import (
+    _load_tokenizer,
+    resolve_rft_stage_handoff_overrides,
+    resolve_rft_stage_name,
+    resolve_rft_stage_verify_submissions,
+)
+
+DEFAULT_PROBE_LABEL = "positive_rft_probe"
+DEFAULT_ATTEMPTS_PER_TASK = 4
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Resolve or materialize rollout-backed on-policy difficulty bands.",
+    )
+    parser.add_argument(
+        "--data-config-name",
+        default=DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
+        help="Named config from configs/data/<name>.yaml (default: on_policy_swe_smith).",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default="",
+        help="Directory that stores the difficulty-band cache JSON (default: data/on_policy_difficulty_band_cache).",
+    )
+    parser.add_argument(
+        "--probe-label",
+        default=DEFAULT_PROBE_LABEL,
+        help="Descriptive cache label appended to the output filename.",
+    )
+    parser.add_argument(
+        "--print-path-only",
+        action="store_true",
+        help="Print the resolved cache path without running rollouts.",
+    )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Rebuild cache even when the resolved JSON already exists.",
+    )
+    parser.add_argument(
+        "--initial-model",
+        required=True,
+        help="Model or checkpoint path used to load the tokenizer for length filtering.",
+    )
+    parser.add_argument(
+        "--turn-generator-mode",
+        default="default",
+        help="Turn-generator mode passed through to the live RFT runtime (default: default).",
+    )
+    parser.add_argument(
+        "--stage-name",
+        default="positive_rft",
+        help="RFT stage contract used for verifier-backed selection (default: positive_rft).",
+    )
+    parser.add_argument(
+        "--task-partition",
+        default="all",
+        choices=("all", "train", "eval"),
+        help="Dataset partition to probe after the deterministic held-out split logic (default: all).",
+    )
+    parser.add_argument(
+        "--attempts-per-task",
+        type=int,
+        default=DEFAULT_ATTEMPTS_PER_TASK,
+        help=f"Rollout attempts per task during probing (default: {DEFAULT_ATTEMPTS_PER_TASK}).",
+    )
+    parser.add_argument(
+        "--start-task-index",
+        type=int,
+        default=0,
+        help="Start probing from this deterministic task index (default: 0).",
+    )
+    parser.add_argument(
+        "--task-limit",
+        type=int,
+        default=None,
+        help="Probe at most this many tasks after start-task-index.",
+    )
+    return parser
+
+
+def _resolve_cache_dir(raw_value: str) -> Path:
+    normalized = str(raw_value or "").strip()
+    if normalized:
+        return Path(normalized)
+    project_root = Path(__file__).resolve().parents[2]
+    return resolve_on_policy_difficulty_band_cache_dir(project_root=project_root)
+
+
+def _assign_difficulty_band(*, selected_count: int, rollout_count: int) -> str:
+    if selected_count <= 0:
+        return "near_impossible"
+    if rollout_count <= 0:
+        return "near_impossible"
+
+    easy_cutoff = max(1, math.ceil(0.75 * rollout_count))
+    if selected_count >= easy_cutoff:
+        return "easy"
+    return "learnable"
+
+
+def _count_rejection_reasons(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        reason_text = str(
+            row.get("stage_decision_reason", row.get("rft_rejection_reason", ""))
+        ).strip()
+        reasons = [reason.strip() for reason in reason_text.split(",") if reason.strip()]
+        if not reasons:
+            reasons = ["unknown"]
+        for reason in reasons:
+            counts[reason] = counts.get(reason, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _build_band_record(
+    *,
+    task: TaskSample,
+    probe_step_index: int,
+    stage_name: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    rollout_rows = _coerce_rows(result.get("rollout_rows"))
+    selected_rows = _coerce_rows(result.get("selected_rows"))
+    rejected_rows = _coerce_rows(result.get("rejected_rows"))
+
+    selected_over_length_count = sum(
+        1 for row in rejected_rows if bool(row.get("selected_over_budget", False))
+    )
+    selected_count = len(selected_rows)
+    selected_count_raw = selected_count + selected_over_length_count
+    rollout_count = len(rollout_rows)
+    resolved_attempt_count = sum(1 for row in rollout_rows if bool(row.get("resolved", False)))
+    infra_invalid_attempt_count = sum(
+        1 for row in rollout_rows if bool(row.get("infra_invalid", False))
+    )
+    difficulty_band = _assign_difficulty_band(
+        selected_count=selected_count,
+        rollout_count=rollout_count,
+    )
+
+    return {
+        "task_id": task.task_id,
+        "task_family": task.task_family,
+        "difficulty_band": difficulty_band,
+        "difficulty_band_source": f"rollout_probe:selected_{selected_count}_of_{rollout_count}",
+        "probe_step_index": int(probe_step_index),
+        "stage_name": stage_name,
+        "rollout_count": rollout_count,
+        "resolved_attempt_count": resolved_attempt_count,
+        "selected_count_raw": selected_count_raw,
+        "selected_count_after_length_filter": selected_count,
+        "selected_over_length_count": selected_over_length_count,
+        "infra_invalid_attempt_count": infra_invalid_attempt_count,
+        "rejection_reason_counts": _count_rejection_reasons(rejected_rows),
+    }
+
+
+def _coerce_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            rows.append(dict(item))
+    return rows
+
+
+def main() -> int:
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    if args.attempts_per_task < 1:
+        parser.error("--attempts-per-task must be >= 1")
+    if args.start_task_index < 0:
+        parser.error("--start-task-index must be >= 0")
+    if args.task_limit is not None and args.task_limit < 1:
+        parser.error("--task-limit must be >= 1 when provided")
+
+    settings = resolve_on_policy_settings(data_config_name=args.data_config_name)
+    cache_dir = _resolve_cache_dir(args.cache_dir)
+    cache_path = resolve_on_policy_difficulty_band_cache_path(
+        config=settings.data,
+        cache_dir=cache_dir,
+        probe_label=args.probe_label,
+    )
+    if args.print_path_only:
+        print(cache_path)
+        return 0
+    if cache_path.is_file() and not bool(args.force_refresh):
+        print(cache_path)
+        return 0
+
+    tasks = load_task_samples(
+        config=settings.data,
+        task_partition=args.task_partition,
+    )
+    start_index = int(args.start_task_index)
+    if start_index >= len(tasks):
+        raise ValueError(
+            f"start_task_index={start_index} is outside the task pool of size {len(tasks)}."
+        )
+
+    sliced_tasks = tasks[start_index:]
+    if args.task_limit is not None:
+        sliced_tasks = sliced_tasks[: int(args.task_limit)]
+    if not sliced_tasks:
+        raise ValueError("No tasks selected for difficulty-band probing.")
+
+    tokenizer = _load_tokenizer(args.initial_model)
+    resolved_stage_name = resolve_rft_stage_name(args.stage_name)
+    handoff_overrides = resolve_rft_stage_handoff_overrides(resolved_stage_name)
+    verify_submissions = resolve_rft_stage_verify_submissions(resolved_stage_name)
+
+    records: list[dict[str, Any]] = []
+    for offset, task in enumerate(sliced_tasks):
+        probe_step_index = start_index + offset
+        result = collect_onpolicy_rft_runtime_batch(
+            request=OnPolicyRFTRuntimeRequest(
+                data_config_name=args.data_config_name,
+                turn_generator_mode=args.turn_generator_mode,
+                total_steps=1,
+                start_step_index=probe_step_index,
+                runtime_overrides={
+                    "task_batch_size": 1,
+                    "attempts_per_task": int(args.attempts_per_task),
+                    "env_pool_size": 1,
+                    "max_in_flight_tasks": 1,
+                },
+                handoff_overrides=handoff_overrides,
+                task_partition=args.task_partition,
+                task_eval_split_fraction=0.0,
+                task_eval_min_rows=0,
+                verify_submissions=verify_submissions,
+                stage_name=resolved_stage_name,
+            ),
+            tokenizer=tokenizer,
+        )
+        records.append(
+            _build_band_record(
+                task=task,
+                probe_step_index=probe_step_index,
+                stage_name=resolved_stage_name,
+                result=result,
+            )
+        )
+
+    payload = {
+        "schema_version": 1,
+        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "data_config_name": args.data_config_name,
+        "dataset_id": settings.data.dataset_id,
+        "dataset_split": settings.data.dataset_split,
+        "probe_label": str(args.probe_label).strip(),
+        "initial_model": str(args.initial_model).strip(),
+        "turn_generator_mode": str(args.turn_generator_mode).strip(),
+        "stage_name": resolved_stage_name,
+        "task_partition": str(args.task_partition).strip(),
+        "attempts_per_task": int(args.attempts_per_task),
+        "start_task_index": start_index,
+        "task_count": len(records),
+        "records": records,
+    }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(cache_path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

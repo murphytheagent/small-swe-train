@@ -62,6 +62,17 @@ def test_on_policy_bad_task_cache_default_is_centralized() -> None:
     assert config.resolve_on_policy_bad_task_cache_dir(project_root=repo_root) == repo_root / "data" / "on_policy_bad_task_cache"
 
 
+def test_on_policy_difficulty_band_cache_default_is_centralized() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    assert (
+        config.DEFAULT_ON_POLICY_DIFFICULTY_BAND_CACHE_RELATIVE_DIR
+        == Path("data") / "on_policy_difficulty_band_cache"
+    )
+    assert config.resolve_on_policy_difficulty_band_cache_dir(
+        project_root=repo_root
+    ) == repo_root / "data" / "on_policy_difficulty_band_cache"
+
+
 def test_phase_transition_gates_defaults_load() -> None:
     gates = config.phase_transition_gates_defaults()
     assert "entry_gate_for_main_sdpo" in gates
@@ -314,6 +325,25 @@ def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     assert settings.runtime.max_in_flight_tasks == config.resolve_rft_collector_max_in_flight_default(
         task_batch_size=settings.runtime.task_batch_size
     )
+
+
+def test_resolve_on_policy_settings_parses_rollout_probe_banding_override() -> None:
+    settings = config.resolve_on_policy_settings(
+        data_overrides={
+            "difficulty_banding": {
+                "strategy": "rollout_probe",
+                "rollout_probe_cache_path": "data/on_policy_difficulty_band_cache/demo.json",
+                "rollout_probe_required": True,
+            }
+        }
+    )
+
+    assert settings.data.difficulty_banding.strategy == "rollout_probe"
+    assert (
+        settings.data.difficulty_banding.rollout_probe_cache_path
+        == "data/on_policy_difficulty_band_cache/demo.json"
+    )
+    assert settings.data.difficulty_banding.rollout_probe_required is True
 
 
 def test_resolve_on_policy_settings_aligns_in_flight_with_task_batch_override() -> None:

@@ -11,9 +11,11 @@ from env.task_dataset import (
     TaskSample,
     build_sdpo_task_rows,
     load_task_batch,
+    load_task_samples,
     preload_sdpo_task_rows_to_parquet,
     preload_sdpo_task_rows_split_to_parquet,
     resolve_on_policy_bad_task_cache_path,
+    resolve_on_policy_difficulty_band_cache_path,
     resolve_sdpo_task_rows_cache_path,
     resolve_sdpo_task_split_cache_paths,
     split_task_samples_for_eval,
@@ -53,6 +55,25 @@ def _banded_config() -> OnPolicyDataConfig:
                 ("combine_file", "near_impossible"),
             ),
             family_band_prefix=(("func_pm_", "near_impossible"),),
+        ),
+    )
+
+
+def _rollout_probe_config(cache_path: str) -> OnPolicyDataConfig:
+    return OnPolicyDataConfig(
+        dataset_id="SWE-bench/SWE-smith-py",
+        dataset_split="train",
+        columns=OnPolicyDatasetColumns(
+            image_name="image_name",
+            problem_statement="problem_statement",
+            fail_to_pass="FAIL_TO_PASS",
+            pass_to_pass="PASS_TO_PASS",
+        ),
+        difficulty_banding=OnPolicyDifficultyBandConfig(
+            strategy="rollout_probe",
+            default_band="unbanded",
+            rollout_probe_cache_path=cache_path,
+            rollout_probe_required=True,
         ),
     )
 
@@ -293,6 +314,40 @@ def test_load_task_batch_wraps_partitioned_batches_when_heldout_split_is_smaller
     assert len({sample.task_id for sample in eval_batch}) == 1
 
 
+def test_load_task_samples_returns_partitioned_pool() -> None:
+    rows = [
+        {
+            "task_id": f"task-{index}",
+            "image_name": f"img:{index}",
+            "problem_statement": f"p{index}",
+            "FAIL_TO_PASS": [f"f{index}"],
+            "PASS_TO_PASS": [f"p{index}"],
+        }
+        for index in range(4)
+    ]
+
+    train_tasks = load_task_samples(
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="train",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+    eval_tasks = load_task_samples(
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="eval",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    assert train_tasks
+    assert eval_tasks
+    assert {task.task_id for task in train_tasks}.isdisjoint(
+        {task.task_id for task in eval_tasks}
+    )
+
+
 def test_build_sdpo_task_rows_carries_difficulty_tags() -> None:
     rows = [
         {
@@ -313,6 +368,76 @@ def test_build_sdpo_task_rows_carries_difficulty_tags() -> None:
     assert task_rows[0]["difficulty_band"] == "near_impossible"
     assert task_rows[0]["difficulty_band_source"] == "instance_id_family:exact"
     assert task_rows[0]["reward_model"]["ground_truth"]["difficulty_band"] == "near_impossible"
+
+
+def test_load_task_batch_uses_rollout_probe_cache_when_present(tmp_path: Path) -> None:
+    cache_path = tmp_path / "difficulty_bands.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "records": [
+                    {
+                        "task_id": "repo.sha.func_basic__0001",
+                        "task_family": "func_basic",
+                        "difficulty_band": "easy",
+                        "difficulty_band_source": "rollout_probe:selected_3_of_4",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "repo.sha.func_basic__0001",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        }
+    ]
+
+    batch = load_task_batch(
+        step_index=0,
+        batch_size=1,
+        config=_rollout_probe_config(str(cache_path)),
+        dataset_loader=lambda _dataset_id, _split: rows,
+    )
+
+    assert batch[0].task_family == "func_basic"
+    assert batch[0].difficulty_band == "easy"
+    assert batch[0].difficulty_band_source == "rollout_probe:selected_3_of_4"
+
+
+def test_load_task_batch_requires_rollout_probe_entry_for_every_task(tmp_path: Path) -> None:
+    cache_path = tmp_path / "difficulty_bands.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "records": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "repo.sha.func_basic__0001",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="missing task_id"):
+        load_task_batch(
+            step_index=0,
+            batch_size=1,
+            config=_rollout_probe_config(str(cache_path)),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )
 
 
 def test_load_task_batch_allows_empty_eval_partition_when_holdout_resolves_to_zero_rows() -> None:
@@ -639,6 +764,17 @@ def test_resolve_on_policy_bad_task_cache_path_is_deterministic(tmp_path: Path) 
     assert resolved.parent == tmp_path
     assert resolved.name.startswith("bad_tasks_dummy_dataset_train_")
     assert resolved.suffix == ".json"
+
+
+def test_resolve_on_policy_difficulty_band_cache_path_is_descriptive(tmp_path: Path) -> None:
+    resolved = resolve_on_policy_difficulty_band_cache_path(
+        config=_config(),
+        cache_dir=tmp_path,
+        probe_label="positive_rft_probe",
+    )
+
+    assert resolved.parent == tmp_path
+    assert resolved.name == "difficulty_bands_dummy_dataset_train_positive_rft_probe.json"
 
 
 def test_build_sdpo_task_rows_filters_problem_statement_length_under_4k() -> None:

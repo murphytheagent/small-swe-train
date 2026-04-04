@@ -13,7 +13,9 @@ from typing import Any, Callable, Mapping, Sequence
 
 from config import OnPolicyDataConfig, OnPolicyDifficultyBandConfig
 from prompts.runtime_messages import build_onpolicy_initial_user_message
-from runtime_paths import resolve_on_policy_bad_task_cache_dir
+from runtime_paths import (
+    resolve_on_policy_bad_task_cache_dir,
+)
 from verifier_utils import (
     logical_task_identity_key,
     normalize_verifier_targets,
@@ -26,8 +28,10 @@ DatasetLoader = Callable[[str, str], Sequence[Mapping[str, Any]]]
 SDPO_DEFAULT_MAX_PROBLEM_STATEMENT_CHARS = 4000
 SDPO_TASK_ROWS_SCHEMA_VERSION = 4
 ON_POLICY_BAD_TASK_CACHE_SCHEMA_VERSION = 1
+ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION = 1
 _BAD_TASK_CACHE_PATH_ENV = "SMALL_SWE_BAD_TASK_CACHE_PATH"
 _BAD_TASK_CACHE_DIR_ENV = "SMALL_SWE_BAD_TASK_CACHE_DIR"
+_DIFFICULTY_BAND_CACHE_PATH_ENV = "SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH"
 _TASK_PARTITION_ALL = "all"
 _TASK_PARTITION_TRAIN = "train"
 _TASK_PARTITION_EVAL = "eval"
@@ -143,6 +147,21 @@ def resolve_on_policy_bad_task_cache_path(
     dataset_slug = _slugify_for_filename(config.dataset_id)
     split_slug = _slugify_for_filename(config.dataset_split)
     return Path(cache_dir) / f"bad_tasks_{dataset_slug}_{split_slug}_{digest}.json"
+
+
+def resolve_on_policy_difficulty_band_cache_path(
+    *,
+    config: OnPolicyDataConfig,
+    cache_dir: str | Path,
+    probe_label: str,
+) -> Path:
+    """Resolve a descriptive difficulty-band cache path for one dataset config."""
+    label_slug = _slugify_for_filename(probe_label)
+    if not label_slug:
+        raise ValueError("probe_label must contain at least one filename-safe character.")
+    dataset_slug = _slugify_for_filename(config.dataset_id)
+    split_slug = _slugify_for_filename(config.dataset_split)
+    return Path(cache_dir) / f"difficulty_bands_{dataset_slug}_{split_slug}_{label_slug}.json"
 
 
 def _coerce_task_row(
@@ -434,7 +453,7 @@ def _resolve_sdpo_data_source(config: OnPolicyDataConfig) -> str:
 
 
 def _difficulty_banding_fingerprint(config: OnPolicyDataConfig) -> dict[str, Any]:
-    return {
+    fingerprint = {
         "strategy": config.difficulty_banding.strategy,
         "default_band": config.difficulty_banding.default_band,
         "family_band_exact": [
@@ -443,6 +462,161 @@ def _difficulty_banding_fingerprint(config: OnPolicyDataConfig) -> dict[str, Any
         "family_band_prefix": [
             [prefix, band] for prefix, band in config.difficulty_banding.family_band_prefix
         ],
+    }
+    if str(config.difficulty_banding.strategy).strip().lower() == "rollout_probe":
+        fingerprint["rollout_probe"] = _rollout_probe_cache_fingerprint(
+            config.difficulty_banding
+        )
+    return fingerprint
+
+
+def _resolve_rollout_probe_cache_path(
+    difficulty_banding: OnPolicyDifficultyBandConfig,
+) -> Path | None:
+    explicit_path = str(os.environ.get(_DIFFICULTY_BAND_CACHE_PATH_ENV, "")).strip()
+    if explicit_path:
+        return Path(explicit_path)
+
+    configured_path = str(difficulty_banding.rollout_probe_cache_path).strip()
+    if not configured_path:
+        return None
+
+    path = Path(configured_path)
+    if path.is_absolute():
+        return path
+
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / path
+
+
+@functools.lru_cache(maxsize=8)
+def _load_rollout_probe_cache_records_cached(
+    cache_path_text: str,
+    modified_ns: int,
+    file_size: int,
+) -> dict[str, dict[str, Any]]:
+    del modified_ns, file_size
+    cache_path = Path(cache_path_text)
+    if not cache_path.is_file():
+        return {}
+
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Difficulty-band cache must be a mapping: {cache_path}")
+
+    schema_version = payload.get("schema_version")
+    if schema_version is not None and int(schema_version) != ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION:
+        raise ValueError(
+            "Difficulty-band cache schema mismatch at "
+            f"{cache_path}: expected {ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION}, "
+            f"got {schema_version!r}."
+        )
+
+    band_records = payload.get("records", payload.get("task_band_records"))
+    records_by_task_id: dict[str, dict[str, Any]] = {}
+    if isinstance(band_records, Sequence) and not isinstance(band_records, (str, bytes)):
+        for index, raw_record in enumerate(band_records):
+            if not isinstance(raw_record, Mapping):
+                raise ValueError(
+                    f"Difficulty-band cache record {index} must be a mapping: {cache_path}"
+                )
+            task_id = str(raw_record.get("task_id", "")).strip()
+            difficulty_band = str(raw_record.get("difficulty_band", "")).strip()
+            if not task_id or not difficulty_band:
+                raise ValueError(
+                    "Difficulty-band cache records must include non-empty task_id and "
+                    f"difficulty_band fields: {cache_path}"
+                )
+            records_by_task_id[task_id] = {
+                "task_family": str(raw_record.get("task_family", "")).strip(),
+                "difficulty_band": difficulty_band,
+                "difficulty_band_source": str(
+                    raw_record.get("difficulty_band_source", "")
+                ).strip()
+                or "rollout_probe:task_id",
+            }
+        return records_by_task_id
+
+    band_mapping = payload.get("task_band_by_task_id", payload.get("task_bands"))
+    if isinstance(band_mapping, Mapping):
+        for raw_task_id, raw_value in band_mapping.items():
+            task_id = str(raw_task_id).strip()
+            if not task_id:
+                continue
+            if isinstance(raw_value, Mapping):
+                difficulty_band = str(raw_value.get("difficulty_band", "")).strip()
+                difficulty_band_source = str(
+                    raw_value.get("difficulty_band_source", "")
+                ).strip() or "rollout_probe:task_id"
+                task_family = str(raw_value.get("task_family", "")).strip()
+            else:
+                difficulty_band = str(raw_value).strip()
+                difficulty_band_source = "rollout_probe:task_id"
+                task_family = ""
+            if not difficulty_band:
+                raise ValueError(
+                    f"Difficulty-band cache task entry {task_id!r} is missing a band: {cache_path}"
+                )
+            records_by_task_id[task_id] = {
+                "task_family": task_family,
+                "difficulty_band": difficulty_band,
+                "difficulty_band_source": difficulty_band_source,
+            }
+        return records_by_task_id
+
+    raise ValueError(
+        "Difficulty-band cache must define either `records` or `task_band_by_task_id`: "
+        f"{cache_path}"
+    )
+
+
+def _load_rollout_probe_cache_records(
+    difficulty_banding: OnPolicyDifficultyBandConfig,
+) -> tuple[Path | None, dict[str, dict[str, Any]]]:
+    cache_path = _resolve_rollout_probe_cache_path(difficulty_banding)
+    if cache_path is None:
+        if difficulty_banding.rollout_probe_required:
+            raise ValueError(
+                "difficulty_banding.rollout_probe_required=true but no rollout_probe_cache_path "
+                "or SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH was provided."
+            )
+        return None, {}
+
+    if not cache_path.is_file():
+        if difficulty_banding.rollout_probe_required:
+            raise ValueError(f"Difficulty-band cache not found: {cache_path}")
+        return cache_path, {}
+
+    stat = cache_path.stat()
+    records = _load_rollout_probe_cache_records_cached(
+        str(cache_path),
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
+    return cache_path, records
+
+
+def _rollout_probe_cache_fingerprint(
+    difficulty_banding: OnPolicyDifficultyBandConfig,
+) -> dict[str, Any]:
+    cache_path, records = _load_rollout_probe_cache_records(difficulty_banding)
+    normalized_records = {
+        task_id: {
+            "difficulty_band": str(record.get("difficulty_band", "")).strip(),
+            "difficulty_band_source": str(
+                record.get("difficulty_band_source", "")
+            ).strip(),
+            "task_family": str(record.get("task_family", "")).strip(),
+        }
+        for task_id, record in sorted(records.items())
+    }
+    encoded = json.dumps(normalized_records, sort_keys=True, separators=(",", ":"))
+    return {
+        "path": str(cache_path) if cache_path is not None else "",
+        "required": bool(difficulty_banding.rollout_probe_required),
+        "present": bool(records),
+        "task_count": len(records),
+        "digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
     }
 
 
@@ -477,6 +651,21 @@ def _resolve_task_difficulty_metadata(
 
         return task_family, default_band, "instance_id_family:default"
 
+    if strategy == "rollout_probe":
+        _cache_path, records = _load_rollout_probe_cache_records(difficulty_banding)
+        record = records.get(task_id)
+        if record is None:
+            if difficulty_banding.rollout_probe_required:
+                raise ValueError(
+                    f"Difficulty-band cache is missing task_id {task_id!r}."
+                )
+            return task_family, default_band, "rollout_probe:default"
+
+        resolved_family = str(record.get("task_family", "")).strip() or task_family
+        resolved_band = str(record.get("difficulty_band", "")).strip() or default_band
+        resolved_source = str(record.get("difficulty_band_source", "")).strip()
+        return resolved_family, resolved_band, resolved_source or "rollout_probe:task_id"
+
     return task_family, default_band, strategy
 
 
@@ -503,6 +692,36 @@ def _resolve_task_family(
     return family
 
 
+def load_task_samples(
+    *,
+    config: OnPolicyDataConfig,
+    dataset_loader: DatasetLoader | None = None,
+    task_partition: str = _TASK_PARTITION_ALL,
+    eval_split_fraction: float = 0.0,
+    min_eval_rows: int = 0,
+) -> list[TaskSample]:
+    """Load the deterministic task pool for one partition of the on-policy dataset."""
+    normalized_partition = _normalize_task_partition(task_partition)
+    task_pool = _load_task_pool(config=config, dataset_loader=dataset_loader)
+    tasks = list(task_pool.tasks)
+    if not tasks:
+        detail = task_pool.last_error if task_pool.last_error else "no valid rows found"
+        raise ValueError(
+            f"Unable to load tasks from {config.dataset_id!r}:{config.dataset_split!r}. "
+            f"Collected 0 valid rows after scanning {task_pool.scanned_rows}. "
+            f"Last validation error: {detail}"
+        )
+    if normalized_partition == _TASK_PARTITION_ALL:
+        return tasks
+
+    train_tasks, eval_tasks = split_task_samples_for_eval(
+        tasks,
+        eval_split_fraction=eval_split_fraction,
+        min_eval_rows=min_eval_rows,
+    )
+    return train_tasks if normalized_partition == _TASK_PARTITION_TRAIN else eval_tasks
+
+
 def load_task_batch(
     *,
     step_index: int,
@@ -520,28 +739,25 @@ def load_task_batch(
         raise ValueError("batch_size must be >= 1")
 
     normalized_partition = _normalize_task_partition(task_partition)
-    task_pool = _load_task_pool(config=config, dataset_loader=dataset_loader)
-    tasks = list(task_pool.tasks)
-    if not tasks:
-        detail = task_pool.last_error if task_pool.last_error else "no valid rows found"
-        raise ValueError(
-            f"Unable to build task batch of size {batch_size} from "
-            f"{config.dataset_id!r}:{config.dataset_split!r}. "
-            f"Collected 0 valid rows after scanning {task_pool.scanned_rows}. "
-            f"Last validation error: {detail}"
-        )
-    if normalized_partition != _TASK_PARTITION_ALL:
-        train_tasks, eval_tasks = split_task_samples_for_eval(
-            tasks,
+    try:
+        tasks = load_task_samples(
+            config=config,
+            dataset_loader=dataset_loader,
+            task_partition=normalized_partition,
             eval_split_fraction=eval_split_fraction,
             min_eval_rows=min_eval_rows,
         )
-        tasks = train_tasks if normalized_partition == _TASK_PARTITION_TRAIN else eval_tasks
-        if not tasks:
+    except ValueError as exc:
+        if normalized_partition != _TASK_PARTITION_ALL:
             return []
+        raise ValueError(
+            f"Unable to build task batch of size {batch_size} from "
+            f"{config.dataset_id!r}:{config.dataset_split!r}. {exc}"
+        ) from exc
+    if not tasks:
+        return []
 
     if normalized_partition == _TASK_PARTITION_ALL and len(tasks) < batch_size:
-        detail = task_pool.last_error if task_pool.last_error else "no valid rows found"
         partition_detail = (
             f" in task partition {normalized_partition!r}"
             if normalized_partition != _TASK_PARTITION_ALL
@@ -550,8 +766,7 @@ def load_task_batch(
         raise ValueError(
             f"Unable to build task batch of size {batch_size} from "
             f"{config.dataset_id!r}:{config.dataset_split!r}{partition_detail}. "
-            f"Collected {len(tasks)} valid rows after scanning {task_pool.scanned_rows}. "
-            f"Last validation error: {detail}"
+            f"Collected {len(tasks)} valid rows."
         )
 
     # Held-out train/eval partitions can be intentionally smaller than the collector width.

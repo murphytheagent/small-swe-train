@@ -17,8 +17,10 @@ from typing import Any, Mapping, Sequence
 import yaml
 
 from runtime_paths import (
+    DEFAULT_ON_POLICY_DIFFICULTY_BAND_CACHE_RELATIVE_DIR,
     DEFAULT_ON_POLICY_BAD_TASK_CACHE_RELATIVE_DIR,
     DEFAULT_SDPO_TASK_CACHE_RELATIVE_DIR,
+    resolve_on_policy_difficulty_band_cache_dir,
     resolve_on_policy_bad_task_cache_dir,
     resolve_sdpo_task_cache_dir,
 )
@@ -51,6 +53,8 @@ class OnPolicyDifficultyBandConfig:
     default_band: str = "unbanded"
     family_band_exact: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     family_band_prefix: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    rollout_probe_cache_path: str = ""
+    rollout_probe_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -353,6 +357,14 @@ def _coerce_non_empty_str(value: Any, *, label: str) -> str:
     return value.strip()
 
 
+def _coerce_optional_str(value: Any) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("Optional string value must be either None or a string.")
+    return value
+
+
 def _coerce_positive_int(value: Any, *, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{label} must be an integer >= 1.")
@@ -548,10 +560,10 @@ def _parse_on_policy_difficulty_band_config(
         banding_payload.get("strategy", "none"),
         label="on_policy.data.difficulty_banding.strategy",
     )
-    if strategy not in {"none", "instance_id_family"}:
+    if strategy not in {"none", "instance_id_family", "rollout_probe"}:
         raise ValueError(
             "on_policy.data.difficulty_banding.strategy must be one of: "
-            "'none', 'instance_id_family'."
+            "'none', 'instance_id_family', 'rollout_probe'."
         )
 
     return OnPolicyDifficultyBandConfig(
@@ -567,6 +579,13 @@ def _parse_on_policy_difficulty_band_config(
         family_band_prefix=_coerce_non_empty_string_pairs(
             banding_payload.get("family_band_prefix", {}),
             label="on_policy.data.difficulty_banding.family_band_prefix",
+        ),
+        rollout_probe_cache_path=_coerce_optional_str(
+            banding_payload.get("rollout_probe_cache_path", "")
+        ).strip(),
+        rollout_probe_required=_coerce_bool(
+            banding_payload.get("rollout_probe_required", False),
+            label="on_policy.data.difficulty_banding.rollout_probe_required",
         ),
     )
 
