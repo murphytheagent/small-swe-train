@@ -45,6 +45,25 @@ def _resolve_executable(env_value: str, command_names: tuple[str, ...], fallback
             return candidate
     return ""
 
+
+def _go_test_matched_target(stdout_text: str, test_name: str) -> bool:
+    for raw_line in stdout_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("Test", "")).strip() != test_name:
+            continue
+        action = str(event.get("Action", "")).strip().lower()
+        if action in {"run", "pass", "fail", "skip", "output"}:
+            return True
+    return False
+
 results: dict[str, bool] = {}
 failures: dict[str, dict[str, object]] = {}
 executed = 0
@@ -65,7 +84,7 @@ for raw_name in targets:
         )
         if not resolved_go:
             raise FileNotFoundError("go")
-        command = [resolved_go, "test", "./...", "-count=1", "-run", "^" + re.escape(test_name) + "$"]
+        command = [resolved_go, "test", "./...", "-count=1", "-json", "-run", "^" + re.escape(test_name) + "$"]
     else:
         group_error = f"unsupported verifier kind: {verifier_kind}"
         results[test_name] = False
@@ -86,8 +105,16 @@ for raw_name in targets:
             timeout=per_test_timeout,
         )
         passed = completed.returncode == 0
+        if passed and verifier_kind == "go_test" and not _go_test_matched_target(completed.stdout, test_name):
+            passed = False
+            failures[test_name] = {
+                "returncode": 4,
+                "command": list(command),
+                "error": "go test selector matched no tests",
+                "selector_missing": True,
+            }
         results[test_name] = passed
-        if not passed:
+        if not passed and test_name not in failures:
             failures[test_name] = {
                 "returncode": int(completed.returncode),
                 "command": list(command),

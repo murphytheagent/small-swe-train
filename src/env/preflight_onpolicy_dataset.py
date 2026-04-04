@@ -32,6 +32,7 @@ from verifier_utils import normalize_verifier_kind
 
 _DEFAULT_PROBE_TIMEOUT_SEC = 120
 _DEFAULT_MAX_WORKERS = 8
+_TASK_SCOPED_BAD_REASONS = {"selector_invalid", "selector_probe_failed"}
 
 
 def _build_probe_command(
@@ -299,6 +300,8 @@ def _classify_probe_record(record: Mapping[str, Any]) -> tuple[str, str]:
         return "bad", "repo_root_missing"
     if not bool(payload.get("runner_available", False)):
         return "bad", "runner_unavailable"
+    if record.get("task_probe_exit_code") is not None and not bool(record.get("task_probe_ok", False)):
+        return "bad", "selector_probe_failed"
     task_payload = record.get("task_probe_payload")
     if isinstance(task_payload, Mapping) and not bool(task_payload.get("selector_valid", True)):
         return "bad", "selector_invalid"
@@ -392,17 +395,21 @@ def scan_dataset_for_bad_verifier_tasks(
     tasks = _iter_dataset_tasks(config=config, dataset_loader=dataset_loader)
     selected_tasks = list(tasks)
     if max_images is not None:
-        selected_image_names = []
-        seen_images: set[str] = set()
-        for task in selected_tasks:
-            if task.image_name in seen_images:
-                continue
-            seen_images.add(task.image_name)
-            selected_image_names.append(task.image_name)
-            if len(selected_image_names) >= max(int(max_images), 0):
-                break
-        selected_image_name_set = set(selected_image_names)
-        selected_tasks = [task for task in selected_tasks if task.image_name in selected_image_name_set]
+        max_unique_images = max(int(max_images), 0)
+        if max_unique_images == 0:
+            selected_tasks = []
+        else:
+            selected_image_names = []
+            seen_images: set[str] = set()
+            for task in selected_tasks:
+                if task.image_name in seen_images:
+                    continue
+                if len(selected_image_names) >= max_unique_images:
+                    break
+                seen_images.add(task.image_name)
+                selected_image_names.append(task.image_name)
+            selected_image_name_set = set(selected_image_names)
+            selected_tasks = [task for task in selected_tasks if task.image_name in selected_image_name_set]
 
     records: list[dict[str, Any]] = []
     if max_images is not None:
@@ -429,14 +436,23 @@ def scan_dataset_for_bad_verifier_tasks(
             str(record.get("image_name", "")).strip()
             for record in ordered_records
             if str(record.get("status", "")).strip().lower() == "bad"
+            and str(record.get("reason", "")).strip() not in _TASK_SCOPED_BAD_REASONS
         }
     )
     bad_image_name_set = set(bad_image_names)
-    bad_task_ids = sorted(
+    bad_task_id_set = {
+        str(record.get("task_id", "")).strip()
+        for record in ordered_records
+        if str(record.get("status", "")).strip().lower() == "bad"
+        and str(record.get("reason", "")).strip() in _TASK_SCOPED_BAD_REASONS
+        and str(record.get("task_id", "")).strip()
+    }
+    bad_task_id_set.update(
         task.task_id
         for task in selected_tasks
         if task.image_name in bad_image_name_set
     )
+    bad_task_ids = sorted(bad_task_id_set)
     return {
         "schema_version": ON_POLICY_BAD_TASK_CACHE_SCHEMA_VERSION,
         "dataset_id": config.dataset_id,

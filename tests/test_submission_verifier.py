@@ -372,6 +372,57 @@ def test_run_submission_verifier_executes_go_test_targets_locally(tmp_path: Path
     assert len(executor.requests) == 2
 
 
+def test_run_submission_verifier_marks_missing_go_test_targets_failed_locally(tmp_path: Path) -> None:
+    if shutil.which("go") is None:
+        pytest.skip("go toolchain unavailable")
+
+    (tmp_path / "go.mod").write_text("module example.com/sample\n\ngo 1.20\n", encoding="utf-8")
+    (tmp_path / "calc.go").write_text(
+        "\n".join(
+            [
+                "package sample",
+                "",
+                "func add(a, b int) int { return a + b }",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "calc_test.go").write_text(
+        "\n".join(
+            [
+                "package sample",
+                "",
+                'import "testing"',
+                "",
+                "func TestRegression(t *testing.T) {",
+                "    if got := add(5, 3); got != 8 {",
+                '        t.Fatalf("want 8, got %d", got)',
+                "    }",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    executor = _LocalShellExecutor(cwd=tmp_path)
+    result = run_submission_verifier(
+        executor=executor,
+        fail_to_pass=["TestMissing"],
+        pass_to_pass=["TestRegression"],
+        verifier_timeout_sec=60,
+        final_response="patched",
+        verifier_kind="go_test",
+    )
+
+    assert result["resolved"] is False
+    assert result["infra_invalid"] is False
+    assert result["fail_to_pass_results"] == {"TestMissing": False}
+    assert result["fail_to_pass_failures"]["TestMissing"]["selector_missing"] is True
+    assert result["pass_to_pass_results"] == {"TestRegression": True}
+
+
 def test_verify_script_runs_all_tests_after_a_failure(tmp_path: Path) -> None:
     test_file = tmp_path / "test_ordering.py"
     test_file.write_text(
@@ -414,7 +465,7 @@ def test_verify_script_runs_all_tests_after_a_failure(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    payload = json.loads(completed.stdout.strip())
+    payload = json.loads(completed.stdout.strip().splitlines()[-1])
     assert payload["executed"] == 3
     assert payload["results"] == {
         "test_ordering.py::test_first_fail": False,
@@ -439,6 +490,7 @@ def test_verify_script_uses_explicit_go_binary_when_path_missing(tmp_path: Path)
             [
                 "#!/bin/sh",
                 'printf "%s\\n" "$*" >> "$FAKE_GO_LOG"',
+                'printf \'{"Action":"run","Test":"TestBug"}\\n\'',
                 "exit 0",
             ]
         )
@@ -471,4 +523,4 @@ def test_verify_script_uses_explicit_go_binary_when_path_missing(tmp_path: Path)
     assert payload["executed"] == 1
     assert payload["results"] == {"TestBug": True}
     logged_command = log_path.read_text(encoding="utf-8").strip().split()
-    assert logged_command[:4] == ["test", "./...", "-count=1", "-run"]
+    assert logged_command[:5] == ["test", "./...", "-count=1", "-json", "-run"]
