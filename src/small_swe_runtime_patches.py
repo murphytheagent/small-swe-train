@@ -20,6 +20,9 @@ try:  # pragma: no cover - exercised in train runtime
     import torch
 except ModuleNotFoundError:  # pragma: no cover - unit-test environments without train deps
     torch = None  # type: ignore[assignment]
+    torch_functional = None  # type: ignore[assignment]
+else:  # pragma: no cover - exercised in train runtime
+    import torch.nn.functional as torch_functional
 
 _MISTRAL_MODEL_TYPES = {
     "mistral",
@@ -245,6 +248,95 @@ def _resolved_flash_attn_fallback_impl() -> str | None:
     return normalized
 
 
+class _FallbackFlashAttnIndexFirstAxis(torch.autograd.Function if torch is not None else object):
+    @staticmethod
+    def forward(ctx, input, indices):
+        if torch is None:
+            raise RuntimeError("torch is required for flash-attn fallback indexing.")
+        from einops import rearrange, repeat
+
+        ctx.save_for_backward(indices)
+        assert input.ndim >= 2
+        ctx.first_axis_dim, other_shape = input.shape[0], input.shape[1:]
+        second_dim = other_shape.numel()
+        return torch.gather(
+            rearrange(input, "b ... -> b (...)"), 0, repeat(indices, "z -> z d", d=second_dim)
+        ).reshape(-1, *other_shape)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if torch is None:
+            raise RuntimeError("torch is required for flash-attn fallback indexing.")
+        from einops import rearrange, repeat
+
+        (indices,) = ctx.saved_tensors
+        assert grad_output.ndim >= 2
+        other_shape = grad_output.shape[1:]
+        grad_output = rearrange(grad_output, "b ... -> b (...)")
+        grad_input = torch.zeros(
+            [ctx.first_axis_dim, grad_output.shape[1]],
+            device=grad_output.device,
+            dtype=grad_output.dtype,
+        )
+        grad_input.scatter_(0, repeat(indices, "z -> z d", d=grad_output.shape[1]), grad_output)
+        return grad_input.reshape(ctx.first_axis_dim, *other_shape), None
+
+
+class _FallbackFlashAttnIndexPutFirstAxis(torch.autograd.Function if torch is not None else object):
+    @staticmethod
+    def forward(ctx, values, indices, first_axis_dim):
+        if torch is None:
+            raise RuntimeError("torch is required for flash-attn fallback indexing.")
+
+        ctx.save_for_backward(indices)
+        assert indices.ndim == 1
+        assert values.ndim >= 2
+        output = torch.zeros(first_axis_dim, *values.shape[1:], device=values.device, dtype=values.dtype)
+        output[indices] = values
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (indices,) = ctx.saved_tensors
+        grad_values = grad_output[indices]
+        return grad_values, None, None
+
+
+def _fallback_flash_attn_index_first_axis(input, indices):
+    if torch is None:
+        raise RuntimeError("torch is required for flash-attn fallback indexing.")
+    return _FallbackFlashAttnIndexFirstAxis.apply(input, indices)
+
+
+def _fallback_flash_attn_pad_input(hidden_states, indices, batch, seqlen):
+    if torch is None:
+        raise RuntimeError("torch is required for flash-attn fallback padding.")
+    from einops import rearrange
+
+    output = _FallbackFlashAttnIndexPutFirstAxis.apply(hidden_states, indices, batch * seqlen)
+    return rearrange(output, "(b s) ... -> b s ...", b=batch)
+
+
+def _fallback_flash_attn_unpad_input(hidden_states, attention_mask, unused_mask=None):
+    if torch is None or torch_functional is None:
+        raise RuntimeError("torch is required for flash-attn fallback padding.")
+    from einops import rearrange
+
+    all_masks = (attention_mask + unused_mask) if unused_mask is not None else attention_mask
+    seqlens_in_batch = all_masks.sum(dim=-1, dtype=torch.int32)
+    used_seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+    indices = torch.nonzero(all_masks.flatten(), as_tuple=False).flatten()
+    max_seqlen_in_batch = seqlens_in_batch.max().item()
+    cu_seqlens = torch_functional.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+    return (
+        _fallback_flash_attn_index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices),
+        indices,
+        cu_seqlens,
+        max_seqlen_in_batch,
+        used_seqlens_in_batch,
+    )
+
+
 def _install_transformers_flash_attn_fallback_patch() -> None:
     try:
         from transformers import AutoModelForCausalLM
@@ -277,6 +369,46 @@ def _install_transformers_flash_attn_fallback_patch() -> None:
     AutoModelForCausalLM.from_pretrained = _small_swe_from_pretrained
 
 
+def _install_verl_attention_flash_attn_fallback_patch() -> None:
+    try:
+        from einops import rearrange as fallback_rearrange
+        from verl.utils import attention_utils as verl_attention_utils
+    except Exception:
+        return
+
+    fallback_index_first_axis = _fallback_flash_attn_index_first_axis
+    fallback_pad_input = _fallback_flash_attn_pad_input
+    fallback_unpad_input = _fallback_flash_attn_unpad_input
+
+    if getattr(verl_attention_utils, "_small_swe_flash_attn_fallback_patch", False):
+        return
+
+    def _small_swe_get_attention_functions() -> tuple[Callable, Callable, Callable, Callable]:
+        verl_attention_utils._index_first_axis = fallback_index_first_axis
+        verl_attention_utils._pad_input = fallback_pad_input
+        verl_attention_utils._rearrange = fallback_rearrange
+        verl_attention_utils._unpad_input = fallback_unpad_input
+        return (
+            fallback_index_first_axis,
+            fallback_pad_input,
+            fallback_rearrange,
+            fallback_unpad_input,
+        )
+
+    _small_swe_get_attention_functions.__name__ = "_small_swe_get_attention_functions"
+
+    verl_attention_utils._index_first_axis = fallback_index_first_axis
+    verl_attention_utils._pad_input = fallback_pad_input
+    verl_attention_utils._rearrange = fallback_rearrange
+    verl_attention_utils._unpad_input = fallback_unpad_input
+    verl_attention_utils._get_attention_functions = _small_swe_get_attention_functions
+    verl_attention_utils.index_first_axis = fallback_index_first_axis
+    verl_attention_utils.pad_input = fallback_pad_input
+    verl_attention_utils.rearrange = fallback_rearrange
+    verl_attention_utils.unpad_input = fallback_unpad_input
+    setattr(verl_attention_utils, "_small_swe_flash_attn_fallback_patch", True)
+
+
 def _try_apply_sdpo_runtime_patch() -> None:
     ray_trainer_module = sys.modules.get("verl.trainer.ppo.ray_trainer")
     if ray_trainer_module is None:
@@ -293,6 +425,90 @@ def _try_apply_sdpo_runtime_patch() -> None:
         apply_small_swe_sdpo_runtime_patch(ray_trainer_module)
     except Exception:
         return
+
+
+def _visible_device_tokens() -> list[str] | None:
+    for env_name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+        raw_value = os.environ.get(env_name)
+        if raw_value is None:
+            continue
+        return [token.strip() for token in raw_value.split(",") if token.strip()]
+    return None
+
+
+def _normalize_local_rank_candidate(candidate: Any, *, prefer_relative: bool = False) -> int | None:
+    if candidate is None:
+        return None
+
+    normalized = str(candidate).strip()
+    if not normalized:
+        return None
+
+    visible_tokens = _visible_device_tokens()
+    if visible_tokens:
+        try:
+            candidate_index = int(normalized)
+        except (TypeError, ValueError):
+            candidate_index = None
+        if prefer_relative and candidate_index is not None and 0 <= candidate_index < len(visible_tokens):
+            return candidate_index
+        if normalized in visible_tokens:
+            return visible_tokens.index(normalized)
+        if not prefer_relative and candidate_index is not None and 0 <= candidate_index < len(visible_tokens):
+            return candidate_index
+        return None
+
+    try:
+        return int(normalized)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_parallel_config_local_rank(parallel_config: Any) -> None:
+    try:
+        candidate_local = getattr(parallel_config, "data_parallel_rank_local")
+    except Exception:
+        candidate_local = None
+
+    normalized_local = _normalize_local_rank_candidate(candidate_local)
+    if normalized_local is not None:
+        try:
+            setattr(parallel_config, "data_parallel_rank_local", normalized_local)
+        except Exception:
+            pass
+
+    try:
+        candidate_index = getattr(parallel_config, "data_parallel_index")
+    except Exception:
+        return
+
+    normalized_index = _normalize_local_rank_candidate(candidate_index)
+    if normalized_index is None:
+        return
+
+    try:
+        setattr(parallel_config, "data_parallel_index", normalized_index)
+    except Exception:
+        return
+
+    if candidate_local is None:
+        try:
+            setattr(parallel_config, "data_parallel_rank_local", normalized_index)
+        except Exception:
+            return
+
+
+def _normalize_vllm_worker_visible_device_ranks(worker: Any) -> None:
+    normalized_local_rank = _normalize_local_rank_candidate(getattr(worker, "local_rank", None))
+    if normalized_local_rank is not None:
+        try:
+            worker.local_rank = normalized_local_rank
+        except Exception:
+            pass
+
+    parallel_config = getattr(worker, "parallel_config", None)
+    if parallel_config is not None:
+        _normalize_parallel_config_local_rank(parallel_config)
 
 
 def _install_self_distillation_config_compat_patch() -> None:
@@ -419,6 +635,12 @@ def _install_sdpo_runtime_patch_import_guard() -> None:
             )
         ):
             _try_apply_sdpo_runtime_patch()
+        if (
+            name.startswith("vllm.")
+            or "vllm.v1.worker.worker_base" in sys.modules
+            or "vllm.worker.worker_base" in sys.modules
+        ):
+            _try_apply_vllm_worker_local_rank_patch()
         return module
 
     builtins.__import__ = _small_swe_sdpo_guarded_import
@@ -440,7 +662,54 @@ def _resolve_local_rank_from_env() -> int | None:
         local_world_size = 1
     if local_world_size <= 0:
         local_world_size = 1
-    return rank % local_world_size
+    return _normalize_local_rank_candidate(rank % local_world_size, prefer_relative=True)
+
+
+def _try_apply_vllm_worker_local_rank_patch() -> None:
+    for module_name in ("vllm.v1.worker.worker_base", "vllm.worker.worker_base"):
+        worker_base_module = sys.modules.get(module_name)
+        if worker_base_module is None:
+            continue
+
+        WorkerBase = getattr(worker_base_module, "WorkerBase", None)
+        if WorkerBase is None or getattr(WorkerBase, "_small_swe_local_rank_patch", False):
+            continue
+
+        original_init = WorkerBase.__init__
+
+        def _small_swe_worker_base_init(self, *args, _original_init=original_init, **kwargs):
+            if "local_rank" in kwargs:
+                normalized_local_rank = _normalize_local_rank_candidate(kwargs.get("local_rank"))
+                if normalized_local_rank is not None:
+                    kwargs["local_rank"] = normalized_local_rank
+            elif len(args) >= 2:
+                normalized_local_rank = _normalize_local_rank_candidate(args[1])
+                if normalized_local_rank is not None:
+                    args = (args[0], normalized_local_rank, *args[2:])
+            _original_init(self, *args, **kwargs)
+
+        _small_swe_worker_base_init.__name__ = "_small_swe_worker_base_init"
+        WorkerBase.__init__ = _small_swe_worker_base_init
+        setattr(WorkerBase, "_small_swe_local_rank_patch", True)
+
+    for module_name in ("vllm.v1.worker.gpu_worker", "vllm.worker.worker"):
+        worker_module = sys.modules.get(module_name)
+        if worker_module is None:
+            continue
+
+        Worker = getattr(worker_module, "Worker", None)
+        if Worker is None or getattr(Worker, "_small_swe_local_rank_device_patch", False):
+            continue
+
+        original_init_device = Worker.init_device
+
+        def _small_swe_worker_init_device(self, *args, _original_init_device=original_init_device, **kwargs):
+            _normalize_vllm_worker_visible_device_ranks(self)
+            return _original_init_device(self, *args, **kwargs)
+
+        _small_swe_worker_init_device.__name__ = "_small_swe_worker_init_device"
+        Worker.init_device = _small_swe_worker_init_device
+        setattr(Worker, "_small_swe_local_rank_device_patch", True)
 
 
 def _install_ray_worker_local_rank_device_patch() -> None:
@@ -1111,6 +1380,7 @@ def apply_small_swe_runtime_patches() -> None:
         _clear_cached_flash_attn_modules()
         _install_flash_attn_find_spec_guard()
         _install_flash_attn_import_guard()
+        _install_verl_attention_flash_attn_fallback_patch()
         _install_transformers_flash_attn_fallback_patch()
     if _coerce_bool_env("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", default=False):
         _install_self_distillation_config_compat_patch()
@@ -1122,6 +1392,7 @@ def apply_small_swe_runtime_patches() -> None:
         _install_verl_tracking_patch()
         _install_known_warning_filters()
         # Ray worker processes do not enter our main wrapper module.
-        # Patch lazily once ray_trainer is imported in-process.
+        # Patch lazily once ray_trainer or vLLM worker modules are imported in-process.
         _install_sdpo_runtime_patch_import_guard()
         _try_apply_sdpo_runtime_patch()
+        _try_apply_vllm_worker_local_rank_patch()

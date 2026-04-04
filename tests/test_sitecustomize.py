@@ -104,6 +104,76 @@ def test_sitecustomize_patches_transformers_flash_attn_fallback(monkeypatch) -> 
     assert fake_import_utils.is_flash_attn_2_available() is False
 
 
+def test_sitecustomize_patches_verl_attention_utils_flash_attn_fallback(monkeypatch) -> None:
+    def _record(name: str):
+        def _inner(*args, **kwargs):
+            return (name, args, kwargs)
+
+        return _inner
+
+    fake_einops = types.ModuleType("einops")
+    fake_einops.rearrange = _record("rearrange")
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_verl_pkg.__path__ = []
+    fake_verl_utils_pkg = types.ModuleType("verl.utils")
+    fake_verl_utils_pkg.__path__ = []
+    fake_attention_utils = types.ModuleType("verl.utils.attention_utils")
+
+    def _original_get_attention_functions():
+        return (_record("old_index"), _record("old_pad"), _record("old_rearrange"), _record("old_unpad"))
+
+    def _index_first_axis(*args, **kwargs):
+        func, *_ = fake_attention_utils._get_attention_functions()
+        return func(*args, **kwargs)
+
+    def _pad_input(*args, **kwargs):
+        _, func, *_ = fake_attention_utils._get_attention_functions()
+        return func(*args, **kwargs)
+
+    def _rearrange(*args, **kwargs):
+        *_, func, _ = fake_attention_utils._get_attention_functions()
+        return func(*args, **kwargs)
+
+    def _unpad_input(*args, **kwargs):
+        *_, func = fake_attention_utils._get_attention_functions()
+        return func(*args, **kwargs)
+
+    fake_attention_utils._get_attention_functions = _original_get_attention_functions
+    fake_attention_utils.index_first_axis = _index_first_axis
+    fake_attention_utils.pad_input = _pad_input
+    fake_attention_utils.rearrange = _rearrange
+    fake_attention_utils.unpad_input = _unpad_input
+    fake_verl_utils_pkg.attention_utils = fake_attention_utils
+    fake_verl_pkg.utils = fake_verl_utils_pkg
+
+    monkeypatch.setitem(sys.modules, "einops", fake_einops)
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_verl_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.attention_utils", fake_attention_utils)
+    monkeypatch.setenv("SMALL_SWE_HIDE_EXTERNAL_FLASH_ATTN", "1")
+    monkeypatch.setattr(sitecustomize, "_fallback_flash_attn_index_first_axis", _record("index"))
+    monkeypatch.setattr(sitecustomize, "_fallback_flash_attn_pad_input", _record("pad"))
+    monkeypatch.setattr(sitecustomize, "_fallback_flash_attn_unpad_input", _record("unpad"))
+
+    original_import = builtins.__import__
+    try:
+        sitecustomize.apply_small_swe_runtime_patches()
+    finally:
+        builtins.__import__ = original_import
+
+    assert fake_attention_utils.index_first_axis("x") == ("index", ("x",), {})
+    assert fake_attention_utils.pad_input("x") == ("pad", ("x",), {})
+    assert fake_attention_utils.rearrange("x") == ("rearrange", ("x",), {})
+    assert fake_attention_utils.unpad_input("x") == ("unpad", ("x",), {})
+    assert fake_attention_utils._get_attention_functions() == (
+        sitecustomize._fallback_flash_attn_index_first_axis,
+        sitecustomize._fallback_flash_attn_pad_input,
+        fake_einops.rearrange,
+        sitecustomize._fallback_flash_attn_unpad_input,
+    )
+
+
 def test_sitecustomize_can_install_sdpo_patch_import_guard(monkeypatch) -> None:
     calls = {"count": 0, "module": None}
 
@@ -369,6 +439,51 @@ def test_sitecustomize_sets_local_rank_from_rank_in_ray_noset_mode(monkeypatch) 
     assert os.environ["LOCAL_RANK"] == "5"
 
 
+def test_sitecustomize_keeps_relative_local_rank_when_visible_devices_are_subset(monkeypatch) -> None:
+    calls = {"base_called": 0, "set_device": []}
+
+    class _FakeWorker:
+        def _setup_env_cuda_visible_devices(self) -> None:
+            calls["base_called"] += 1
+            os.environ["LOCAL_RANK"] = "0"
+
+    class _FakeTorchDevice:
+        def set_device(self, device: int) -> None:
+            calls["set_device"].append(device)
+
+    fake_verl_pkg = types.ModuleType("verl")
+    fake_single_controller_pkg = types.ModuleType("verl.single_controller")
+    fake_single_controller_base_pkg = types.ModuleType("verl.single_controller.base")
+    fake_worker_module = types.ModuleType("verl.single_controller.base.worker")
+    fake_worker_module.Worker = _FakeWorker
+
+    fake_utils_pkg = types.ModuleType("verl.utils")
+    fake_device_module = types.ModuleType("verl.utils.device")
+    fake_device_module.get_torch_device = lambda: _FakeTorchDevice()
+    fake_ray_utils_module = types.ModuleType("verl.utils.ray_utils")
+    fake_ray_utils_module.ray_noset_visible_devices = lambda env_vars=os.environ: True
+
+    monkeypatch.setitem(sys.modules, "verl", fake_verl_pkg)
+    monkeypatch.setitem(sys.modules, "verl.single_controller", fake_single_controller_pkg)
+    monkeypatch.setitem(sys.modules, "verl.single_controller.base", fake_single_controller_base_pkg)
+    monkeypatch.setitem(sys.modules, "verl.single_controller.base.worker", fake_worker_module)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_utils_pkg)
+    monkeypatch.setitem(sys.modules, "verl.utils.device", fake_device_module)
+    monkeypatch.setitem(sys.modules, "verl.utils.ray_utils", fake_ray_utils_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("RAY_LOCAL_WORLD_SIZE", "2")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,3")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+    worker = _FakeWorker()
+    worker._setup_env_cuda_visible_devices()
+
+    assert calls["base_called"] == 0
+    assert calls["set_device"] == [1]
+    assert os.environ["LOCAL_RANK"] == "1"
+
+
 def test_sitecustomize_falls_back_to_base_setup_when_env_local_rank_missing(monkeypatch) -> None:
     calls = {"base_called": 0, "set_device": []}
 
@@ -412,6 +527,242 @@ def test_sitecustomize_falls_back_to_base_setup_when_env_local_rank_missing(monk
     assert calls["base_called"] == 1
     assert calls["set_device"] == []
     assert os.environ["LOCAL_RANK"] == "2"
+
+
+def test_sitecustomize_normalizes_vllm_worker_local_rank_to_visible_device_index(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeWorkerBase:
+        def __init__(
+            self,
+            vllm_config,
+            local_rank,
+            rank,
+            distributed_init_method,
+            is_driver_worker: bool = False,
+        ) -> None:
+            captured["vllm_config"] = vllm_config
+            captured["local_rank"] = local_rank
+            captured["rank"] = rank
+            captured["distributed_init_method"] = distributed_init_method
+            captured["is_driver_worker"] = is_driver_worker
+
+    fake_vllm_pkg = types.ModuleType("vllm")
+    fake_vllm_pkg.__path__ = []
+    fake_vllm_v1_pkg = types.ModuleType("vllm.v1")
+    fake_vllm_v1_pkg.__path__ = []
+    fake_vllm_v1_worker_pkg = types.ModuleType("vllm.v1.worker")
+    fake_vllm_v1_worker_pkg.__path__ = []
+    fake_worker_base_module = types.ModuleType("vllm.v1.worker.worker_base")
+    fake_worker_base_module.WorkerBase = _FakeWorkerBase
+
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.v1", fake_vllm_v1_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker", fake_vllm_v1_worker_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker.worker_base", fake_worker_base_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,3")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+    _FakeWorkerBase("cfg", 3, 11, "env://", is_driver_worker=True)
+
+    assert captured["vllm_config"] == "cfg"
+    assert captured["local_rank"] == 1
+    assert captured["rank"] == 11
+    assert captured["distributed_init_method"] == "env://"
+    assert captured["is_driver_worker"] is True
+
+
+def test_sitecustomize_preserves_v0_vllm_worker_base_signature(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeWorkerBase:
+        def __init__(self, vllm_config) -> None:
+            captured["vllm_config"] = vllm_config
+
+    fake_vllm_pkg = types.ModuleType("vllm")
+    fake_vllm_pkg.__path__ = []
+    fake_vllm_worker_pkg = types.ModuleType("vllm.worker")
+    fake_vllm_worker_pkg.__path__ = []
+    fake_worker_base_module = types.ModuleType("vllm.worker.worker_base")
+    fake_worker_base_module.WorkerBase = _FakeWorkerBase
+
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.worker", fake_vllm_worker_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.worker.worker_base", fake_worker_base_module)
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+    _FakeWorkerBase("cfg")
+
+    assert captured["vllm_config"] == "cfg"
+
+
+def test_sitecustomize_normalizes_vllm_gpu_worker_init_device_dp_local_rank(monkeypatch) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeTorchCuda:
+        @staticmethod
+        def device_count() -> int:
+            return 1
+
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+    class _FakeTorch:
+        cuda = _FakeTorchCuda()
+
+    class _FakeParallelConfig:
+        distributed_executor_backend = "mp"
+        data_parallel_backend = "mp"
+        nnodes_within_dp = 1
+        data_parallel_rank_local = 3
+        data_parallel_index = 3
+        pipeline_parallel_size = 1
+        tensor_parallel_size = 1
+        local_world_size = 1
+
+    class _FakeDeviceConfig:
+        device_type = "cuda"
+
+    class _FakeWorker:
+        def __init__(self) -> None:
+            self.parallel_config = _FakeParallelConfig()
+            self.device_config = _FakeDeviceConfig()
+            self.local_rank = 3
+
+        def init_device(self):
+            parallel_config = self.parallel_config
+            if (
+                parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
+                and parallel_config.data_parallel_backend != "ray"
+                and parallel_config.nnodes_within_dp == 1
+            ):
+                dp_local_rank = parallel_config.data_parallel_rank_local
+                if dp_local_rank is None:
+                    dp_local_rank = parallel_config.data_parallel_index
+
+                tp_pp_world_size = (
+                    parallel_config.pipeline_parallel_size * parallel_config.tensor_parallel_size
+                )
+
+                self.local_rank += dp_local_rank * tp_pp_world_size
+                assert self.local_rank < sitecustomize.torch.cuda.device_count()
+                visible_device_count = (
+                    sitecustomize.torch.cuda.device_count() if sitecustomize.torch.cuda.is_available() else 0
+                )
+                assert parallel_config.local_world_size <= visible_device_count
+
+            observed["local_rank"] = self.local_rank
+            observed["data_parallel_rank_local"] = parallel_config.data_parallel_rank_local
+
+    fake_vllm_pkg = types.ModuleType("vllm")
+    fake_vllm_pkg.__path__ = []
+    fake_vllm_v1_pkg = types.ModuleType("vllm.v1")
+    fake_vllm_v1_pkg.__path__ = []
+    fake_vllm_v1_worker_pkg = types.ModuleType("vllm.v1.worker")
+    fake_vllm_v1_worker_pkg.__path__ = []
+    fake_gpu_worker_module = types.ModuleType("vllm.v1.worker.gpu_worker")
+    fake_gpu_worker_module.Worker = _FakeWorker
+
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.v1", fake_vllm_v1_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker", fake_vllm_v1_worker_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker.gpu_worker", fake_gpu_worker_module)
+    monkeypatch.setattr(sitecustomize, "torch", _FakeTorch())
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+    worker = _FakeWorker()
+    worker.init_device()
+
+    assert observed["local_rank"] == 0
+    assert observed["data_parallel_rank_local"] == 0
+
+
+def test_sitecustomize_normalizes_vllm_gpu_worker_init_device_dp_index_fallback(monkeypatch) -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeTorchCuda:
+        @staticmethod
+        def device_count() -> int:
+            return 1
+
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+    class _FakeTorch:
+        cuda = _FakeTorchCuda()
+
+    class _FakeParallelConfig:
+        distributed_executor_backend = "mp"
+        data_parallel_backend = "mp"
+        nnodes_within_dp = 1
+        data_parallel_rank_local = None
+        data_parallel_index = 3
+        pipeline_parallel_size = 1
+        tensor_parallel_size = 1
+        local_world_size = 1
+
+    class _FakeDeviceConfig:
+        device_type = "cuda"
+
+    class _FakeWorker:
+        def __init__(self) -> None:
+            self.parallel_config = _FakeParallelConfig()
+            self.device_config = _FakeDeviceConfig()
+            self.local_rank = 3
+
+        def init_device(self):
+            parallel_config = self.parallel_config
+            if (
+                parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
+                and parallel_config.data_parallel_backend != "ray"
+                and parallel_config.nnodes_within_dp == 1
+            ):
+                dp_local_rank = parallel_config.data_parallel_rank_local
+                if dp_local_rank is None:
+                    dp_local_rank = parallel_config.data_parallel_index
+
+                tp_pp_world_size = (
+                    parallel_config.pipeline_parallel_size * parallel_config.tensor_parallel_size
+                )
+
+                self.local_rank += dp_local_rank * tp_pp_world_size
+                assert self.local_rank < sitecustomize.torch.cuda.device_count()
+
+            observed["local_rank"] = self.local_rank
+            observed["data_parallel_rank_local"] = parallel_config.data_parallel_rank_local
+            observed["data_parallel_index"] = parallel_config.data_parallel_index
+
+    fake_vllm_pkg = types.ModuleType("vllm")
+    fake_vllm_pkg.__path__ = []
+    fake_vllm_v1_pkg = types.ModuleType("vllm.v1")
+    fake_vllm_v1_pkg.__path__ = []
+    fake_vllm_v1_worker_pkg = types.ModuleType("vllm.v1.worker")
+    fake_vllm_v1_worker_pkg.__path__ = []
+    fake_gpu_worker_module = types.ModuleType("vllm.v1.worker.gpu_worker")
+    fake_gpu_worker_module.Worker = _FakeWorker
+
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.v1", fake_vllm_v1_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker", fake_vllm_v1_worker_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.v1.worker.gpu_worker", fake_gpu_worker_module)
+    monkeypatch.setattr(sitecustomize, "torch", _FakeTorch())
+    monkeypatch.setenv("SMALL_SWE_ENABLE_SDPO_RUNTIME_PATCH", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+
+    sitecustomize.apply_small_swe_runtime_patches()
+    worker = _FakeWorker()
+    worker.init_device()
+
+    assert observed["local_rank"] == 0
+    assert observed["data_parallel_rank_local"] == 0
+    assert observed["data_parallel_index"] == 0
 
 
 def test_sitecustomize_installs_model_type_aware_mistral_regex_default(monkeypatch, tmp_path) -> None:
