@@ -140,6 +140,36 @@ def _build_runtime_manifest_payload(
         "selected_count": len(selected_rows),
         "rejected_count": len(rejected_rows),
         "rejection_reason_counts": dict(sorted(rejection_reason_counts.items())),
+        "rollout_task_family_counts": _count_rows_by_text_field(
+            rollout_rows,
+            field_name="task_family",
+            default_label="unknown",
+        ),
+        "rollout_difficulty_band_counts": _count_rows_by_text_field(
+            rollout_rows,
+            field_name="difficulty_band",
+            default_label="unbanded",
+        ),
+        "selected_task_family_counts": _count_rows_by_text_field(
+            selected_rows,
+            field_name="task_family",
+            default_label="unknown",
+        ),
+        "selected_difficulty_band_counts": _count_rows_by_text_field(
+            selected_rows,
+            field_name="difficulty_band",
+            default_label="unbanded",
+        ),
+        "rejected_task_family_counts": _count_rows_by_text_field(
+            rejected_rows,
+            field_name="task_family",
+            default_label="unknown",
+        ),
+        "rejected_difficulty_band_counts": _count_rows_by_text_field(
+            rejected_rows,
+            field_name="difficulty_band",
+            default_label="unbanded",
+        ),
         "dataproto_meta_info": dict(meta_info),
     }
 
@@ -158,6 +188,19 @@ def _coerce_rows(value: Any) -> list[dict[str, Any]]:
         if isinstance(item, Mapping):
             rows.append(dict(item))
     return rows
+
+
+def _count_rows_by_text_field(
+    rows: list[dict[str, Any]],
+    *,
+    field_name: str,
+    default_label: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        label = str(row.get(field_name, "")).strip() or default_label
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

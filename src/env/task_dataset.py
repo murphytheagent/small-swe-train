@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-from config import OnPolicyDataConfig
+from config import OnPolicyDataConfig, OnPolicyDifficultyBandConfig
 from prompts.runtime_messages import build_onpolicy_initial_user_message
 from runtime_paths import resolve_on_policy_bad_task_cache_dir
 from verifier_utils import (
@@ -24,7 +24,7 @@ from verifier_utils import (
 
 DatasetLoader = Callable[[str, str], Sequence[Mapping[str, Any]]]
 SDPO_DEFAULT_MAX_PROBLEM_STATEMENT_CHARS = 4000
-SDPO_TASK_ROWS_SCHEMA_VERSION = 3
+SDPO_TASK_ROWS_SCHEMA_VERSION = 4
 ON_POLICY_BAD_TASK_CACHE_SCHEMA_VERSION = 1
 _BAD_TASK_CACHE_PATH_ENV = "SMALL_SWE_BAD_TASK_CACHE_PATH"
 _BAD_TASK_CACHE_DIR_ENV = "SMALL_SWE_BAD_TASK_CACHE_DIR"
@@ -52,6 +52,9 @@ class TaskSample:
     pass_to_pass: Any
     raw: Mapping[str, Any]
     verifier_kind: str = "pytest"
+    task_family: str = ""
+    difficulty_band: str = "unbanded"
+    difficulty_band_source: str = "none"
 
 
 @dataclass(frozen=True)
@@ -170,9 +173,18 @@ def _coerce_task_row(
     else:
         task_id = task_id_raw.strip()
 
+    task_family, difficulty_band, difficulty_band_source = _resolve_task_difficulty_metadata(
+        task_id=task_id,
+        row=row,
+        difficulty_banding=config.difficulty_banding,
+    )
+
     raw_row = dict(row)
     raw_row.setdefault("prompt_source", prompt_source)
     raw_row.setdefault("verifier_kind", config.verifier_kind)
+    raw_row.setdefault("task_family", task_family)
+    raw_row.setdefault("difficulty_band", difficulty_band)
+    raw_row.setdefault("difficulty_band_source", difficulty_band_source)
     return TaskSample(
         task_id=task_id,
         image_name=image_name_raw.strip(),
@@ -181,6 +193,9 @@ def _coerce_task_row(
         pass_to_pass=pass_to_pass,
         verifier_kind=config.verifier_kind,
         raw=raw_row,
+        task_family=task_family,
+        difficulty_band=difficulty_band,
+        difficulty_band_source=difficulty_band_source,
     )
 
 
@@ -418,6 +433,76 @@ def _resolve_sdpo_data_source(config: OnPolicyDataConfig) -> str:
     return "small_swe_phase_d"
 
 
+def _difficulty_banding_fingerprint(config: OnPolicyDataConfig) -> dict[str, Any]:
+    return {
+        "strategy": config.difficulty_banding.strategy,
+        "default_band": config.difficulty_banding.default_band,
+        "family_band_exact": [
+            [family, band] for family, band in config.difficulty_banding.family_band_exact
+        ],
+        "family_band_prefix": [
+            [prefix, band] for prefix, band in config.difficulty_banding.family_band_prefix
+        ],
+    }
+
+
+def _resolve_task_difficulty_metadata(
+    *,
+    task_id: str,
+    row: Mapping[str, Any],
+    difficulty_banding: OnPolicyDifficultyBandConfig,
+) -> tuple[str, str, str]:
+    task_family = _resolve_task_family(task_id=task_id, row=row)
+    strategy = str(difficulty_banding.strategy).strip().lower()
+    default_band = str(difficulty_banding.default_band).strip() or "unbanded"
+
+    if strategy == "none":
+        return task_family, default_band, "none"
+
+    if strategy == "instance_id_family":
+        if not task_family:
+            return task_family, default_band, "instance_id_family:default"
+
+        exact_mapping = dict(difficulty_banding.family_band_exact)
+        if task_family in exact_mapping:
+            return task_family, exact_mapping[task_family], "instance_id_family:exact"
+
+        prefix_rules = sorted(
+            difficulty_banding.family_band_prefix,
+            key=lambda item: (-len(item[0]), item[0]),
+        )
+        for prefix, band in prefix_rules:
+            if task_family.startswith(prefix):
+                return task_family, band, "instance_id_family:prefix"
+
+        return task_family, default_band, "instance_id_family:default"
+
+    return task_family, default_band, strategy
+
+
+def _resolve_task_family(
+    *,
+    task_id: str,
+    row: Mapping[str, Any],
+) -> str:
+    for key in ("task_family", "difficulty_family"):
+        raw_value = row.get(key)
+        if isinstance(raw_value, str):
+            normalized = raw_value.strip()
+            if normalized:
+                return normalized
+
+    normalized_task_id = task_id.strip()
+    if not normalized_task_id:
+        return ""
+
+    suffix = normalized_task_id.rsplit(".", 1)[-1]
+    if "__" not in suffix:
+        return ""
+    family = suffix.split("__", 1)[0].strip()
+    return family
+
+
 def load_task_batch(
     *,
     step_index: int,
@@ -506,6 +591,9 @@ def build_sdpo_task_rows(
                 "prompt": [{"role": "user", "content": initial_user_message}],
                 "task_id": task.task_id,
                 "image_name": task.image_name,
+                "task_family": task.task_family,
+                "difficulty_band": task.difficulty_band,
+                "difficulty_band_source": task.difficulty_band_source,
                 "data_source": data_source,
                 "verifier_kind": task.verifier_kind,
                 "fail_to_pass": fail_to_pass,
@@ -514,6 +602,9 @@ def build_sdpo_task_rows(
                     "ground_truth": {
                         "task_id": task.task_id,
                         "image_name": task.image_name,
+                        "task_family": task.task_family,
+                        "difficulty_band": task.difficulty_band,
+                        "difficulty_band_source": task.difficulty_band_source,
                         "data_source": data_source,
                         "verifier_kind": task.verifier_kind,
                         "fail_to_pass": fail_to_pass,
@@ -559,6 +650,7 @@ def resolve_sdpo_task_rows_cache_path(
         },
         "patch_is_bug_introducing": bool(config.patch_is_bug_introducing),
         "verifier_kind": str(config.verifier_kind),
+        "difficulty_banding": _difficulty_banding_fingerprint(config),
         "max_problem_statement_chars": prompt_char_limit,
         "bad_task_filter": bad_task_filter,
     }
@@ -665,6 +757,7 @@ def resolve_sdpo_task_split_cache_paths(
         },
         "patch_is_bug_introducing": bool(config.patch_is_bug_introducing),
         "verifier_kind": str(config.verifier_kind),
+        "difficulty_banding": _difficulty_banding_fingerprint(config),
         "eval_split_fraction": float(eval_split_fraction),
         "min_eval_rows": int(min_eval_rows),
         "max_problem_statement_chars": prompt_char_limit,

@@ -1072,6 +1072,26 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "selected_rows_upsampled": selected_rows_upsampled,
                 "selected_rows_eval_upsampled": selected_rows_eval_upsampled,
                 "eval_split_fallback_to_train": eval_split_fallback_to_train,
+                "selected_task_family_counts": _count_rows_by_text_field(
+                    train_selected_rows,
+                    field_name="task_family",
+                    default_label="unknown",
+                ),
+                "selected_difficulty_band_counts": _count_rows_by_text_field(
+                    train_selected_rows,
+                    field_name="difficulty_band",
+                    default_label="unbanded",
+                ),
+                "eval_selected_task_family_counts": _count_rows_by_text_field(
+                    eval_selected_rows,
+                    field_name="task_family",
+                    default_label="unknown",
+                ),
+                "eval_selected_difficulty_band_counts": _count_rows_by_text_field(
+                    eval_selected_rows,
+                    field_name="difficulty_band",
+                    default_label="unbanded",
+                ),
                 "rejected_count": len(train_rejected_rows),
                 "train_rejected_count": len(train_rejected_rows),
                 "eval_rejected_count": len(eval_rejected_rows),
@@ -2513,6 +2533,19 @@ def _multiturn_token_count(*, messages: Sequence[Mapping[str, Any]], tokenizer: 
 
     input_ids = _extract_chat_template_input_ids(payload)
     return len(input_ids)
+
+
+def _count_rows_by_text_field(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    field_name: str,
+    default_label: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        label = str(row.get(field_name, "")).strip() or default_label
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _extract_chat_template_input_ids(payload: Any) -> list[int]:

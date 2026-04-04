@@ -2,6 +2,14 @@ dataset_id: SWE-bench/SWE-smith-py
 dataset_split: train
 patch_is_bug_introducing: true
 verifier_kind: pytest
+difficulty_banding:
+  strategy: instance_id_family
+  default_band: unbanded
+  family_band_exact:
+    combine_file: near_impossible
+    func_basic: learnable
+  family_band_prefix:
+    func_pm_: near_impossible
 columns:
   image_name: image_name
   problem_statement: problem_statement

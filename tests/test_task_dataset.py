@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from config import OnPolicyDataConfig, OnPolicyDatasetColumns
+from config import OnPolicyDataConfig, OnPolicyDatasetColumns, OnPolicyDifficultyBandConfig
 import env.task_dataset as dataset_module
 from env.task_dataset import (
     TaskSample,
@@ -31,6 +31,28 @@ def _config() -> OnPolicyDataConfig:
             problem_statement="problem_statement",
             fail_to_pass="FAIL_TO_PASS",
             pass_to_pass="PASS_TO_PASS",
+        ),
+    )
+
+
+def _banded_config() -> OnPolicyDataConfig:
+    return OnPolicyDataConfig(
+        dataset_id="SWE-bench/SWE-smith-py",
+        dataset_split="train",
+        columns=OnPolicyDatasetColumns(
+            image_name="image_name",
+            problem_statement="problem_statement",
+            fail_to_pass="FAIL_TO_PASS",
+            pass_to_pass="PASS_TO_PASS",
+        ),
+        difficulty_banding=OnPolicyDifficultyBandConfig(
+            strategy="instance_id_family",
+            default_band="unbanded",
+            family_band_exact=(
+                ("func_basic", "learnable"),
+                ("combine_file", "near_impossible"),
+            ),
+            family_band_prefix=(("func_pm_", "near_impossible"),),
         ),
     )
 
@@ -194,6 +216,57 @@ def test_load_task_batch_supports_deterministic_train_eval_partitions() -> None:
     )
 
 
+def test_load_task_batch_attaches_difficulty_tags_from_instance_family_rules() -> None:
+    rows = [
+        {
+            "instance_id": "repo.sha.func_basic__0001",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+        {
+            "instance_id": "repo.sha.func_pm_ctrl_shuffle__0002",
+            "image_name": "img:2",
+            "problem_statement": "p2",
+            "FAIL_TO_PASS": ["f2"],
+            "PASS_TO_PASS": ["p2"],
+        },
+        {
+            "instance_id": "repo.sha.combine_module__0003",
+            "image_name": "img:3",
+            "problem_statement": "p3",
+            "FAIL_TO_PASS": ["f3"],
+            "PASS_TO_PASS": ["p3"],
+        },
+    ]
+
+    batch = load_task_batch(
+        step_index=0,
+        batch_size=3,
+        config=_banded_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+    )
+
+    assert [sample.task_family for sample in batch] == [
+        "func_basic",
+        "func_pm_ctrl_shuffle",
+        "combine_module",
+    ]
+    assert [sample.difficulty_band for sample in batch] == [
+        "learnable",
+        "near_impossible",
+        "unbanded",
+    ]
+    assert [sample.difficulty_band_source for sample in batch] == [
+        "instance_id_family:exact",
+        "instance_id_family:prefix",
+        "instance_id_family:default",
+    ]
+    assert batch[0].raw["difficulty_band"] == "learnable"
+    assert batch[1].raw["task_family"] == "func_pm_ctrl_shuffle"
+
+
 def test_load_task_batch_wraps_partitioned_batches_when_heldout_split_is_smaller_than_batch() -> None:
     rows = [
         {
@@ -218,6 +291,28 @@ def test_load_task_batch_wraps_partitioned_batches_when_heldout_split_is_smaller
 
     assert len(eval_batch) == 3
     assert len({sample.task_id for sample in eval_batch}) == 1
+
+
+def test_build_sdpo_task_rows_carries_difficulty_tags() -> None:
+    rows = [
+        {
+            "instance_id": "repo.sha.combine_file__0001",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        }
+    ]
+
+    task_rows = build_sdpo_task_rows(
+        config=_banded_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+    )
+
+    assert task_rows[0]["task_family"] == "combine_file"
+    assert task_rows[0]["difficulty_band"] == "near_impossible"
+    assert task_rows[0]["difficulty_band_source"] == "instance_id_family:exact"
+    assert task_rows[0]["reward_model"]["ground_truth"]["difficulty_band"] == "near_impossible"
 
 
 def test_load_task_batch_allows_empty_eval_partition_when_holdout_resolves_to_zero_rows() -> None:

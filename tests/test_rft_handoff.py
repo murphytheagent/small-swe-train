@@ -52,6 +52,9 @@ def test_merge_rollout_and_preprocessed_rows_preserves_verifier_metadata() -> No
                 "verifier_kind": "go_test",
                 "fail_to_pass": ["TestBug"],
                 "pass_to_pass": ["TestRegression"],
+                "task_family": "func_basic",
+                "difficulty_band": "learnable",
+                "difficulty_band_source": "instance_id_family:exact",
                 "infra_invalid": True,
                 "invalid_reason": "verifier_crash",
                 "hit_generation_cap": True,
@@ -72,9 +75,38 @@ def test_merge_rollout_and_preprocessed_rows_preserves_verifier_metadata() -> No
     )
 
     assert merged[0]["verifier_kind"] == "go_test"
+    assert merged[0]["task_family"] == "func_basic"
+    assert merged[0]["difficulty_band"] == "learnable"
+    assert merged[0]["difficulty_band_source"] == "instance_id_family:exact"
     assert merged[0]["infra_invalid"] is True
     assert merged[0]["invalid_reason"] == "verifier_crash"
     assert merged[0]["hit_generation_cap"] is True
+
+
+def test_build_verl_sft_batch_carries_difficulty_tags_in_grouping_metadata() -> None:
+    batch = build_verl_sft_batch(
+        [
+            {
+                "task_id": "task-1",
+                "task_family": "func_basic",
+                "difficulty_band": "learnable",
+                "difficulty_band_source": "instance_id_family:exact",
+                "attempt_index": 0,
+                "step_index": 0,
+                "turn_index": 0,
+                "input_ids": [1, 2, 3],
+                "action_mask_rft": [1, 1, 1],
+                "token_labels": ["a", "b", "c"],
+            }
+        ],
+        handoff_settings=resolve_rft_handoff_settings(),
+    )
+
+    assert batch["grouping_metadata"]["task_family"] == ["func_basic"]
+    assert batch["grouping_metadata"]["difficulty_band"] == ["learnable"]
+    assert batch["grouping_metadata"]["difficulty_band_source"] == [
+        "instance_id_family:exact"
+    ]
 
 
 def test_build_verl_sft_batch_rejects_rows_above_handoff_length() -> None:

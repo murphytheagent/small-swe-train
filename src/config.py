@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import functools
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -46,12 +46,23 @@ class OnPolicyDatasetColumns:
 
 
 @dataclass(frozen=True)
+class OnPolicyDifficultyBandConfig:
+    strategy: str = "none"
+    default_band: str = "unbanded"
+    family_band_exact: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    family_band_prefix: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class OnPolicyDataConfig:
     dataset_id: str
     dataset_split: str
     columns: OnPolicyDatasetColumns
     patch_is_bug_introducing: bool = True
     verifier_kind: str = "pytest"
+    difficulty_banding: OnPolicyDifficultyBandConfig = field(
+        default_factory=OnPolicyDifficultyBandConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -362,6 +373,24 @@ def _coerce_non_negative_int(value: Any, *, label: str) -> int:
     return value
 
 
+def _coerce_non_empty_string_pairs(
+    value: Any,
+    *,
+    label: str,
+) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a mapping of non-empty strings.")
+
+    items: list[tuple[str, str]] = []
+    for raw_key, raw_mapped_value in value.items():
+        key = _coerce_non_empty_str(raw_key, label=f"{label}.key")
+        mapped_value = _coerce_non_empty_str(raw_mapped_value, label=f"{label}.{key}")
+        items.append((key, mapped_value))
+    return tuple(items)
+
+
 def _parse_on_policy_data_config(payload: Mapping[str, Any]) -> OnPolicyDataConfig:
     dataset_id = _coerce_non_empty_str(payload.get("dataset_id"), label="on_policy.data.dataset_id")
     dataset_split = _coerce_non_empty_str(
@@ -400,6 +429,9 @@ def _parse_on_policy_data_config(payload: Mapping[str, Any]) -> OnPolicyDataConf
         verifier_kind=normalize_verifier_kind(
             payload.get("verifier_kind", "pytest"),
             label="on_policy.data.verifier_kind",
+        ),
+        difficulty_banding=_parse_on_policy_difficulty_band_config(
+            payload.get("difficulty_banding")
         ),
     )
 
@@ -489,9 +521,54 @@ def _merge_on_policy_data_payload(
             columns = dict(merged["columns"])
             columns.update(value)
             merged["columns"] = columns
+        elif (
+            key == "difficulty_banding"
+            and isinstance(value, Mapping)
+            and isinstance(merged.get("difficulty_banding"), Mapping)
+        ):
+            banding = dict(merged["difficulty_banding"])
+            banding.update(value)
+            merged["difficulty_banding"] = banding
         else:
             merged[key] = value
     return merged
+
+
+def _parse_on_policy_difficulty_band_config(
+    payload: Any,
+) -> OnPolicyDifficultyBandConfig:
+    if payload is None:
+        return OnPolicyDifficultyBandConfig()
+
+    banding_payload = _require_mapping(
+        payload,
+        label="on_policy.data.difficulty_banding",
+    )
+    strategy = _coerce_non_empty_str(
+        banding_payload.get("strategy", "none"),
+        label="on_policy.data.difficulty_banding.strategy",
+    )
+    if strategy not in {"none", "instance_id_family"}:
+        raise ValueError(
+            "on_policy.data.difficulty_banding.strategy must be one of: "
+            "'none', 'instance_id_family'."
+        )
+
+    return OnPolicyDifficultyBandConfig(
+        strategy=strategy,
+        default_band=_coerce_non_empty_str(
+            banding_payload.get("default_band", "unbanded"),
+            label="on_policy.data.difficulty_banding.default_band",
+        ),
+        family_band_exact=_coerce_non_empty_string_pairs(
+            banding_payload.get("family_band_exact", {}),
+            label="on_policy.data.difficulty_banding.family_band_exact",
+        ),
+        family_band_prefix=_coerce_non_empty_string_pairs(
+            banding_payload.get("family_band_prefix", {}),
+            label="on_policy.data.difficulty_banding.family_band_prefix",
+        ),
+    )
 
 
 def _resolve_on_policy_runtime_scale_defaults() -> dict[str, int]:

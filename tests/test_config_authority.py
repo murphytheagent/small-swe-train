@@ -261,6 +261,10 @@ def test_on_policy_data_defaults_load_from_configs_data() -> None:
     assert str(data_defaults["dataset_id"]).strip()
     assert data_defaults["patch_is_bug_introducing"] is True
     assert data_defaults["verifier_kind"] == "pytest"
+    difficulty_banding = data_defaults.get("difficulty_banding")
+    assert isinstance(difficulty_banding, Mapping)
+    assert difficulty_banding["strategy"] == "instance_id_family"
+    assert difficulty_banding["default_band"] == "unbanded"
     columns = data_defaults.get("columns")
     assert isinstance(columns, Mapping)
     for key in ("image_name", "problem_statement", "fail_to_pass", "pass_to_pass"):
@@ -300,6 +304,9 @@ def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     assert settings.data.dataset_id == data_defaults["dataset_id"]
     assert settings.data.patch_is_bug_introducing is True
     assert settings.data.verifier_kind == "pytest"
+    assert settings.data.difficulty_banding.strategy == "instance_id_family"
+    assert ("func_basic", "learnable") in settings.data.difficulty_banding.family_band_exact
+    assert ("func_pm_", "near_impossible") in settings.data.difficulty_banding.family_band_prefix
     assert settings.runtime.task_batch_size == loop_defaults["task_batch_size"]
     assert settings.runtime.attempts_per_task == loop_defaults["samples_per_task"]
     assert settings.runtime.env_pool_size == settings.runtime.task_batch_size

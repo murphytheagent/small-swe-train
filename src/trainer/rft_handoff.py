@@ -221,6 +221,9 @@ def merge_rollout_and_preprocessed_rows(
             {
                 "stage": rollout_row.get("stage", preprocessed_row.get("stage", "format_rft")),
                 "task_id": task_id,
+                "task_family": rollout_row.get("task_family", ""),
+                "difficulty_band": rollout_row.get("difficulty_band", "unbanded"),
+                "difficulty_band_source": rollout_row.get("difficulty_band_source", "none"),
                 "attempt_index": rollout_row.get("attempt_index", 0),
                 "turn_index": rollout_row.get("turn_index", 0),
                 "step_index": rollout_row.get("step_index", 0),
@@ -379,6 +382,11 @@ def build_verl_sft_batch(
                 "attempt_index": attempt_index,
                 "step_index": _coerce_int(row.get("step_index"), fallback=index),
                 "turn_index": _coerce_int(row.get("turn_index"), fallback=0),
+                "task_family": str(row.get("task_family", "")).strip(),
+                "difficulty_band": str(row.get("difficulty_band", "unbanded")).strip()
+                or "unbanded",
+                "difficulty_band_source": str(row.get("difficulty_band_source", "none")).strip()
+                or "none",
                 "resolved": _coerce_bool(row.get("resolved"), fallback=False),
                 "is_terminal": _coerce_bool(row.get("is_terminal"), fallback=False),
                 "format_valid": _coerce_bool(row.get("format_valid"), fallback=False),
@@ -396,6 +404,9 @@ def build_verl_sft_batch(
     attempt_indexes: list[int] = []
     step_indexes: list[int] = []
     turn_indexes: list[int] = []
+    task_families: list[str] = []
+    difficulty_bands: list[str] = []
+    difficulty_band_sources: list[str] = []
     resolved_flags: list[bool] = []
     terminal_flags: list[bool] = []
     format_valid_flags: list[bool] = []
@@ -413,6 +424,9 @@ def build_verl_sft_batch(
         attempt_indexes.append(row["attempt_index"])
         step_indexes.append(row["step_index"])
         turn_indexes.append(row["turn_index"])
+        task_families.append(row["task_family"])
+        difficulty_bands.append(row["difficulty_band"])
+        difficulty_band_sources.append(row["difficulty_band_source"])
         resolved_flags.append(row["resolved"])
         terminal_flags.append(row["is_terminal"])
         format_valid_flags.append(row["format_valid"])
@@ -430,6 +444,9 @@ def build_verl_sft_batch(
             "attempt_index": attempt_indexes,
             "step_index": step_indexes,
             "turn_index": turn_indexes,
+            "task_family": task_families,
+            "difficulty_band": difficulty_bands,
+            "difficulty_band_source": difficulty_band_sources,
             "resolved": resolved_flags,
             "is_terminal": terminal_flags,
             "format_valid": format_valid_flags,
@@ -458,6 +475,9 @@ def _build_empty_verl_sft_batch(*, handoff_settings: RFTHandoffSettings) -> dict
             "attempt_index": [],
             "step_index": [],
             "turn_index": [],
+            "task_family": [],
+            "difficulty_band": [],
+            "difficulty_band_source": [],
             "resolved": [],
             "is_terminal": [],
             "format_valid": [],
@@ -732,9 +752,32 @@ def _build_rollout_artifact_summary(
         "rollout_row_count": len(rollout_rows),
         "selected_count": int(selected_count),
         "rejected_count": int(rejected_count),
+        "rollout_task_family_counts": _count_rows_by_text_field(
+            rollout_rows,
+            field_name="task_family",
+            default_label="unknown",
+        ),
+        "rollout_difficulty_band_counts": _count_rows_by_text_field(
+            rollout_rows,
+            field_name="difficulty_band",
+            default_label="unbanded",
+        ),
         "unique_task_ids": unique_task_ids,
         "unique_image_names": unique_image_names,
         "task_image_pairs": task_image_pairs,
         "rows_with_trajectory_steps": rows_with_trajectory_steps,
         "trajectory_step_count": trajectory_step_count,
     }
+
+
+def _count_rows_by_text_field(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    field_name: str,
+    default_label: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        label = str(row.get(field_name, "")).strip() or default_label
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items()))
