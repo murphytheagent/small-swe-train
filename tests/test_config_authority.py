@@ -264,7 +264,7 @@ def test_on_policy_data_defaults_load_from_configs_data() -> None:
     difficulty_banding = data_defaults.get("difficulty_banding")
     assert isinstance(difficulty_banding, Mapping)
     assert difficulty_banding["strategy"] == "instance_id_family"
-    assert difficulty_banding["default_band"] == "unbanded"
+    assert difficulty_banding["default_band"] == "near_impossible"
     columns = data_defaults.get("columns")
     assert isinstance(columns, Mapping)
     for key in ("image_name", "problem_statement", "fail_to_pass", "pass_to_pass"):

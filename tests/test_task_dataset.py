@@ -47,7 +47,7 @@ def _banded_config() -> OnPolicyDataConfig:
         ),
         difficulty_banding=OnPolicyDifficultyBandConfig(
             strategy="instance_id_family",
-            default_band="unbanded",
+            default_band="near_impossible",
             family_band_exact=(
                 ("func_basic", "learnable"),
                 ("combine_file", "near_impossible"),
@@ -256,7 +256,7 @@ def test_load_task_batch_attaches_difficulty_tags_from_instance_family_rules() -
     assert [sample.difficulty_band for sample in batch] == [
         "learnable",
         "near_impossible",
-        "unbanded",
+        "near_impossible",
     ]
     assert [sample.difficulty_band_source for sample in batch] == [
         "instance_id_family:exact",

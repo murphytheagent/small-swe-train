@@ -4,7 +4,7 @@ patch_is_bug_introducing: true
 verifier_kind: pytest
 difficulty_banding:
   strategy: instance_id_family
-  default_band: unbanded
+  default_band: near_impossible
   family_band_exact:
     combine_file: near_impossible
     func_basic: learnable
