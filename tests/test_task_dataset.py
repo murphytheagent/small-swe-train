@@ -295,7 +295,9 @@ def test_load_task_batch_skips_invalid_rows_when_collecting_batch() -> None:
         dataset_loader=lambda _dataset_id, _split: rows,
     )
 
-    assert [sample.task_id for sample in batch] == ["task-0", "task-2"]
+    assert [sample.task_id for sample in batch] == ["task-0", "task-1"]
+    assert batch[1].raw["prompt_source"] == "target_preview_fallback"
+    assert "Verifier target preview" in batch[1].problem_statement
 
 
 def test_load_task_batch_errors_when_not_enough_valid_rows() -> None:
@@ -303,8 +305,8 @@ def test_load_task_batch_errors_when_not_enough_valid_rows() -> None:
         {
             "task_id": "task-0",
             "image_name": "img:0",
-            "problem_statement": "",
-            "FAIL_TO_PASS": ["a"],
+            "problem_statement": "broken row",
+            "FAIL_TO_PASS": [],
             "PASS_TO_PASS": ["b"],
         }
     ]
@@ -473,7 +475,7 @@ def test_build_sdpo_task_rows_uses_full_split_with_prompt_metadata() -> None:
         dataset_loader=lambda _dataset_id, _split: rows,
     )
 
-    assert [row["task_id"] for row in sdpo_rows] == ["task-0", "task-2"]
+    assert [row["task_id"] for row in sdpo_rows] == ["task-0", "task-1", "task-2"]
     expected_prompt = build_onpolicy_initial_user_message(
         problem_statement="fix bug 0",
     )
@@ -483,6 +485,7 @@ def test_build_sdpo_task_rows_uses_full_split_with_prompt_metadata() -> None:
     assert sdpo_rows[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
     assert sdpo_rows[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
     assert sdpo_rows[0]["reward_model"]["ground_truth"]["data_source"] == "dummy/dataset"
+    assert "Verifier target preview" in sdpo_rows[1]["prompt"][0]["content"]
 
 
 def test_build_sdpo_task_rows_skips_rows_marked_bad_in_cache(
@@ -838,3 +841,143 @@ def test_resolve_sdpo_task_split_cache_paths_include_prompt_length_filter(tmp_pa
 
     assert train_default != train_relaxed
     assert val_default != val_relaxed
+
+
+def test_load_task_batch_rejects_duplicate_targets_within_group() -> None:
+    rows = [
+        {
+            "task_id": "task-0",
+            "image_name": "img:0",
+            "problem_statement": "Fix duplicates",
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_fix", "tests/test_bug.py::test_fix"],
+            "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="Collected 0 valid rows"):
+        load_task_batch(
+            step_index=0,
+            batch_size=1,
+            config=_config(),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )
+
+
+def test_load_task_batch_rejects_fail_pass_overlap() -> None:
+    rows = [
+        {
+            "task_id": "task-0",
+            "image_name": "img:0",
+            "problem_statement": "Fix overlap",
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_fix"],
+            "PASS_TO_PASS": ["tests/test_bug.py::test_fix"],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="Collected 0 valid rows"):
+        load_task_batch(
+            step_index=0,
+            batch_size=1,
+            config=_config(),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )
+
+
+def test_load_task_batch_builds_bounded_prompt_fallback_when_problem_statement_missing() -> None:
+    rows = [
+        {
+            "task_id": "task-0",
+            "image_name": "img:0",
+            "problem_statement": "",
+            "FAIL_TO_PASS": ["TestBug"],
+            "PASS_TO_PASS": [
+                "TestRegressionA",
+                "TestRegressionB",
+                "TestRegressionC",
+                "TestRegressionD",
+                "TestRegressionE",
+            ],
+        }
+    ]
+    config = OnPolicyDataConfig(
+        dataset_id="dummy/go",
+        dataset_split="train",
+        columns=OnPolicyDatasetColumns(
+            image_name="image_name",
+            problem_statement="problem_statement",
+            fail_to_pass="FAIL_TO_PASS",
+            pass_to_pass="PASS_TO_PASS",
+        ),
+        verifier_kind="go_test",
+    )
+
+    batch = load_task_batch(
+        step_index=0,
+        batch_size=1,
+        config=config,
+        dataset_loader=lambda _dataset_id, _split: rows,
+    )
+
+    assert len(batch) == 1
+    prompt = batch[0].problem_statement
+    assert "Resolve the failing Go tests for this task." in prompt
+    assert "FAIL_TO_PASS (1): TestBug" in prompt
+    assert "PASS_TO_PASS (5): TestRegressionA, TestRegressionB, TestRegressionC, TestRegressionD, ... (+1 more)" in prompt
+
+
+def test_load_task_pool_dedupes_duplicate_logical_tasks_with_accounting() -> None:
+    rows = [
+        {
+            "task_id": "task-0",
+            "image_name": "img:0",
+            "problem_statement": "Fix duplicate",
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_fix"],
+            "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
+        },
+        {
+            "task_id": "task-1",
+            "image_name": "img:1",
+            "problem_statement": "Fix duplicate",
+            "FAIL_TO_PASS": ["tests/test_bug.py::test_fix"],
+            "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
+        },
+    ]
+
+    pool = dataset_module._load_task_pool(
+        config=_config(),
+        dataset_loader=lambda _dataset_id, _split: rows,
+    )
+
+    assert [task.task_id for task in pool.tasks] == ["task-0"]
+    assert pool.filtered_counts["duplicate_logical_task"] == 1
+    assert pool.filtered_task_ids["duplicate_logical_task"] == ("task-1",)
+
+
+def test_build_sdpo_task_rows_preserves_verifier_kind_in_reward_ground_truth() -> None:
+    config = OnPolicyDataConfig(
+        dataset_id="dummy/go",
+        dataset_split="train",
+        columns=OnPolicyDatasetColumns(
+            image_name="image_name",
+            problem_statement="problem_statement",
+            fail_to_pass="FAIL_TO_PASS",
+            pass_to_pass="PASS_TO_PASS",
+        ),
+        verifier_kind="go_test",
+    )
+
+    rows = build_sdpo_task_rows(
+        config=config,
+        dataset_loader=lambda _dataset_id, _split: [
+            {
+                "task_id": "task-0",
+                "image_name": "img:0",
+                "problem_statement": "",
+                "FAIL_TO_PASS": ["TestBug"],
+                "PASS_TO_PASS": ["TestRegression"],
+            }
+        ],
+    )
+
+    assert rows[0]["verifier_kind"] == "go_test"
+    assert rows[0]["reward_model"]["ground_truth"]["verifier_kind"] == "go_test"

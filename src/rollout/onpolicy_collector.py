@@ -144,12 +144,14 @@ def _verify_terminal_submission(
             pass_to_pass=task.pass_to_pass,
             verifier_timeout_sec=verifier_timeout_sec,
             final_response=final_response,
+            verifier_kind=task.verifier_kind,
         )
     except Exception as exc:  # pragma: no cover - defensive runtime fallback
         return {
             "submission_final_response": str(final_response),
             "fail_to_pass": list(task.fail_to_pass),
             "pass_to_pass": list(task.pass_to_pass),
+            "verifier_kind": task.verifier_kind,
             "fail_to_pass_results": {},
             "pass_to_pass_results": {},
             "fail_to_pass_failures": {},
@@ -159,6 +161,8 @@ def _verify_terminal_submission(
             "fail_to_pass_verified": False,
             "pass_to_pass_verified": False,
             "verification_missing": False,
+            "infra_invalid": True,
+            "invalid_reason": "verifier_crash",
             "verification_error": f"terminal verifier execution failed: {exc}",
             "verification_feedback": "",
             "resolved": False,
@@ -335,16 +339,21 @@ class OnPolicyRolloutCollector:
         verification_metadata: dict[str, Any] | None = None
         last_submit_response = ""
 
+        expected_task_patch = _task_patch(
+            task,
+            patch_is_bug_introducing=self._settings.data.patch_is_bug_introducing,
+        )
         init_failure = self._initialize_task_environment(
             task=task,
             executor=executor,
             runtime=runtime,
+            task_patch=expected_task_patch,
         )
         if init_failure is not None:
             container_init_succeeded = False
             executor_error = init_failure
             turn_index = 0
-        elif _task_patch(task) is not None:
+        elif expected_task_patch is not None:
             task_patch_applied = True
 
         for turn_index in range(runtime.max_turns_per_attempt):
@@ -487,6 +496,7 @@ class OnPolicyRolloutCollector:
             "assistant_response": row_assistant_response,
             "tool_output": tool_output,
             "resolved": bool(resolved),
+            "verifier_kind": task.verifier_kind,
             "fail_to_pass": task.fail_to_pass,
             "pass_to_pass": task.pass_to_pass,
             "step_index": row_step_index,
@@ -533,6 +543,9 @@ class OnPolicyRolloutCollector:
             row["exit_code"] = exit_code
         if task_patch_applied:
             row["task_patch_applied"] = True
+        if not container_init_succeeded:
+            row["infra_invalid"] = True
+            row["invalid_reason"] = "patch_apply_failure" if expected_task_patch is not None else "env_init_failure"
         if isinstance(verification_metadata, dict):
             row.update(dict(verification_metadata))
 
@@ -544,16 +557,16 @@ class OnPolicyRolloutCollector:
         task: TaskSample,
         executor: ToolExecutorLike,
         runtime: OnPolicyRuntimeConfig,
+        task_patch: str | None,
     ) -> str | None:
-        patch = _task_patch(task)
-        if patch is None:
+        if task_patch is None:
             return None
 
         init_request = ToolRequest(
             tool="bash",
             args={
                 "command": _build_patch_apply_command(),
-                "stdin": patch,
+                "stdin": task_patch,
                 "timeout_sec": runtime.tool_timeout_sec,
             },
         )
@@ -639,7 +652,9 @@ def _stable_unique_strings(values: Sequence[str]) -> list[str]:
     return unique
 
 
-def _task_patch(task: TaskSample) -> str | None:
+def _task_patch(task: TaskSample, *, patch_is_bug_introducing: bool) -> str | None:
+    if not patch_is_bug_introducing:
+        return None
     raw_patch = task.raw.get("patch")
     if not isinstance(raw_patch, str):
         return None

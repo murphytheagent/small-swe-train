@@ -21,7 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from config import resolve_rft_collector_max_in_flight_default
+from config import resolve_rft_collector_max_in_flight_default, resolve_rft_handoff_settings
 from trainer.rft_multiturn_dataset import (
     build_multiturn_messages,
     write_selected_rows_to_multiturn_parquet,
@@ -823,13 +823,17 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 selected_rows=train_selected_rows,
                 tokenizer=tokenizer,
             )
+            effective_keep_budget = min(
+                trainer_data_max_length,
+                resolve_rft_handoff_settings(overrides=stage_handoff_overrides).max_sequence_length,
+            )
             (
                 train_selected_rows,
                 selected_rows_over_max_length_dropped,
             ) = filter_selected_rows_by_token_length(
                 selected_rows=train_selected_rows,
                 tokenizer=tokenizer,
-                max_sequence_length=trainer_data_max_length,
+                max_sequence_length=effective_keep_budget,
             )
             selected_count_after_max_length_filter = len(train_selected_rows)
             avg_generation_length = compute_average_generation_length(
@@ -897,7 +901,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 ) = filter_selected_rows_by_token_length(
                     selected_rows=eval_selected_rows,
                     tokenizer=tokenizer,
-                    max_sequence_length=trainer_data_max_length,
+                    max_sequence_length=effective_keep_budget,
                 )
                 eval_selected_count_after_length_filter = len(eval_selected_rows)
 
@@ -2480,7 +2484,10 @@ def filter_selected_rows_by_token_length(
         if token_count > max_sequence_length:
             dropped_count += 1
             continue
-        kept_rows.append(row)
+        annotated_row = dict(row)
+        annotated_row["selected_token_count"] = int(token_count)
+        annotated_row["selected_over_budget"] = False
+        kept_rows.append(annotated_row)
 
     return kept_rows, dropped_count
 

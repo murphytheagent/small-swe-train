@@ -106,6 +106,7 @@ def test_build_task_sample_resolves_verifier_targets_from_reward_ground_truth() 
 
     assert sample.fail_to_pass == ["tests/test_bug.py::test_bugfix"]
     assert sample.pass_to_pass == ["tests/test_ok.py::test_regression"]
+    assert sample.verifier_kind == "pytest"
 
 
 def test_build_task_sample_prefers_explicit_targets_over_reward_ground_truth() -> None:
@@ -132,12 +133,36 @@ def test_build_task_sample_prefers_explicit_targets_over_reward_ground_truth() -
     assert sample.pass_to_pass == ["tests/test_ok.py::test_explicit_regression"]
 
 
+def test_build_task_sample_resolves_verifier_kind_from_reward_ground_truth() -> None:
+    sample = _build_task_sample(
+        task_context=BridgeLoopTaskContext(
+            task_id="task-17",
+            image_name="sweb.eval.x86_64",
+            prompt_text="Fix tests.",
+            patch=None,
+        ),
+        raw_kwargs={
+            "reward_model": {
+                "ground_truth": {
+                    "FAIL_TO_PASS": ["TestBug"],
+                    "PASS_TO_PASS": ["TestRegression"],
+                    "verifier_kind": "go_test",
+                }
+            }
+        },
+    )
+
+    assert sample.verifier_kind == "go_test"
+
+
 def test_verification_extra_fields_schema_stable_without_metadata() -> None:
     fields = _initial_verification_extra_fields(
         fail_to_pass=["tests/test_bug.py::test_bugfix"],
         pass_to_pass=["tests/test_ok.py::test_regression"],
+        verifier_kind="pytest",
     )
 
+    assert fields["verifier_kind"] == "pytest"
     assert fields["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
     assert fields["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
     assert fields["verification_feedback"] == ""
@@ -157,6 +182,7 @@ def test_apply_verification_metadata_preserves_schema_and_overrides_values() -> 
     fields = _initial_verification_extra_fields(
         fail_to_pass=["tests/test_bug.py::test_bugfix"],
         pass_to_pass=["tests/test_ok.py::test_regression"],
+        verifier_kind="pytest",
     )
     baseline_keys = set(fields.keys())
 
@@ -180,6 +206,8 @@ def test_apply_verification_metadata_preserves_schema_and_overrides_values() -> 
             "fail_to_pass_verified": True,
             "pass_to_pass_verified": True,
             "verification_missing": False,
+            "infra_invalid": True,
+            "invalid_reason": "verifier_crash",
             "verification_error": "",
             "submission_final_response": "done",
             "resolved": True,
@@ -192,6 +220,8 @@ def test_apply_verification_metadata_preserves_schema_and_overrides_values() -> 
     assert fields["pass_to_pass_failures"]["tests/test_ok.py::test_regression"]["returncode"] == 1
     assert fields["verification_feedback"] == "all tests passed"
     assert fields["verification_missing"] is False
+    assert fields["infra_invalid"] is True
+    assert fields["invalid_reason"] == "verifier_crash"
     assert fields["resolved"] is True
 
 
@@ -510,6 +540,9 @@ def test_container_slot_gate_enforces_capacity_across_processes(
     child_env = dict(os.environ)
     child_env["SMALL_SWE_GLOBAL_ENV_POOL_NAMESPACE"] = namespace
     child_env["SMALL_SWE_GLOBAL_ENV_POOL_DIR"] = str(tmp_path)
+    repo_src = str(Path(__file__).resolve().parents[1] / "src")
+    existing_pythonpath = child_env.get("PYTHONPATH", "")
+    child_env["PYTHONPATH"] = repo_src if not existing_pythonpath else repo_src + os.pathsep + existing_pythonpath
     child_code = """
 import time
 from pathlib import Path

@@ -72,6 +72,7 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
             "format_valid": True,
             "final_turn_has_submit": True,
             "final_submit_format_valid": True,
+            "verifier_kind": "go_test",
             "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
             "pass_to_pass": ["tests/test_ok.py::test_regression"],
         }
@@ -87,6 +88,7 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
     assert records[0]["data_source"] == "small_swe_phase_d"
     assert records[0]["reward_model"]["ground_truth"]["task_id"] == "task-1"
     assert records[0]["reward_model"]["ground_truth"]["resolved"] is True
+    assert records[0]["reward_model"]["ground_truth"]["verifier_kind"] == "go_test"
     assert records[0]["reward_model"]["ground_truth"]["fail_to_pass"] == [
         "tests/test_bug.py::test_bugfix"
     ]
@@ -95,6 +97,7 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
     ]
     assert records[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
     assert records[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
+    assert records[0]["verifier_kind"] == "go_test"
     assert records[0]["messages"][0]["role"] == "user"
     assert records[0]["messages"][-1]["role"] == "assistant"
     prompt_block = records[0]["prompt"][0]

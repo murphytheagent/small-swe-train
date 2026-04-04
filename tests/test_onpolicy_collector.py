@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import os
+from pathlib import Path
+import shutil
+import subprocess
 import threading
 import time
+
+import pytest
 
 from config import (
     OnPolicyDataConfig,
@@ -16,6 +22,8 @@ from env.runtime_protocol import ToolRequest, ToolResponse
 from env.task_dataset import TaskSample
 import rollout.onpolicy_collector as onpolicy_collector_module
 from rollout.onpolicy_collector import OnPolicyRolloutCollector
+from trainer.rft_multiturn_dataset import build_multiturn_dataset_records
+from verl_integration.reward_function import reward_fn
 
 
 class _FakePool:
@@ -95,6 +103,36 @@ class _FakeExecutor:
     def run(self, request: ToolRequest) -> ToolResponse:
         self.requests.append(request)
         return ToolResponse(stdout=f"ran:{request.tool}", stderr="", exit_code=0)
+
+
+class _LocalRepoExecutor:
+    def __init__(self, repo_root: Path) -> None:
+        self.repo_root = repo_root
+        self.requests: list[ToolRequest] = []
+
+    def run(self, request: ToolRequest) -> ToolResponse:
+        self.requests.append(request)
+        if request.tool != "bash":
+            raise AssertionError(f"Unsupported local test tool: {request.tool}")
+        completed = subprocess.run(
+            ["bash", "-lc", str(request.args["command"])],
+            cwd=self.repo_root,
+            input=str(request.args.get("stdin", "")),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=int(request.args.get("timeout_sec", 30)),
+            env={
+                **os.environ,
+                "TASK_REPO_ROOT": str(self.repo_root),
+                "SMALL_SWE_REPO_ROOT": str(self.repo_root),
+            },
+        )
+        return ToolResponse(
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.returncode,
+        )
 
 
 class _FailingInitExecutor:
@@ -648,6 +686,189 @@ def test_onpolicy_collector_applies_task_patch_before_rollout_turns() -> None:
     assert rows[0]["task_patch_applied"] is True
     assert rows[0]["container_init_succeeded"] is True
     assert rows[0]["batch_container_count"] == 1
+
+
+def test_onpolicy_collector_skips_patch_when_dataset_patch_is_not_bug_introducing() -> None:
+    settings = _settings()
+    settings = OnPolicySettings(
+        data=OnPolicyDataConfig(
+            dataset_id=settings.data.dataset_id,
+            dataset_split=settings.data.dataset_split,
+            columns=settings.data.columns,
+            patch_is_bug_introducing=False,
+            verifier_kind=settings.data.verifier_kind,
+        ),
+        runtime=settings.runtime,
+    )
+    pool = _FakePool()
+    executor = _FakeExecutor()
+
+    collector = OnPolicyRolloutCollector(
+        settings=settings,
+        turn_generator=lambda **_kwargs: '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
+        dataset_loader=lambda _dataset_id, _split: [
+            {
+                "task_id": "task-1",
+                "image_name": "img:1",
+                "problem_statement": "Fix patch flow",
+                "patch": "diff --git a/a.txt b/a.txt\n",
+                "FAIL_TO_PASS": ["tests/test_bug.py::test_bugfix"],
+                "PASS_TO_PASS": ["tests/test_ok.py::test_regression"],
+            }
+        ],
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+        attempt_resolver=lambda _task, _attempt, is_terminal, _steps: is_terminal,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    assert rows[0]["resolved"] is True
+    assert rows[0]["container_init_succeeded"] is True
+    assert "task_patch_applied" not in rows[0]
+    assert executor.requests == []
+
+
+def test_onpolicy_collector_go_smoke_covers_patch_verifier_reward_and_handoff(tmp_path: Path) -> None:
+    if shutil.which("git") is None or shutil.which("go") is None or shutil.which("patch") is None:
+        pytest.skip("git/go/patch tools unavailable")
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "go.mod").write_text("module example.com/sample\n\ngo 1.20\n", encoding="utf-8")
+    good_source = "\n".join(
+        [
+            "package sample",
+            "",
+            "func add(a, b int) int { return a + b }",
+        ]
+    ) + "\n"
+    buggy_source = good_source.replace("return a + b", "return a - b")
+    (repo_root / "calc.go").write_text(good_source, encoding="utf-8")
+    (repo_root / "calc_test.go").write_text(
+        "\n".join(
+            [
+                "package sample",
+                "",
+                'import "testing"',
+                "",
+                "func TestBug(t *testing.T) {",
+                "    if got := add(2, 2); got != 4 {",
+                '        t.Fatalf("want 4, got %d", got)',
+                "    }",
+                "}",
+                "",
+                "func TestRegression(t *testing.T) {",
+                "    if got := add(5, 3); got != 8 {",
+                '        t.Fatalf("want 8, got %d", got)',
+                "    }",
+                "}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=repo_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo_root / "calc.go").write_text(buggy_source, encoding="utf-8")
+    patch_text = subprocess.run(
+        ["git", "diff", "--", "calc.go"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    (repo_root / "calc.go").write_text(good_source, encoding="utf-8")
+
+    settings = _settings()
+    settings = OnPolicySettings(
+        data=OnPolicyDataConfig(
+            dataset_id="dummy/go",
+            dataset_split="train",
+            columns=settings.data.columns,
+            patch_is_bug_introducing=True,
+            verifier_kind="go_test",
+        ),
+        runtime=replace(
+            settings.runtime,
+            verify_submissions=True,
+            verifier_timeout_sec=60,
+        ),
+    )
+    pool = _FakePool()
+    executor = _LocalRepoExecutor(repo_root)
+    fix_command = (
+        "python3 - <<'PY'\n"
+        "from pathlib import Path\n"
+        "path = Path('calc.go')\n"
+        "path.write_text(path.read_text(encoding='utf-8').replace('return a - b', 'return a + b'), encoding='utf-8')\n"
+        "PY"
+    )
+
+    def turn_generator(**kwargs: object) -> str:
+        turn_index = int(kwargs["turn_index"])
+        if turn_index == 0:
+            return f'<tool_call>{{"tool":"bash","args":{{"command":{fix_command!r}}}}}</tool_call>'
+        return '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+
+    collector = OnPolicyRolloutCollector(
+        settings=settings,
+        turn_generator=turn_generator,
+        dataset_loader=lambda _dataset_id, _split: [
+            {
+                "task_id": "task-go-1",
+                "image_name": "img:go",
+                "problem_statement": "",
+                "patch": patch_text,
+                "FAIL_TO_PASS": ["TestBug"],
+                "PASS_TO_PASS": ["TestRegression"],
+            }
+        ],
+        pool_factory=lambda _runtime: pool,
+        executor_factory=lambda _handle, _runtime: executor,
+    )
+
+    rows = collector.collect_step(0)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["resolved"] is True
+    assert row["task_patch_applied"] is True
+    assert row["container_init_succeeded"] is True
+    assert row["verifier_kind"] == "go_test"
+    assert row["fail_to_pass_results"] == {"TestBug": True}
+    assert row["pass_to_pass_results"] == {"TestRegression": True}
+
+    rewards, info = reward_fn(rows)
+    assert rewards == [1.0]
+    assert info["resolved_source"] == ["verifiable_tests"]
+    assert info["verifier_status"] == ["correct"]
+
+    records = build_multiturn_dataset_records(rows)
+    assert records[0]["verifier_kind"] == "go_test"
+    assert records[0]["reward_model"]["ground_truth"]["verifier_kind"] == "go_test"
 
 
 def test_onpolicy_collector_retries_task_patch_init_once_on_transient_executor_error() -> None:

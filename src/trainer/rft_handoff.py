@@ -121,6 +121,13 @@ def collect_rft_sft_batch_for_steps(
             selection_policy=handoff_settings.selection,
         )
         if selected_rows:
+            selected_rows, overlength_selected_rows = _partition_rows_by_handoff_length(
+                selected_rows,
+                padded_limit=handoff_settings.max_sequence_length,
+            )
+            if overlength_selected_rows:
+                rejected_rows = [*rejected_rows, *overlength_selected_rows]
+        if selected_rows:
             sft_batch = build_verl_sft_batch(
                 selected_rows,
                 handoff_settings=handoff_settings,
@@ -218,6 +225,7 @@ def merge_rollout_and_preprocessed_rows(
                 "turn_index": rollout_row.get("turn_index", 0),
                 "step_index": rollout_row.get("step_index", 0),
                 "resolved": rollout_row.get("resolved", False),
+                "verifier_kind": rollout_row.get("verifier_kind", "pytest"),
                 "fail_to_pass": fail_to_pass,
                 "pass_to_pass": pass_to_pass,
                 "is_terminal": rollout_row.get("is_terminal", False),
@@ -225,6 +233,9 @@ def merge_rollout_and_preprocessed_rows(
                 "bridge_error": rollout_row.get("bridge_error", ""),
                 "timeout_error": rollout_row.get("timeout_error", ""),
                 "executor_error": rollout_row.get("executor_error", ""),
+                "infra_invalid": rollout_row.get("infra_invalid", False),
+                "invalid_reason": rollout_row.get("invalid_reason", ""),
+                "hit_generation_cap": rollout_row.get("hit_generation_cap", False),
                 "container_init_succeeded": rollout_row.get("container_init_succeeded", False),
                 "exit_code": rollout_row.get("exit_code"),
                 "tool_name": rollout_row.get("tool_name", ""),
@@ -248,6 +259,40 @@ def merge_rollout_and_preprocessed_rows(
         )
         merged_rows.append(merged)
     return merged_rows
+
+
+def _partition_rows_by_handoff_length(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    padded_limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    kept_rows: list[dict[str, Any]] = []
+    rejected_rows: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        input_ids = _coerce_int_sequence(
+            row.get("input_ids"),
+            label=f"rows[{index}].input_ids",
+        )
+        action_mask = _coerce_loss_mask_sequence(
+            row.get("action_mask_rft"),
+            label=f"rows[{index}].action_mask_rft",
+        )
+        token_labels = _coerce_token_labels(
+            row.get("token_labels"),
+            length_hint=len(input_ids),
+        )
+        if (
+            len(input_ids) > padded_limit
+            or len(action_mask) > padded_limit
+            or len(token_labels) > padded_limit
+        ):
+            rejected_row = dict(row)
+            rejected_row["selected_over_budget"] = True
+            rejected_row["rft_rejection_reason"] = "selected_over_handoff_length"
+            rejected_rows.append(rejected_row)
+            continue
+        kept_rows.append(dict(row))
+    return kept_rows, rejected_rows
 
 
 def build_verl_sft_batch(
@@ -285,6 +330,16 @@ def build_verl_sft_batch(
             row.get("token_labels"),
             length_hint=len(input_ids),
         )
+
+        if (
+            len(input_ids) > padded_limit
+            or len(action_mask) > padded_limit
+            or len(token_labels) > padded_limit
+        ):
+            raise ValueError(
+                f"rows[{index}] exceeds rft_handoff.max_sequence_length={padded_limit}; "
+                "selected rows should be filtered before handoff."
+            )
 
         truncated_length = min(len(input_ids), len(action_mask), len(token_labels), padded_limit)
         input_ids = input_ids[:truncated_length]

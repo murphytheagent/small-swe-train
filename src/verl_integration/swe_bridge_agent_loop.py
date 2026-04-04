@@ -23,6 +23,7 @@ from prompts import build_onpolicy_system_prompt, build_sdpo_rollout_followup_us
 from rollout.onpolicy_collector import _build_patch_apply_command
 from verl_integration.env_bridge import run_env_bridge_step
 from verl_integration.submission_verifier import run_submission_verifier
+from verifier_utils import normalize_verifier_kind
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -787,6 +788,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
         final_submit_format_valid = False
         verification_metadata: dict[str, Any] = {}
         final_response_text = ""
+        hit_generation_cap = False
         executor: DockerToolExecutor | None = None
         attempt_budget_started_at: float | None = None
 
@@ -934,6 +936,8 @@ class SWEBridgeAgentLoop(AgentLoopBase):
                 clipped_generated_logprobs = (
                     generated_logprobs[:available_tokens] if generated_logprobs is not None else None
                 )
+                if len(generated_ids) > len(clipped_generated_ids):
+                    hit_generation_cap = True
                 reached_limit = append_response_tokens(
                     full_token_ids=full_token_ids,
                     response_mask=response_mask,
@@ -1219,6 +1223,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             "trajectory_tool_validation_errors": _stable_unique_strings(validation_errors),
             "final_turn_has_submit": final_turn_has_submit,
             "final_submit_format_valid": final_submit_format_valid,
+            "hit_generation_cap": hit_generation_cap,
             "bridge_error": bridge_error,
             "timeout_error": timeout_error,
             "executor_error": "",
@@ -1227,6 +1232,7 @@ class SWEBridgeAgentLoop(AgentLoopBase):
             _initial_verification_extra_fields(
                 fail_to_pass=task_sample.fail_to_pass,
                 pass_to_pass=task_sample.pass_to_pass,
+                verifier_kind=task_sample.verifier_kind,
             )
         )
         _apply_verification_metadata(extra_fields, verification_metadata)
@@ -1260,6 +1266,10 @@ def _build_task_sample(*, task_context: BridgeLoopTaskContext, raw_kwargs: Mappi
             key="pass_to_pass",
         ),
         raw=dict(raw_kwargs),
+        verifier_kind=_resolve_task_sample_verifier_kind(
+            raw_kwargs,
+            reward_ground_truth=reward_ground_truth,
+        ),
     )
 
 
@@ -1267,8 +1277,10 @@ def _initial_verification_extra_fields(
     *,
     fail_to_pass: Sequence[Any] | None,
     pass_to_pass: Sequence[Any] | None,
+    verifier_kind: str,
 ) -> dict[str, Any]:
     return {
+        "verifier_kind": normalize_verifier_kind(verifier_kind),
         "fail_to_pass": _coerce_test_targets(fail_to_pass),
         "pass_to_pass": _coerce_test_targets(pass_to_pass),
         "verification_feedback": "",
@@ -1283,6 +1295,8 @@ def _initial_verification_extra_fields(
         "fail_to_pass_verified": None,
         "pass_to_pass_verified": None,
         "verification_missing": None,
+        "infra_invalid": False,
+        "invalid_reason": "",
         "verification_error": "",
         "submission_final_response": "",
         "resolved": False,
@@ -1297,6 +1311,10 @@ def _apply_verification_metadata(
         return
     extra_fields.update(
         {
+            "verifier_kind": verification_metadata.get(
+                "verifier_kind",
+                extra_fields.get("verifier_kind", "pytest"),
+            ),
             "fail_to_pass": _coerce_test_targets(
                 verification_metadata.get("fail_to_pass", extra_fields.get("fail_to_pass", []))
             ),
@@ -1351,6 +1369,14 @@ def _apply_verification_metadata(
                 "verification_missing",
                 extra_fields.get("verification_missing"),
             ),
+            "infra_invalid": verification_metadata.get(
+                "infra_invalid",
+                extra_fields.get("infra_invalid", False),
+            ),
+            "invalid_reason": verification_metadata.get(
+                "invalid_reason",
+                extra_fields.get("invalid_reason", ""),
+            ),
             "verification_error": verification_metadata.get(
                 "verification_error",
                 extra_fields.get("verification_error", ""),
@@ -1382,10 +1408,12 @@ def _verify_terminal_submission(
             pass_to_pass=task_sample.pass_to_pass,
             verifier_timeout_sec=verifier_timeout_sec,
             final_response=final_response,
+            verifier_kind=task_sample.verifier_kind,
         )
     except Exception as exc:  # pragma: no cover - defensive runtime fallback
         return {
             "submission_final_response": final_response,
+            "verifier_kind": task_sample.verifier_kind,
             "fail_to_pass": _coerce_test_targets(task_sample.fail_to_pass),
             "pass_to_pass": _coerce_test_targets(task_sample.pass_to_pass),
             "fail_to_pass_results": {},
@@ -1397,6 +1425,8 @@ def _verify_terminal_submission(
             "fail_to_pass_verified": False,
             "pass_to_pass_verified": False,
             "verification_missing": False,
+            "infra_invalid": True,
+            "invalid_reason": "verifier_crash",
             "verification_error": f"terminal verifier execution failed: {exc}",
             "verification_feedback": "",
             "resolved": False,
@@ -1465,6 +1495,17 @@ def _resolve_task_sample_test_targets(
             if candidate_key in source:
                 return _coerce_test_targets(source.get(candidate_key))
     return []
+
+
+def _resolve_task_sample_verifier_kind(
+    raw_kwargs: Mapping[str, Any],
+    *,
+    reward_ground_truth: Mapping[str, Any],
+) -> str:
+    for source in (raw_kwargs, reward_ground_truth):
+        if "verifier_kind" in source:
+            return normalize_verifier_kind(source.get("verifier_kind"))
+    return "pytest"
 
 
 def _get_container_slot_gate(env_pool_size: int) -> _ContainerSlotGate:

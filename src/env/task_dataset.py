@@ -8,12 +8,18 @@ import json
 import os
 from pathlib import Path
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 from config import OnPolicyDataConfig
 from prompts.runtime_messages import build_onpolicy_initial_user_message
 from runtime_paths import resolve_on_policy_bad_task_cache_dir
+from verifier_utils import (
+    logical_task_identity_key,
+    normalize_verifier_targets,
+    resolve_problem_statement,
+    validate_verifier_target_sets,
+)
 
 
 DatasetLoader = Callable[[str, str], Sequence[Mapping[str, Any]]]
@@ -45,6 +51,7 @@ class TaskSample:
     fail_to_pass: Any
     pass_to_pass: Any
     raw: Mapping[str, Any]
+    verifier_kind: str = "pytest"
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,8 @@ class TaskPoolBuildResult:
     tasks: tuple[TaskSample, ...]
     scanned_rows: int
     last_error: str = ""
+    filtered_counts: Mapping[str, int] = field(default_factory=dict)
+    filtered_task_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _required_columns(config: OnPolicyDataConfig) -> tuple[str, str, str, str]:
@@ -123,6 +132,8 @@ def resolve_on_policy_bad_task_cache_path(
             "fail_to_pass": config.columns.fail_to_pass,
             "pass_to_pass": config.columns.pass_to_pass,
         },
+        "patch_is_bug_introducing": bool(config.patch_is_bug_introducing),
+        "verifier_kind": str(config.verifier_kind),
     }
     encoded = json.dumps(config_fingerprint, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
@@ -138,25 +149,20 @@ def _coerce_task_row(
     row_index: int,
 ) -> TaskSample:
     image_name_raw = row.get(config.columns.image_name)
-    prompt_raw = row.get(config.columns.problem_statement)
     if not isinstance(image_name_raw, str) or not image_name_raw.strip():
         raise ValueError(
             f"Row {row_index} has invalid image name column {config.columns.image_name!r}."
         )
-    if not isinstance(prompt_raw, str) or not prompt_raw.strip():
-        raise ValueError(
-            f"Row {row_index} has invalid prompt column {config.columns.problem_statement!r}."
-        )
-    fail_to_pass = _normalize_test_targets(row.get(config.columns.fail_to_pass))
-    if not fail_to_pass:
-        raise ValueError(
-            f"Row {row_index} has empty required test targets in column {config.columns.fail_to_pass!r}."
-        )
-    pass_to_pass = _normalize_test_targets(row.get(config.columns.pass_to_pass))
-    if not pass_to_pass:
-        raise ValueError(
-            f"Row {row_index} has empty required test targets in column {config.columns.pass_to_pass!r}."
-        )
+    fail_to_pass, pass_to_pass = validate_verifier_target_sets(
+        fail_to_pass=row.get(config.columns.fail_to_pass),
+        pass_to_pass=row.get(config.columns.pass_to_pass),
+    )
+    prompt_text, prompt_source = resolve_problem_statement(
+        problem_statement=row.get(config.columns.problem_statement),
+        fail_to_pass=fail_to_pass,
+        pass_to_pass=pass_to_pass,
+        verifier_kind=config.verifier_kind,
+    )
 
     task_id_raw = row.get("instance_id") or row.get("task_id") or row.get("problem_id")
     if not isinstance(task_id_raw, str) or not task_id_raw.strip():
@@ -164,45 +170,22 @@ def _coerce_task_row(
     else:
         task_id = task_id_raw.strip()
 
+    raw_row = dict(row)
+    raw_row.setdefault("prompt_source", prompt_source)
+    raw_row.setdefault("verifier_kind", config.verifier_kind)
     return TaskSample(
         task_id=task_id,
         image_name=image_name_raw.strip(),
-        problem_statement=prompt_raw,
+        problem_statement=prompt_text,
         fail_to_pass=fail_to_pass,
         pass_to_pass=pass_to_pass,
-        raw=dict(row),
+        verifier_kind=config.verifier_kind,
+        raw=raw_row,
     )
 
 
 def _normalize_test_targets(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, Mapping):
-        return [name for name in (str(key).strip() for key in value.keys()) if name]
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        targets: list[str] = []
-        for item in value:
-            name = str(item).strip()
-            if name:
-                targets.append(name)
-        return targets
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return []
-        if stripped.startswith("[") and stripped.endswith("]"):
-            try:
-                parsed = json.loads(stripped)
-            except json.JSONDecodeError:
-                parsed = None
-            if parsed is not None:
-                return _normalize_test_targets(parsed)
-        if "," in stripped:
-            return [chunk for chunk in (part.strip() for part in stripped.split(",")) if chunk]
-        if "\n" in stripped:
-            return [chunk for chunk in (part.strip() for part in stripped.splitlines()) if chunk]
-        return [stripped]
-    return []
+    return normalize_verifier_targets(value)
 
 
 def _coerce_name_set(value: Any) -> set[str]:
@@ -329,28 +312,59 @@ def _build_task_pool(
     _validate_required_columns(dataset, config=config)
     tasks: list[TaskSample] = []
     last_error: ValueError | None = None
+    filtered_counts: dict[str, int] = {
+        "invalid_row": 0,
+        "cached_bad_task": 0,
+        "duplicate_logical_task": 0,
+    }
+    filtered_task_ids: dict[str, list[str]] = {
+        "cached_bad_task": [],
+        "duplicate_logical_task": [],
+    }
+    seen_logical_keys: set[str] = set()
     for row_index in range(len(dataset)):
         row = dataset[row_index]
         if not isinstance(row, Mapping):
             last_error = ValueError(f"Dataset row {row_index} is not a mapping.")
+            filtered_counts["invalid_row"] += 1
             continue
         try:
             task = _coerce_task_row(row, config=config, row_index=row_index)
         except ValueError as exc:
             last_error = exc
+            filtered_counts["invalid_row"] += 1
             continue
         if _is_cached_bad_task(
             task,
             bad_task_ids=bad_task_ids,
             bad_image_names=bad_image_names,
         ):
+            filtered_counts["cached_bad_task"] += 1
+            filtered_task_ids["cached_bad_task"].append(task.task_id)
             continue
+        logical_task_key = logical_task_identity_key(
+            problem_statement=task.problem_statement,
+            fail_to_pass=task.fail_to_pass,
+            pass_to_pass=task.pass_to_pass,
+            verifier_kind=task.verifier_kind,
+        )
+        if logical_task_key in seen_logical_keys:
+            filtered_counts["duplicate_logical_task"] += 1
+            filtered_task_ids["duplicate_logical_task"].append(task.task_id)
+            continue
+        seen_logical_keys.add(logical_task_key)
         tasks.append(task)
 
     return TaskPoolBuildResult(
         tasks=tuple(tasks),
         scanned_rows=len(dataset),
         last_error=str(last_error) if last_error is not None else "",
+        filtered_counts=dict(filtered_counts),
+        filtered_task_ids={
+            key: tuple(value)
+            for key, value in filtered_task_ids.items()
+            if value
+        },
     )
 
 
@@ -493,6 +507,7 @@ def build_sdpo_task_rows(
                 "task_id": task.task_id,
                 "image_name": task.image_name,
                 "data_source": data_source,
+                "verifier_kind": task.verifier_kind,
                 "fail_to_pass": fail_to_pass,
                 "pass_to_pass": pass_to_pass,
                 "reward_model": {
@@ -500,6 +515,7 @@ def build_sdpo_task_rows(
                         "task_id": task.task_id,
                         "image_name": task.image_name,
                         "data_source": data_source,
+                        "verifier_kind": task.verifier_kind,
                         "fail_to_pass": fail_to_pass,
                         "pass_to_pass": pass_to_pass,
                     }
@@ -541,6 +557,8 @@ def resolve_sdpo_task_rows_cache_path(
             "fail_to_pass": config.columns.fail_to_pass,
             "pass_to_pass": config.columns.pass_to_pass,
         },
+        "patch_is_bug_introducing": bool(config.patch_is_bug_introducing),
+        "verifier_kind": str(config.verifier_kind),
         "max_problem_statement_chars": prompt_char_limit,
         "bad_task_filter": bad_task_filter,
     }
@@ -645,6 +663,8 @@ def resolve_sdpo_task_split_cache_paths(
             "fail_to_pass": config.columns.fail_to_pass,
             "pass_to_pass": config.columns.pass_to_pass,
         },
+        "patch_is_bug_introducing": bool(config.patch_is_bug_introducing),
+        "verifier_kind": str(config.verifier_kind),
         "eval_split_fraction": float(eval_split_fraction),
         "min_eval_rows": int(min_eval_rows),
         "max_problem_statement_chars": prompt_char_limit,

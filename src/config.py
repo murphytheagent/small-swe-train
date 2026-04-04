@@ -23,6 +23,7 @@ from runtime_paths import (
     resolve_sdpo_task_cache_dir,
 )
 from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME as SCHEMA_TERMINAL_TOOL_NAME
+from verifier_utils import normalize_verifier_kind
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIGS_DIR = _PROJECT_ROOT / "configs"
@@ -49,6 +50,8 @@ class OnPolicyDataConfig:
     dataset_id: str
     dataset_split: str
     columns: OnPolicyDatasetColumns
+    patch_is_bug_introducing: bool = True
+    verifier_kind: str = "pytest"
 
 
 @dataclass(frozen=True)
@@ -390,6 +393,14 @@ def _parse_on_policy_data_config(payload: Mapping[str, Any]) -> OnPolicyDataConf
         dataset_id=dataset_id,
         dataset_split=dataset_split,
         columns=columns,
+        patch_is_bug_introducing=_coerce_bool(
+            payload.get("patch_is_bug_introducing", True),
+            label="on_policy.data.patch_is_bug_introducing",
+        ),
+        verifier_kind=normalize_verifier_kind(
+            payload.get("verifier_kind", "pytest"),
+            label="on_policy.data.verifier_kind",
+        ),
     )
 
 

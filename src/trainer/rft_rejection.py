@@ -92,9 +92,13 @@ def evaluate_rft_rejection_reason(
         row.get("container_init_succeeded"),
         fallback=False,
     )
+    infra_invalid = _coerce_bool(row.get("infra_invalid"), fallback=False)
+    invalid_reason = str(row.get("invalid_reason", "")).strip()
 
     if not container_init_succeeded:
         reasons.append("container_init_failed")
+    if infra_invalid:
+        reasons.append(invalid_reason or "infra_invalid")
 
     if selection_policy.require_terminal and not has_terminal_submit:
         reasons.append("non_terminal")

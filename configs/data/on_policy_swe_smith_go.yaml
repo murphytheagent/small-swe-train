@@ -1,7 +1,7 @@
-dataset_id: SWE-bench/SWE-smith-py
+dataset_id: SWE-bench/SWE-smith-go
 dataset_split: train
 patch_is_bug_introducing: true
-verifier_kind: pytest
+verifier_kind: go_test
 columns:
   image_name: image_name
   problem_statement: problem_statement

@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+import importlib
+
+import pytest
+import config
+
+
+def _load_entry_module():
+    pytest.importorskip("transformers")
+    return importlib.import_module("verl_integration.main_ppo_entry")
+
+
+def test_patched_from_pretrained_uses_sdpa_fallback_when_flash_attn_disabled(
+    monkeypatch,
+) -> None:
+    entry = _load_entry_module()
+
+    captured: dict[str, object] = {}
+
+    def _fake_from_pretrained(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(entry, "_ORIGINAL_FROM_PRETRAINED", _fake_from_pretrained)
+    monkeypatch.setattr(entry, "_FLASH_ATTN_DISABLED", True)
+    monkeypatch.delenv("SMALL_SWE_SDPO_ATTN_IMPL", raising=False)
+    monkeypatch.delenv("SMALL_SWE_FALLBACK_ATTN_IMPL", raising=False)
+
+    payload = entry._patched_from_pretrained(config.DEFAULT_TRAINING_MODEL_NAME)
+
+    assert payload["attn_implementation"] == "sdpa"
+    assert captured["attn_implementation"] == "sdpa"
+    assert "use_flash_attention_2" not in payload
+    assert "use_flash_attention_2" not in captured
+
+
+def test_patched_from_pretrained_honors_explicit_attn_impl_override(monkeypatch) -> None:
+    entry = _load_entry_module()
+
+    captured: dict[str, object] = {}
+
+    def _fake_from_pretrained(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(entry, "_ORIGINAL_FROM_PRETRAINED", _fake_from_pretrained)
+    monkeypatch.setattr(entry, "_FLASH_ATTN_DISABLED", True)
+    monkeypatch.setenv("SMALL_SWE_SDPO_ATTN_IMPL", "flash_attention_2")
+
+    payload = entry._patched_from_pretrained(config.DEFAULT_TRAINING_MODEL_NAME)
+
+    assert payload["attn_implementation"] == "flash_attention_2"
+    assert "use_flash_attention_2" not in payload
+    assert captured["attn_implementation"] == "flash_attention_2"
+
+
+def test_patched_from_pretrained_replaces_flash_attn_impl_when_disabled(monkeypatch) -> None:
+    entry = _load_entry_module()
+
+    captured: dict[str, object] = {}
+
+    def _fake_from_pretrained(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(entry, "_ORIGINAL_FROM_PRETRAINED", _fake_from_pretrained)
+    monkeypatch.setattr(entry, "_FLASH_ATTN_DISABLED", True)
+    monkeypatch.delenv("SMALL_SWE_SDPO_ATTN_IMPL", raising=False)
+    monkeypatch.setenv("SMALL_SWE_FALLBACK_ATTN_IMPL", "sdpa")
+
+    payload = entry._patched_from_pretrained(
+        config.DEFAULT_TRAINING_MODEL_NAME,
+        attn_implementation="flash_attention_2",
+    )
+
+    assert payload["attn_implementation"] == "sdpa"
+    assert captured["attn_implementation"] == "sdpa"
+    assert "use_flash_attention_2" not in payload
+    assert "use_flash_attention_2" not in captured
+
+
+def test_patched_from_pretrained_sets_model_dtype_for_flash_attn(monkeypatch) -> None:
+    entry = _load_entry_module()
+    torch = pytest.importorskip("torch")
+
+    captured: dict[str, object] = {}
+
+    def _fake_from_pretrained(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(entry, "_ORIGINAL_FROM_PRETRAINED", _fake_from_pretrained)
+    monkeypatch.setattr(entry, "_FLASH_ATTN_DISABLED", False)
+    monkeypatch.setenv("SMALL_SWE_SDPO_MODEL_DTYPE", "bf16")
+
+    payload = entry._patched_from_pretrained(
+        config.DEFAULT_TRAINING_MODEL_NAME,
+        attn_implementation="flash_attention_2",
+    )
+
+    assert payload["dtype"] == torch.bfloat16
+    assert captured["dtype"] == torch.bfloat16
+
+
+def test_patched_from_pretrained_does_not_override_explicit_dtype(monkeypatch) -> None:
+    entry = _load_entry_module()
+
+    captured: dict[str, object] = {}
+
+    def _fake_from_pretrained(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(entry, "_ORIGINAL_FROM_PRETRAINED", _fake_from_pretrained)
+    monkeypatch.setattr(entry, "_FLASH_ATTN_DISABLED", False)
+    monkeypatch.setenv("SMALL_SWE_SDPO_MODEL_DTYPE", "bf16")
+
+    payload = entry._patched_from_pretrained(
+        config.DEFAULT_TRAINING_MODEL_NAME,
+        attn_implementation="flash_attention_2",
+        torch_dtype="auto",
+    )
+
+    assert payload["torch_dtype"] == "auto"
+    assert captured["torch_dtype"] == "auto"
+
+
+def test_patched_from_pretrained_falls_back_to_torch_dtype_for_legacy_transformers(
+    monkeypatch,
+) -> None:
+    entry = _load_entry_module()
+    torch = pytest.importorskip("torch")
+
+    captured: dict[str, object] = {}
+
+    def _fake_from_pretrained(*args, **kwargs):
+        del args
+        if "dtype" in kwargs:
+            raise TypeError("got an unexpected keyword argument 'dtype'")
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(entry, "_ORIGINAL_FROM_PRETRAINED", _fake_from_pretrained)
+    monkeypatch.setattr(entry, "_FLASH_ATTN_DISABLED", False)
+    monkeypatch.setenv("SMALL_SWE_SDPO_MODEL_DTYPE", "bf16")
+
+    payload = entry._patched_from_pretrained(
+        config.DEFAULT_TRAINING_MODEL_NAME,
+        attn_implementation="flash_attention_2",
+    )
+
+    assert "dtype" not in payload
+    assert payload["torch_dtype"] == torch.bfloat16
+    assert captured["torch_dtype"] == torch.bfloat16
