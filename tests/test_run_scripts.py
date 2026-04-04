@@ -363,6 +363,87 @@ def _write_teacher_pilot_python_stub(tmp_path: Path) -> Path:
     return stub_path
 
 
+def _write_onpolicy_difficulty_probe_python_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "python-difficulty-probe-stub.sh"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == \"-m\" && \"${2:-}\" == \"trainer.vllm_api_server_entry\" ]]; then\n"
+        "  exec python3 - \"$@\" <<'PY'\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "import json\n"
+        "import sys\n"
+        "\n"
+        "port = 8000\n"
+        "for index, token in enumerate(sys.argv):\n"
+        "    if token == '--port' and index + 1 < len(sys.argv):\n"
+        "        port = int(sys.argv[index + 1])\n"
+        "        break\n"
+        "\n"
+        "class Handler(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        if self.path != '/v1/models':\n"
+        "            self.send_error(404)\n"
+        "            return\n"
+        "        payload = json.dumps({'data': [{'id': 'stub-model'}]}).encode('utf-8')\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Type', 'application/json')\n"
+        "        self.send_header('Content-Length', str(len(payload)))\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(payload)\n"
+        "\n"
+        "    def log_message(self, format, *args):\n"
+        "        return\n"
+        "\n"
+        "HTTPServer(('127.0.0.1', port), Handler).serve_forever()\n"
+        "PY\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-m\" && \"${2:-}\" == \"env.preload_onpolicy_difficulty_bands\" ]]; then\n"
+        "  : \"${DIFFICULTY_PROBE_CAPTURE:?}\"\n"
+        "  printf '%s\\n' \"$@\" >\"${DIFFICULTY_PROBE_CAPTURE}\"\n"
+        "  cache_dir=''\n"
+        "  probe_label='positive_rft_probe'\n"
+        "  while [[ $# -gt 0 ]]; do\n"
+        "    case \"$1\" in\n"
+        "      --cache-dir)\n"
+        "        cache_dir=\"${2:-}\"\n"
+        "        shift 2\n"
+        "        ;;\n"
+        "      --probe-label)\n"
+        "        probe_label=\"${2:-}\"\n"
+        "        shift 2\n"
+        "        ;;\n"
+        "      *)\n"
+        "        shift\n"
+        "        ;;\n"
+        "    esac\n"
+        "  done\n"
+        "  mkdir -p \"${cache_dir}\"\n"
+        "  cache_path=\"${cache_dir}/difficulty_bands_SWE_bench_SWE_smith_py_train_${probe_label}.json\"\n"
+        "  cat >\"${cache_path}\" <<JSON\n"
+        "{\n"
+        "  \"task_count\": 1,\n"
+        "  \"records\": [\n"
+        "    {\n"
+        "      \"task_id\": \"task-1\",\n"
+        "      \"difficulty_band\": \"learnable\"\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "JSON\n"
+        "  printf '%s\\n' \"${cache_path}\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-\" ]]; then\n"
+        f"  exec {shlex.quote(sys.executable)} \"$@\"\n"
+        "fi\n"
+        "exec python3 \"$@\"\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
 def test_run_rft_script_dry_run_prints_verl_command() -> None:
     result = _run_script("run_rft.sh", "trainer.total_training_steps=1")
     assert "-m torch.distributed.run" in result.stdout
@@ -969,6 +1050,76 @@ def test_teacher_reprompt_pilot_slurm_script_non_dry_run_rejects_hf_repo_id_via_
 
     assert result.returncode != 0
     assert "Checkpoint path does not exist" in result.stderr
+
+
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_visible_gpus_for_tp() -> None:
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "2",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+        },
+    )
+    assert "--tensor-parallel-size 2" in result.stdout
+    assert "--initial-model Qwen/Qwen3.5-9B" in result.stdout
+    assert "--attempts-per-task 4" in result.stdout
+
+
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_overridden_base_url_port() -> None:
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "SMALL_SWE_VLLM_BASE_URL": "http://127.0.0.1:19191",
+        },
+    )
+    assert "--port 19191" in result.stdout
+
+
+def test_onpolicy_difficulty_probe_slurm_script_non_dry_run_materializes_cache(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    python_stub = _write_onpolicy_difficulty_probe_python_stub(tmp_path)
+    capture_path = tmp_path / "difficulty-probe-args.txt"
+    cache_dir = tmp_path / "difficulty-cache"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "SLURM_JOB_ID": "24680",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_CACHE_DIR": str(cache_dir),
+            "DIFFICULTY_PROBE_CAPTURE": str(capture_path),
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+            "SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE": "0",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    captured_args = capture_path.read_text(encoding="utf-8").splitlines()
+    assert captured_args[:2] == ["-m", "env.preload_onpolicy_difficulty_bands"]
+    cache_path = Path(result.stdout.strip())
+    assert cache_path.is_file()
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert payload["task_count"] == 1
+    assert payload["records"][0]["task_id"] == "task-1"
 
 
 def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
