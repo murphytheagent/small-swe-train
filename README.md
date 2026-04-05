@@ -2,16 +2,14 @@
 
 Repository for a chat-style SWE training stack with `format_rft`, optional `positive_rft`, and `turn_sdpo` stages.
 
-Latest doc update: 2026-04-04.
+Latest doc update: 2026-04-05.
 
 ## Current status
-- `main` now carries the held-out / positive-RFT fixes from merged PR `#26` (`1281994`) plus the docs-first planning stack from PRs `#14`-`#17`, `#23`, and `#27` (`c2831a6`, `d171bbf`, `940cc8e`, `be3f3d1`, `4c38d6a`, `ae492c6`), but there are active open PRs again:
-  - `#33` (`task/1774862066-difficulty-banding`) carries rollout-backed difficulty banding plus the node-side Slurm probe launcher and still has `5` unresolved non-outdated review threads on GitHub;
-  - `#32` (`task/1775207996-js-ts-plan-refresh`) is the narrower JS/TS verifier-plan refresh and currently has `0` live review threads.
+- `main` carries the held-out / positive-RFT fixes from merged PR `#26` (`1281994`) plus the earlier docs-first planning stack from PRs `#14`-`#17`, `#23`, and `#27`.
+- Active follow-up work now lives on branch surfaces for rollout-backed difficulty banding, JS/TS verifier planning, turn-SDPO entropy gating, and the earlier vLLM readiness fix; use the project report or live GitHub surface for exact PR state rather than treating this README as the review ledger.
 - The real missing artifact is no longer just “another staged remote run.” `2040` already proved `format_rft -> positive_rft` end to end, but positive-stage train still selected `0` rows while eval reached `6/64`, so there is still no usable positive-RFT checkpoint.
-- The next executable object is the real `SWE-smith-py` difficulty probe behind PR `#33`, not another unchanged rerun. The rollout-backed cache path and the one-shot node launcher now exist on the branch; the missing step is to run them against the `2040` format-stage checkpoint.
-- The blocker is node access, not launch-surface design: `tianhaowang-gpu0` accepts TCP on `22` but is not returning an SSH banner, so the first real rollout-backed cache and the related node follow-ups are still unsent from this workstation.
-- The latest validated E2E proof is now the held-out `2040` chain plus the published banding/launcher work on PR `#33`; the latest JS/TS scope note is PR `#32`, which keeps the current object on repo-aware Node verifier adapters rather than a generic `node_test` toggle.
+- The next executable object is the first real `SWE-smith-py` difficulty-probe cache against the `2040` format-stage checkpoint; the rollout-backed cache path and one-shot node launcher exist, but the first full cache has not been materialized from this workstation yet.
+- The latest validated E2E proof is still the held-out `2040` chain plus the published banding/launcher work on the active difficulty-banding branch; the current JS/TS scope note stays on repo-aware Node verifier adapters rather than a generic `node_test` toggle.
 
 Canonical staged pipeline:
 - `format_rft`
