@@ -406,8 +406,9 @@ def _build_task_pool(
 def _load_hf_task_pool_cached(
     config: OnPolicyDataConfig,
     bad_task_filter_digest: str,
+    difficulty_banding_cache_token: str,
 ) -> TaskPoolBuildResult:
-    del bad_task_filter_digest
+    del bad_task_filter_digest, difficulty_banding_cache_token
     dataset = load_hf_dataset(config.dataset_id, config.dataset_split)
     bad_task_ids, bad_image_names = _load_bad_task_filter(config)
     return _build_task_pool(
@@ -429,9 +430,11 @@ def _load_task_pool(
             bad_task_ids=bad_task_ids,
             bad_image_names=bad_image_names,
         )
+        difficulty_banding_cache_token = _difficulty_banding_cache_token(config)
         return _load_hf_task_pool_cached(
             config,
             str(bad_filter_fingerprint["digest"]),
+            difficulty_banding_cache_token,
         )
 
     loader = dataset_loader
@@ -468,6 +471,36 @@ def _difficulty_banding_fingerprint(config: OnPolicyDataConfig) -> dict[str, Any
             config.difficulty_banding
         )
     return fingerprint
+
+
+def _difficulty_banding_cache_token(config: OnPolicyDataConfig) -> str:
+    fingerprint = {
+        "strategy": config.difficulty_banding.strategy,
+        "default_band": config.difficulty_banding.default_band,
+        "family_band_exact": [
+            [family, band] for family, band in config.difficulty_banding.family_band_exact
+        ],
+        "family_band_prefix": [
+            [prefix, band] for prefix, band in config.difficulty_banding.family_band_prefix
+        ],
+    }
+    if str(config.difficulty_banding.strategy).strip().lower() == "rollout_probe":
+        cache_path = _resolve_rollout_probe_cache_path(config.difficulty_banding)
+        cache_fingerprint: dict[str, Any] = {
+            "path": str(cache_path) if cache_path is not None else "",
+            "required": bool(config.difficulty_banding.rollout_probe_required),
+            "present": False,
+            "modified_ns": 0,
+            "file_size": 0,
+        }
+        if cache_path is not None and cache_path.is_file():
+            stat = cache_path.stat()
+            cache_fingerprint["present"] = True
+            cache_fingerprint["modified_ns"] = int(stat.st_mtime_ns)
+            cache_fingerprint["file_size"] = int(stat.st_size)
+        fingerprint["rollout_probe_cache"] = cache_fingerprint
+    encoded = json.dumps(fingerprint, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
 def _resolve_rollout_probe_cache_path(
@@ -749,7 +782,7 @@ def load_task_batch(
         )
     except ValueError as exc:
         if normalized_partition != _TASK_PARTITION_ALL:
-            return []
+            raise
         raise ValueError(
             f"Unable to build task batch of size {batch_size} from "
             f"{config.dataset_id!r}:{config.dataset_split!r}. {exc}"

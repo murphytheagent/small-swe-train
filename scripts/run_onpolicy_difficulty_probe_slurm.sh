@@ -134,6 +134,8 @@ if parsed.scheme not in {"http", "https"} or not parsed.netloc:
 path = parsed.path.rstrip("/")
 if path.endswith("/v1"):
     normalized_path = path
+elif path.endswith("/v1/models"):
+    normalized_path = path[: -len("/models")]
 elif path.endswith("/v1/chat/completions"):
     normalized_path = path[: -len("/chat/completions")]
 elif path.endswith("/chat/completions"):
@@ -197,6 +199,12 @@ PROBE_CMD=(
 )
 if [[ -n "${PROBE_TASK_LIMIT:-}" ]]; then
   PROBE_CMD+=(--task-limit "${PROBE_TASK_LIMIT}")
+fi
+if [[ -n "${PROBE_TASK_EVAL_SPLIT_FRACTION:-}" ]]; then
+  PROBE_CMD+=(--eval-split-fraction "${PROBE_TASK_EVAL_SPLIT_FRACTION}")
+fi
+if [[ -n "${PROBE_TASK_EVAL_MIN_ROWS:-}" ]]; then
+  PROBE_CMD+=(--min-eval-rows "${PROBE_TASK_EVAL_MIN_ROWS}")
 fi
 if [[ "${PROBE_FORCE_REFRESH:-0}" == "1" ]]; then
   PROBE_CMD+=(--force-refresh)

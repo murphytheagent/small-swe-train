@@ -346,6 +346,22 @@ def test_resolve_on_policy_settings_parses_rollout_probe_banding_override() -> N
     assert settings.data.difficulty_banding.rollout_probe_required is True
 
 
+def test_resolve_on_policy_settings_deep_merges_difficulty_banding_rule_overrides() -> None:
+    settings = config.resolve_on_policy_settings(
+        data_overrides={
+            "difficulty_banding": {
+                "family_band_exact": {
+                    "new_family": "easy",
+                }
+            }
+        }
+    )
+
+    exact_rules = dict(settings.data.difficulty_banding.family_band_exact)
+    assert exact_rules["func_basic"] == "learnable"
+    assert exact_rules["new_family"] == "easy"
+
+
 def test_resolve_on_policy_settings_aligns_in_flight_with_task_batch_override() -> None:
     settings = config.resolve_on_policy_settings(
         runtime_overrides={

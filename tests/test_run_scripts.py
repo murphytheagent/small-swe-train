@@ -1122,6 +1122,48 @@ def test_onpolicy_difficulty_probe_slurm_script_non_dry_run_materializes_cache(
     assert payload["records"][0]["task_id"] == "task-1"
 
 
+def test_onpolicy_difficulty_probe_slurm_script_accepts_models_endpoint_base_url(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    python_stub = _write_onpolicy_difficulty_probe_python_stub(tmp_path)
+    capture_path = tmp_path / "difficulty-probe-args-models-url.txt"
+    cache_dir = tmp_path / "difficulty-cache-models-url"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "SLURM_JOB_ID": "24681",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_CACHE_DIR": str(cache_dir),
+            "DIFFICULTY_PROBE_CAPTURE": str(capture_path),
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+            "SMALL_SWE_VLLM_BASE_URL": "http://127.0.0.1:19191/v1/models",
+            "SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE": "0",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    cache_path = Path(result.stdout.strip())
+    assert cache_path.is_file()
+
+
 def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     result = _run_script("run_sdpo.sh", "data.train_batch_size=4")
     assert "-m verl_integration.main_ppo_entry" in result.stdout

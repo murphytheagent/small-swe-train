@@ -527,20 +527,34 @@ def _merge_on_policy_data_payload(
     base: Mapping[str, Any],
     overrides: Mapping[str, Any],
 ) -> dict[str, Any]:
+    def _merge_mapping_values(
+        existing: Mapping[str, Any],
+        incoming: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        merged_mapping = dict(existing)
+        for nested_key, nested_value in incoming.items():
+            current_value = merged_mapping.get(nested_key)
+            if isinstance(current_value, Mapping) and isinstance(nested_value, Mapping):
+                merged_child = dict(current_value)
+                merged_child.update(nested_value)
+                merged_mapping[nested_key] = merged_child
+            else:
+                merged_mapping[nested_key] = nested_value
+        return merged_mapping
+
     merged = dict(base)
     for key, value in overrides.items():
         if key == "columns" and isinstance(value, Mapping) and isinstance(merged.get("columns"), Mapping):
-            columns = dict(merged["columns"])
-            columns.update(value)
-            merged["columns"] = columns
+            merged["columns"] = _merge_mapping_values(merged["columns"], value)
         elif (
             key == "difficulty_banding"
             and isinstance(value, Mapping)
             and isinstance(merged.get("difficulty_banding"), Mapping)
         ):
-            banding = dict(merged["difficulty_banding"])
-            banding.update(value)
-            merged["difficulty_banding"] = banding
+            merged["difficulty_banding"] = _merge_mapping_values(
+                merged["difficulty_banding"],
+                value,
+            )
         else:
             merged[key] = value
     return merged

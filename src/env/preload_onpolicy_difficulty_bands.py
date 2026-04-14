@@ -96,6 +96,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Probe at most this many tasks after start-task-index.",
     )
+    parser.add_argument(
+        "--eval-split-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Held-out split fraction used when probing the deterministic train/eval partition. "
+            "Defaults to the runtime-loop setting for train/eval partitions."
+        ),
+    )
+    parser.add_argument(
+        "--min-eval-rows",
+        type=int,
+        default=None,
+        help=(
+            "Minimum held-out rows used when probing the deterministic train/eval partition. "
+            "Defaults to the runtime-loop setting for train/eval partitions."
+        ),
+    )
     return parser
 
 
@@ -186,6 +204,86 @@ def _coerce_rows(value: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def _resolve_partition_eval_settings(
+    *,
+    parser: argparse.ArgumentParser,
+    settings: Any,
+    task_partition: str,
+    eval_split_fraction: float | None,
+    min_eval_rows: int | None,
+) -> tuple[float, int]:
+    if task_partition == "all":
+        if eval_split_fraction is not None or min_eval_rows is not None:
+            parser.error(
+                "--eval-split-fraction and --min-eval-rows require --task-partition train or eval."
+            )
+        return 0.0, 0
+
+    runtime_defaults = getattr(settings, "runtime", None)
+    resolved_eval_split_fraction = (
+        float(eval_split_fraction)
+        if eval_split_fraction is not None
+        else float(getattr(runtime_defaults, "eval_split_fraction", 0.0))
+    )
+    resolved_min_eval_rows = (
+        int(min_eval_rows)
+        if min_eval_rows is not None
+        else int(getattr(runtime_defaults, "eval_min_rows", 0))
+    )
+    if resolved_eval_split_fraction < 0.0 or resolved_eval_split_fraction >= 1.0:
+        parser.error("--eval-split-fraction must be in [0.0, 1.0).")
+    if resolved_min_eval_rows < 0:
+        parser.error("--min-eval-rows must be >= 0.")
+    return resolved_eval_split_fraction, resolved_min_eval_rows
+
+
+def _load_cache_payload(cache_path: Path) -> Mapping[str, Any]:
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Difficulty-band cache payload must be a mapping: {cache_path}")
+    return payload
+
+
+def _build_expected_cache_metadata(
+    *,
+    settings: Any,
+    data_config_name: str,
+    probe_label: str,
+    initial_model: str,
+    turn_generator_mode: str,
+    stage_name: str,
+    task_partition: str,
+    attempts_per_task: int,
+    start_task_index: int,
+    task_limit: int | None,
+    eval_split_fraction: float,
+    min_eval_rows: int,
+) -> dict[str, Any]:
+    return {
+        "data_config_name": data_config_name,
+        "dataset_id": settings.data.dataset_id,
+        "dataset_split": settings.data.dataset_split,
+        "probe_label": probe_label,
+        "initial_model": initial_model,
+        "turn_generator_mode": turn_generator_mode,
+        "stage_name": stage_name,
+        "task_partition": task_partition,
+        "attempts_per_task": attempts_per_task,
+        "start_task_index": start_task_index,
+        "task_limit": task_limit,
+        "eval_split_fraction": eval_split_fraction,
+        "min_eval_rows": min_eval_rows,
+    }
+
+
+def _cache_metadata_matches(
+    *,
+    payload: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> bool:
+    return all(payload.get(key) == value for key, value in expected.items())
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -198,22 +296,48 @@ def main() -> int:
         parser.error("--task-limit must be >= 1 when provided")
 
     settings = resolve_on_policy_settings(data_config_name=args.data_config_name)
+    resolved_eval_split_fraction, resolved_min_eval_rows = _resolve_partition_eval_settings(
+        parser=parser,
+        settings=settings,
+        task_partition=args.task_partition,
+        eval_split_fraction=args.eval_split_fraction,
+        min_eval_rows=args.min_eval_rows,
+    )
     cache_dir = _resolve_cache_dir(args.cache_dir)
     cache_path = resolve_on_policy_difficulty_band_cache_path(
         config=settings.data,
         cache_dir=cache_dir,
         probe_label=args.probe_label,
     )
+    resolved_stage_name = resolve_rft_stage_name(args.stage_name)
+    expected_cache_metadata = _build_expected_cache_metadata(
+        settings=settings,
+        data_config_name=str(args.data_config_name).strip(),
+        probe_label=str(args.probe_label).strip(),
+        initial_model=str(args.initial_model).strip(),
+        turn_generator_mode=str(args.turn_generator_mode).strip(),
+        stage_name=resolved_stage_name,
+        task_partition=str(args.task_partition).strip(),
+        attempts_per_task=int(args.attempts_per_task),
+        start_task_index=int(args.start_task_index),
+        task_limit=int(args.task_limit) if args.task_limit is not None else None,
+        eval_split_fraction=resolved_eval_split_fraction,
+        min_eval_rows=resolved_min_eval_rows,
+    )
     if args.print_path_only:
         print(cache_path)
         return 0
     if cache_path.is_file() and not bool(args.force_refresh):
-        print(cache_path)
-        return 0
+        payload = _load_cache_payload(cache_path)
+        if _cache_metadata_matches(payload=payload, expected=expected_cache_metadata):
+            print(cache_path)
+            return 0
 
     tasks = load_task_samples(
         config=settings.data,
         task_partition=args.task_partition,
+        eval_split_fraction=resolved_eval_split_fraction,
+        min_eval_rows=resolved_min_eval_rows,
     )
     start_index = int(args.start_task_index)
     if start_index >= len(tasks):
@@ -228,7 +352,6 @@ def main() -> int:
         raise ValueError("No tasks selected for difficulty-band probing.")
 
     tokenizer = _load_tokenizer(args.initial_model)
-    resolved_stage_name = resolve_rft_stage_name(args.stage_name)
     handoff_overrides = resolve_rft_stage_handoff_overrides(resolved_stage_name)
     verify_submissions = resolve_rft_stage_verify_submissions(resolved_stage_name)
 
@@ -249,8 +372,8 @@ def main() -> int:
                 },
                 handoff_overrides=handoff_overrides,
                 task_partition=args.task_partition,
-                task_eval_split_fraction=0.0,
-                task_eval_min_rows=0,
+                task_eval_split_fraction=resolved_eval_split_fraction,
+                task_eval_min_rows=resolved_min_eval_rows,
                 verify_submissions=verify_submissions,
                 stage_name=resolved_stage_name,
             ),
@@ -278,6 +401,9 @@ def main() -> int:
         "task_partition": str(args.task_partition).strip(),
         "attempts_per_task": int(args.attempts_per_task),
         "start_task_index": start_index,
+        "task_limit": int(args.task_limit) if args.task_limit is not None else None,
+        "eval_split_fraction": resolved_eval_split_fraction,
+        "min_eval_rows": resolved_min_eval_rows,
         "task_count": len(records),
         "records": records,
     }
