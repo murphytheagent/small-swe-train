@@ -283,6 +283,8 @@ def test_main_rebuilds_cache_when_existing_metadata_is_incompatible(
                 "data_config_name": "on_policy_swe_smith",
                 "dataset_id": "dummy/dataset",
                 "dataset_split": "train",
+                "patch_is_bug_introducing": True,
+                "verifier_kind": "pytest",
                 "probe_label": "smoke",
                 "initial_model": "/tmp/old-model",
                 "turn_generator_mode": "default",
@@ -374,6 +376,8 @@ def test_main_reuses_cache_when_task_pool_fingerprint_matches(
                 "data_config_name": "on_policy_swe_smith",
                 "dataset_id": "dummy/dataset",
                 "dataset_split": "train",
+                "patch_is_bug_introducing": True,
+                "verifier_kind": "pytest",
                 "probe_label": "smoke",
                 "initial_model": "/tmp/model",
                 "turn_generator_mode": "default",
@@ -462,6 +466,8 @@ def test_main_rebuilds_cache_when_task_pool_fingerprint_changes(
                 "data_config_name": "on_policy_swe_smith",
                 "dataset_id": "dummy/dataset",
                 "dataset_split": "train",
+                "patch_is_bug_introducing": True,
+                "verifier_kind": "pytest",
                 "probe_label": "smoke",
                 "initial_model": "/tmp/model",
                 "turn_generator_mode": "default",
@@ -530,3 +536,30 @@ def test_main_rebuilds_cache_when_task_pool_fingerprint_changes(
     assert len(captured_requests) == 1
     assert payload["task_pool_fingerprint"] == band_module._build_task_pool_fingerprint(tasks)
     assert payload["records"][0]["difficulty_band"] == "easy"
+
+
+def test_task_pool_fingerprint_changes_when_task_content_changes() -> None:
+    original = [
+        TaskSample(
+            task_id="task-a",
+            image_name="img:a",
+            problem_statement="original prompt",
+            fail_to_pass=["fa"],
+            pass_to_pass=["pa"],
+            raw={},
+            task_family="func_basic",
+        )
+    ]
+    updated = [
+        TaskSample(
+            task_id="task-a",
+            image_name="img:a",
+            problem_statement="updated prompt",
+            fail_to_pass=["fa", "fb"],
+            pass_to_pass=["pa"],
+            raw={},
+            task_family="func_basic",
+        )
+    ]
+
+    assert band_module._build_task_pool_fingerprint(original) != band_module._build_task_pool_fingerprint(updated)

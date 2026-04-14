@@ -281,6 +281,16 @@ def _build_task_pool_fingerprint(tasks: Sequence[TaskSample]) -> str:
         digest.update(b"\0")
         digest.update(task.image_name.encode("utf-8"))
         digest.update(b"\0")
+        digest.update(task.problem_statement.encode("utf-8"))
+        digest.update(b"\0")
+        for target in task.fail_to_pass:
+            digest.update(target.encode("utf-8"))
+            digest.update(b"\0")
+        digest.update(b"\1")
+        for target in task.pass_to_pass:
+            digest.update(target.encode("utf-8"))
+            digest.update(b"\0")
+        digest.update(b"\2")
     return digest.hexdigest()
 
 
@@ -305,6 +315,8 @@ def _build_expected_cache_metadata(
         "data_config_name": data_config_name,
         "dataset_id": settings.data.dataset_id,
         "dataset_split": settings.data.dataset_split,
+        "patch_is_bug_introducing": bool(settings.data.patch_is_bug_introducing),
+        "verifier_kind": str(settings.data.verifier_kind),
         "probe_label": probe_label,
         "initial_model": initial_model,
         "turn_generator_mode": turn_generator_mode,

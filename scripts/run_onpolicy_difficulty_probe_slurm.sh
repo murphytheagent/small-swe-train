@@ -129,7 +129,7 @@ from urllib.parse import urlparse
 
 raw_value = sys.argv[1].strip()
 parsed = urlparse(raw_value)
-if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+if parsed.scheme != "http" or not parsed.netloc:
     raise SystemExit(f"Invalid SMALL_SWE_VLLM_BASE_URL: {raw_value!r}")
 host = (parsed.hostname or "").strip().lower()
 if host not in {"127.0.0.1", "localhost", "::1"}:
@@ -138,20 +138,21 @@ if host not in {"127.0.0.1", "localhost", "::1"}:
         "run_onpolicy_difficulty_probe_slurm.sh always starts its own local vLLM server."
     )
 path = parsed.path.rstrip("/")
-if path.endswith("/v1"):
-    normalized_path = path
-elif path.endswith("/v1/models"):
-    normalized_path = path[: -len("/models")]
-elif path.endswith("/v1/chat/completions"):
-    normalized_path = path[: -len("/chat/completions")]
-elif path.endswith("/chat/completions"):
-    normalized_path = path[: -len("/chat/completions")] + "/v1"
-elif path.endswith("/models"):
-    normalized_path = path[: -len("/models")] + "/v1"
-elif not path:
+if path in {"", "/v1"}:
+    normalized_path = "/v1"
+elif path == "/v1/models":
+    normalized_path = "/v1"
+elif path == "/v1/chat/completions":
+    normalized_path = "/v1"
+elif path == "/chat/completions":
+    normalized_path = "/v1"
+elif path == "/models":
     normalized_path = "/v1"
 else:
-    normalized_path = path + "/v1"
+    raise SystemExit(
+        "SMALL_SWE_VLLM_BASE_URL must be empty or point at the local /v1, /v1/models, "
+        "or /v1/chat/completions surface exposed by the spawned server."
+    )
 print(parsed._replace(path=normalized_path, params="", query="", fragment="").geturl())
 PY
 )"

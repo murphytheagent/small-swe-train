@@ -1184,6 +1184,46 @@ def test_onpolicy_difficulty_probe_slurm_script_rejects_non_local_base_url() -> 
     assert "must point at a local loopback host" in result.stderr
 
 
+def test_onpolicy_difficulty_probe_slurm_script_rejects_https_base_url() -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "SMALL_SWE_VLLM_BASE_URL": "https://127.0.0.1:19191/v1",
+        },
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "Invalid SMALL_SWE_VLLM_BASE_URL" in result.stderr
+
+
+def test_onpolicy_difficulty_probe_slurm_script_rejects_prefixed_local_base_url() -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "SMALL_SWE_VLLM_BASE_URL": "http://127.0.0.1:19191/foo/v1",
+        },
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "must be empty or point at the local /v1" in result.stderr
+
+
 def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:
     result = _run_script("run_sdpo.sh", "data.train_batch_size=4")
     assert "-m verl_integration.main_ppo_entry" in result.stdout
