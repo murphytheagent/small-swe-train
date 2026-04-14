@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -102,6 +103,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Probe at most this many tasks after start-task-index.",
     )
     parser.add_argument(
+        "--task-batch-size",
+        type=int,
+        default=1,
+        help="Number of tasks to probe concurrently in each runtime batch (default: 1).",
+    )
+    parser.add_argument(
+        "--env-pool-size",
+        type=int,
+        default=None,
+        help=(
+            "Container pool size used during probing. Defaults to --task-batch-size "
+            "when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--max-in-flight-tasks",
+        type=int,
+        default=None,
+        help=(
+            "Maximum concurrent tasks dispatched inside each probe batch. Defaults to "
+            "--env-pool-size when omitted."
+        ),
+    )
+    parser.add_argument(
         "--eval-split-fraction",
         type=float,
         default=None,
@@ -199,6 +224,36 @@ def _build_band_record(
     }
 
 
+def _resolve_probe_parallelism(
+    *,
+    parser: argparse.ArgumentParser,
+    task_batch_size: int,
+    env_pool_size: int | None,
+    max_in_flight_tasks: int | None,
+) -> tuple[int, int, int]:
+    if task_batch_size < 1:
+        parser.error("--task-batch-size must be >= 1")
+
+    resolved_env_pool_size = task_batch_size if env_pool_size is None else int(env_pool_size)
+    if resolved_env_pool_size < 1:
+        parser.error("--env-pool-size must be >= 1 when provided")
+    resolved_env_pool_size = min(resolved_env_pool_size, task_batch_size)
+
+    if max_in_flight_tasks is None:
+        resolved_max_in_flight_tasks = resolved_env_pool_size
+    else:
+        resolved_max_in_flight_tasks = int(max_in_flight_tasks)
+    if resolved_max_in_flight_tasks < 1:
+        parser.error("--max-in-flight-tasks must be >= 1 when provided")
+    resolved_max_in_flight_tasks = min(
+        resolved_max_in_flight_tasks,
+        task_batch_size,
+        resolved_env_pool_size,
+    )
+
+    return task_batch_size, resolved_env_pool_size, resolved_max_in_flight_tasks
+
+
 def _coerce_rows(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -207,6 +262,60 @@ def _coerce_rows(value: Any) -> list[dict[str, Any]]:
         if isinstance(item, Mapping):
             rows.append(dict(item))
     return rows
+
+
+def _filter_rows_for_task(
+    rows: Any,
+    *,
+    task_id: str,
+    fallback_task_id: str = "",
+) -> list[dict[str, Any]]:
+    matched: list[dict[str, Any]] = []
+    for row in _coerce_rows(rows):
+        row_task_id = str(row.get("task_id", "")).strip()
+        if row_task_id:
+            if row_task_id == task_id:
+                matched.append(row)
+            continue
+        if fallback_task_id and task_id == fallback_task_id:
+            matched.append(row)
+    return matched
+
+
+def _extract_task_result(
+    *,
+    result: Mapping[str, Any],
+    task_id: str,
+    fallback_task_id: str = "",
+) -> dict[str, Any]:
+    return {
+        "rollout_rows": _filter_rows_for_task(
+            result.get("rollout_rows"),
+            task_id=task_id,
+            fallback_task_id=fallback_task_id,
+        ),
+        "selected_rows": _filter_rows_for_task(
+            result.get("selected_rows"),
+            task_id=task_id,
+            fallback_task_id=fallback_task_id,
+        ),
+        "rejected_rows": _filter_rows_for_task(
+            result.get("rejected_rows"),
+            task_id=task_id,
+            fallback_task_id=fallback_task_id,
+        ),
+    }
+
+
+def _build_dataset_loader_for_tasks(
+    tasks: Sequence[TaskSample],
+) -> Callable[[str, str], Sequence[Mapping[str, Any]]]:
+    rows = tuple(dict(task.raw) for task in tasks)
+
+    def _load_dataset(_dataset_id: str, _split: str) -> Sequence[Mapping[str, Any]]:
+        return rows
+
+    return _load_dataset
 
 
 def _resolve_partition_eval_settings(
@@ -350,6 +459,16 @@ def main() -> int:
         parser.error("--start-task-index must be >= 0")
     if args.task_limit is not None and args.task_limit < 1:
         parser.error("--task-limit must be >= 1 when provided")
+    (
+        resolved_task_batch_size,
+        resolved_env_pool_size,
+        resolved_max_in_flight_tasks,
+    ) = _resolve_probe_parallelism(
+        parser=parser,
+        task_batch_size=int(args.task_batch_size),
+        env_pool_size=args.env_pool_size,
+        max_in_flight_tasks=args.max_in_flight_tasks,
+    )
 
     settings = resolve_on_policy_settings(data_config_name=args.data_config_name)
     resolved_eval_split_fraction, resolved_min_eval_rows = _resolve_partition_eval_settings(
@@ -416,37 +535,84 @@ def main() -> int:
     verify_submissions = resolve_rft_stage_verify_submissions(resolved_stage_name)
 
     records: list[dict[str, Any]] = []
-    for offset, task in enumerate(sliced_tasks):
-        probe_step_index = start_index + offset
-        result = collect_onpolicy_rft_runtime_batch(
-            request=OnPolicyRFTRuntimeRequest(
-                data_config_name=args.data_config_name,
-                turn_generator_mode=args.turn_generator_mode,
-                total_steps=1,
-                start_step_index=probe_step_index,
-                runtime_overrides={
-                    "task_batch_size": 1,
-                    "attempts_per_task": int(args.attempts_per_task),
-                    "env_pool_size": 1,
-                    "max_in_flight_tasks": 1,
-                },
-                handoff_overrides=handoff_overrides,
-                task_partition=args.task_partition,
-                task_eval_split_fraction=resolved_eval_split_fraction,
-                task_eval_min_rows=resolved_min_eval_rows,
-                verify_submissions=verify_submissions,
-                stage_name=resolved_stage_name,
-            ),
-            tokenizer=tokenizer,
-        )
-        records.append(
-            _build_band_record(
-                task=task,
-                probe_step_index=probe_step_index,
-                stage_name=resolved_stage_name,
-                result=result,
+    if resolved_task_batch_size == 1:
+        for offset, task in enumerate(sliced_tasks):
+            probe_step_index = start_index + offset
+            result = collect_onpolicy_rft_runtime_batch(
+                request=OnPolicyRFTRuntimeRequest(
+                    data_config_name=args.data_config_name,
+                    turn_generator_mode=args.turn_generator_mode,
+                    total_steps=1,
+                    start_step_index=probe_step_index,
+                    runtime_overrides={
+                        "task_batch_size": 1,
+                        "attempts_per_task": int(args.attempts_per_task),
+                        "env_pool_size": 1,
+                        "max_in_flight_tasks": 1,
+                    },
+                    handoff_overrides=handoff_overrides,
+                    task_partition=args.task_partition,
+                    task_eval_split_fraction=resolved_eval_split_fraction,
+                    task_eval_min_rows=resolved_min_eval_rows,
+                    verify_submissions=verify_submissions,
+                    stage_name=resolved_stage_name,
+                ),
+                tokenizer=tokenizer,
             )
-        )
+            records.append(
+                _build_band_record(
+                    task=task,
+                    probe_step_index=probe_step_index,
+                    stage_name=resolved_stage_name,
+                    result=result,
+                )
+            )
+    else:
+        for chunk_start in range(0, len(sliced_tasks), resolved_task_batch_size):
+            task_chunk = sliced_tasks[chunk_start : chunk_start + resolved_task_batch_size]
+            chunk_probe_step_index = start_index + chunk_start
+            result = collect_onpolicy_rft_runtime_batch(
+                request=OnPolicyRFTRuntimeRequest(
+                    data_config_name=args.data_config_name,
+                    turn_generator_mode=args.turn_generator_mode,
+                    total_steps=1,
+                    start_step_index=chunk_probe_step_index,
+                    runtime_overrides={
+                        "task_batch_size": len(task_chunk),
+                        "attempts_per_task": int(args.attempts_per_task),
+                        "env_pool_size": min(resolved_env_pool_size, len(task_chunk)),
+                        "max_in_flight_tasks": min(
+                            resolved_max_in_flight_tasks,
+                            len(task_chunk),
+                        ),
+                    },
+                    handoff_overrides=handoff_overrides,
+                    task_partition="all",
+                    task_eval_split_fraction=0.0,
+                    task_eval_min_rows=0,
+                    verify_submissions=verify_submissions,
+                    stage_name=resolved_stage_name,
+                    dataset_loader=_build_dataset_loader_for_tasks(task_chunk),
+                ),
+                tokenizer=tokenizer,
+            )
+
+            fallback_task_id = task_chunk[0].task_id if len(task_chunk) == 1 else ""
+            for offset, task in enumerate(task_chunk):
+                probe_step_index = chunk_probe_step_index + offset
+                task_result = _extract_task_result(
+                    result=result,
+                    task_id=task.task_id,
+                    fallback_task_id=fallback_task_id,
+                )
+                records.append(
+                    _build_band_record(
+                        task=task,
+                        probe_step_index=probe_step_index,
+                        stage_name=resolved_stage_name,
+                        result=task_result,
+                    )
+                )
 
     payload = {
         "schema_version": 1,
@@ -454,6 +620,8 @@ def main() -> int:
         "data_config_name": args.data_config_name,
         "dataset_id": settings.data.dataset_id,
         "dataset_split": settings.data.dataset_split,
+        "patch_is_bug_introducing": bool(settings.data.patch_is_bug_introducing),
+        "verifier_kind": str(settings.data.verifier_kind),
         "probe_label": str(args.probe_label).strip(),
         "initial_model": str(args.initial_model).strip(),
         "turn_generator_mode": str(args.turn_generator_mode).strip(),

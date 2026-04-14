@@ -184,6 +184,9 @@ VLLM_CMD=(
   --gpu-memory-utilization "${PROBE_VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
   --max-model-len "${PROBE_VLLM_MAX_MODEL_LEN:-32768}"
 )
+if [[ -n "${PROBE_VLLM_DP_SIZE:-}" ]]; then
+  VLLM_CMD+=(--data-parallel-size "${PROBE_VLLM_DP_SIZE}")
+fi
 if [[ -n "${PROBE_VLLM_KV_CACHE_MEMORY_BYTES:-}" ]]; then
   VLLM_CMD+=(--kv-cache-memory-bytes "${PROBE_VLLM_KV_CACHE_MEMORY_BYTES}")
 fi
@@ -206,6 +209,15 @@ PROBE_CMD=(
 )
 if [[ -n "${PROBE_TASK_LIMIT:-}" ]]; then
   PROBE_CMD+=(--task-limit "${PROBE_TASK_LIMIT}")
+fi
+if [[ -n "${PROBE_TASK_BATCH_SIZE:-}" ]]; then
+  PROBE_CMD+=(--task-batch-size "${PROBE_TASK_BATCH_SIZE}")
+fi
+if [[ -n "${PROBE_ENV_POOL_SIZE:-}" ]]; then
+  PROBE_CMD+=(--env-pool-size "${PROBE_ENV_POOL_SIZE}")
+fi
+if [[ -n "${PROBE_MAX_IN_FLIGHT_TASKS:-}" ]]; then
+  PROBE_CMD+=(--max-in-flight-tasks "${PROBE_MAX_IN_FLIGHT_TASKS}")
 fi
 if [[ -n "${PROBE_TASK_EVAL_SPLIT_FRACTION:-}" ]]; then
   PROBE_CMD+=(--eval-split-fraction "${PROBE_TASK_EVAL_SPLIT_FRACTION}")

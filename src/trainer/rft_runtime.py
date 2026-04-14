@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME
 from data.tokenization import SupportsOffsetsTokenizer
+from env.task_dataset import DatasetLoader
 from rollout.vllm_turn_generator import build_vllm_turn_generator
 from trainer.rft_handoff import (
     build_onpolicy_collector,
@@ -31,6 +32,7 @@ class OnPolicyRFTRuntimeRequest:
     task_eval_min_rows: int = 0
     verify_submissions: bool = False
     stage_name: str = "format_rft"
+    dataset_loader: DatasetLoader | None = None
 
 
 def collect_onpolicy_rft_runtime_batch(
@@ -52,6 +54,7 @@ def collect_onpolicy_rft_runtime_batch(
         task_eval_split_fraction=request.task_eval_split_fraction,
         task_eval_min_rows=request.task_eval_min_rows,
         stage_name=request.stage_name,
+        dataset_loader=request.dataset_loader,
     )
 
     resolved_output_dir = _normalized_output_dir(request.output_dir)

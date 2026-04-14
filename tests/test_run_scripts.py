@@ -1065,6 +1065,26 @@ def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_visible_gpus_for_tp
     assert "--attempts-per-task 4" in result.stdout
 
 
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_passes_parallel_probe_overrides() -> None:
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "8",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_VLLM_TP_SIZE": "2",
+            "PROBE_VLLM_DP_SIZE": "4",
+            "PROBE_TASK_BATCH_SIZE": "4",
+            "PROBE_ENV_POOL_SIZE": "4",
+            "PROBE_MAX_IN_FLIGHT_TASKS": "4",
+        },
+    )
+    assert "--tensor-parallel-size 2" in result.stdout
+    assert "--data-parallel-size 4" in result.stdout
+    assert "--task-batch-size 4" in result.stdout
+    assert "--env-pool-size 4" in result.stdout
+    assert "--max-in-flight-tasks 4" in result.stdout
+
+
 def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_overridden_base_url_port() -> None:
     result = _run_script(
         "run_onpolicy_difficulty_probe_slurm.sh",

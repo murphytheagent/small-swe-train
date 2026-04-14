@@ -170,6 +170,8 @@ def test_main_materializes_rollout_probe_cache(
 
     assert exit_code == 0
     assert output_path == tmp_path / "difficulty_bands_dummy_dataset_train_smoke.json"
+    assert payload["patch_is_bug_introducing"] is True
+    assert payload["verifier_kind"] == "pytest"
     assert payload["task_count"] == 2
     assert payload["records"][0]["task_id"] == "task-a"
     assert payload["records"][0]["difficulty_band"] == "learnable"
@@ -182,6 +184,141 @@ def test_main_materializes_rollout_probe_cache(
     assert captured_requests[0].runtime_overrides["attempts_per_task"] == 4
     assert captured_requests[0].verify_submissions is True
     assert captured_requests[0].stage_name == "positive_rft"
+
+
+def test_main_batches_probe_tasks_when_requested(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskSample(
+            task_id="task-a",
+            image_name="img:a",
+            problem_statement="pa",
+            fail_to_pass=["fa"],
+            pass_to_pass=["pa"],
+            raw={},
+            task_family="func_basic",
+        ),
+        TaskSample(
+            task_id="task-b",
+            image_name="img:b",
+            problem_statement="pb",
+            fail_to_pass=["fb"],
+            pass_to_pass=["pb"],
+            raw={},
+            task_family="combine_file",
+        ),
+        TaskSample(
+            task_id="task-c",
+            image_name="img:c",
+            problem_statement="pc",
+            fail_to_pass=["fc"],
+            pass_to_pass=["pc"],
+            raw={},
+            task_family="func_basic",
+        ),
+    ]
+
+    captured_requests = []
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        if request.start_step_index == 0:
+            return {
+                "rollout_rows": [
+                    {"task_id": "task-a", "resolved": True},
+                    {"task_id": "task-a", "resolved": True},
+                    {"task_id": "task-a", "resolved": True},
+                    {"task_id": "task-a", "resolved": False},
+                    {"task_id": "task-b", "resolved": False},
+                    {"task_id": "task-b", "resolved": False},
+                    {"task_id": "task-b", "resolved": False},
+                    {"task_id": "task-b", "resolved": False},
+                ],
+                "selected_rows": [
+                    {"task_id": "task-a"},
+                    {"task_id": "task-a"},
+                    {"task_id": "task-a"},
+                ],
+                "rejected_rows": [
+                    {"task_id": "task-a", "rft_rejection_reason": "unresolved"},
+                    {"task_id": "task-b", "rft_rejection_reason": "unresolved"},
+                    {"task_id": "task-b", "rft_rejection_reason": "unresolved"},
+                    {"task_id": "task-b", "rft_rejection_reason": "unresolved"},
+                    {"task_id": "task-b", "rft_rejection_reason": "unresolved"},
+                ],
+            }
+        return {
+            "rollout_rows": [
+                {"task_id": "task-c", "resolved": True},
+                {"task_id": "task-c", "resolved": False},
+                {"task_id": "task-c", "resolved": False},
+                {"task_id": "task-c", "resolved": False},
+            ],
+            "selected_rows": [{"task_id": "task-c"}],
+            "rejected_rows": [
+                {"task_id": "task-c", "rft_rejection_reason": "unresolved"},
+                {"task_id": "task-c", "rft_rejection_reason": "unresolved"},
+                {"task_id": "task-c", "rft_rejection_reason": "unresolved"},
+            ],
+        }
+
+    monkeypatch.setattr(
+        band_module,
+        "resolve_on_policy_settings",
+        lambda data_config_name: _settings(),
+    )
+    monkeypatch.setattr(
+        band_module,
+        "rft_runtime_defaults",
+        lambda: {"loop": {"eval_split_fraction": 0.1, "eval_min_rows": 1}},
+    )
+    monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
+    monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
+    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preload_onpolicy_difficulty_bands.py",
+            "--initial-model",
+            "/tmp/model",
+            "--cache-dir",
+            str(tmp_path),
+            "--probe-label",
+            "batched",
+            "--task-batch-size",
+            "2",
+            "--env-pool-size",
+            "3",
+            "--max-in-flight-tasks",
+            "5",
+        ],
+    )
+
+    exit_code = band_module.main()
+    output_path = Path(capsys.readouterr().out.strip())
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert len(captured_requests) == 2
+    assert captured_requests[0].runtime_overrides["task_batch_size"] == 2
+    assert captured_requests[0].runtime_overrides["env_pool_size"] == 2
+    assert captured_requests[0].runtime_overrides["max_in_flight_tasks"] == 2
+    assert captured_requests[0].task_partition == "all"
+    assert captured_requests[0].task_eval_split_fraction == 0.0
+    assert captured_requests[0].task_eval_min_rows == 0
+    assert captured_requests[0].dataset_loader is not None
+    assert captured_requests[1].runtime_overrides["task_batch_size"] == 1
+    assert captured_requests[1].runtime_overrides["env_pool_size"] == 1
+    assert captured_requests[1].runtime_overrides["max_in_flight_tasks"] == 1
+    assert [record["task_id"] for record in payload["records"]] == ["task-a", "task-b", "task-c"]
+    assert payload["records"][0]["difficulty_band"] == "easy"
+    assert payload["records"][1]["difficulty_band"] == "near_impossible"
+    assert payload["records"][2]["difficulty_band"] == "learnable"
 
 
 def test_main_uses_runtime_eval_split_defaults_for_partitioned_probe(
@@ -350,6 +487,78 @@ def test_main_rebuilds_cache_when_existing_metadata_is_incompatible(
     assert exit_code == 0
     assert len(captured_requests) == 1
     assert payload["initial_model"] == "/tmp/new-model"
+
+
+def test_main_reuses_freshly_materialized_cache(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskSample(
+            task_id="task-a",
+            image_name="img:a",
+            problem_statement="pa",
+            fail_to_pass=["fa"],
+            pass_to_pass=["pa"],
+            raw={},
+            task_family="func_basic",
+        )
+    ]
+    captured_requests = []
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        return {
+            "rollout_rows": [{"resolved": True}],
+            "selected_rows": [{"task_id": "task-a"}],
+            "rejected_rows": [],
+        }
+
+    monkeypatch.setattr(
+        band_module,
+        "resolve_on_policy_settings",
+        lambda data_config_name: _settings(),
+    )
+    monkeypatch.setattr(
+        band_module,
+        "rft_runtime_defaults",
+        lambda: {"loop": {"eval_split_fraction": 0.1, "eval_min_rows": 1}},
+    )
+    monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
+    monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
+    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preload_onpolicy_difficulty_bands.py",
+            "--initial-model",
+            "/tmp/model",
+            "--cache-dir",
+            str(tmp_path),
+            "--probe-label",
+            "smoke",
+        ],
+    )
+
+    first_exit_code = band_module.main()
+    first_output_path = Path(capsys.readouterr().out.strip())
+
+    monkeypatch.setattr(
+        band_module,
+        "collect_onpolicy_rft_runtime_batch",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("probe should not rerun")),
+    )
+
+    second_exit_code = band_module.main()
+    second_output_path = Path(capsys.readouterr().out.strip())
+
+    assert first_exit_code == 0
+    assert second_exit_code == 0
+    assert len(captured_requests) == 1
+    assert second_output_path == first_output_path
 
 
 def test_main_reuses_cache_when_task_pool_fingerprint_matches(
