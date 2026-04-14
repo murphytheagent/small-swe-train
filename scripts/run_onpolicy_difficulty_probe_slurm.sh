@@ -131,6 +131,12 @@ raw_value = sys.argv[1].strip()
 parsed = urlparse(raw_value)
 if parsed.scheme not in {"http", "https"} or not parsed.netloc:
     raise SystemExit(f"Invalid SMALL_SWE_VLLM_BASE_URL: {raw_value!r}")
+host = (parsed.hostname or "").strip().lower()
+if host not in {"127.0.0.1", "localhost", "::1"}:
+    raise SystemExit(
+        "SMALL_SWE_VLLM_BASE_URL must point at a local loopback host because "
+        "run_onpolicy_difficulty_probe_slurm.sh always starts its own local vLLM server."
+    )
 path = parsed.path.rstrip("/")
 if path.endswith("/v1"):
     normalized_path = path

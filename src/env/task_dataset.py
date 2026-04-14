@@ -156,7 +156,7 @@ def resolve_on_policy_difficulty_band_cache_path(
     probe_label: str,
 ) -> Path:
     """Resolve a descriptive difficulty-band cache path for one dataset config."""
-    label_slug = _slugify_for_filename(probe_label)
+    label_slug = _slugify_for_filename(probe_label, fallback="")
     if not label_slug:
         raise ValueError("probe_label must contain at least one filename-safe character.")
     dataset_slug = _slugify_for_filename(config.dataset_id)
@@ -1087,11 +1087,11 @@ def _write_records_to_parquet(records: Sequence[Mapping[str, Any]], output_path:
             writer.close()
 
 
-def _slugify_for_filename(value: str) -> str:
+def _slugify_for_filename(value: str, *, fallback: str = "dataset") -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")
     if normalized:
         return normalized
-    return "dataset"
+    return fallback
 
 
 def split_task_samples_for_eval(

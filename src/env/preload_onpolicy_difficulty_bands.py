@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME, resolve_on_policy_settings
+from config import (
+    DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
+    resolve_on_policy_settings,
+    rft_runtime_defaults,
+)
 from env.task_dataset import (
     TaskSample,
     load_task_samples,
@@ -207,7 +212,6 @@ def _coerce_rows(value: Any) -> list[dict[str, Any]]:
 def _resolve_partition_eval_settings(
     *,
     parser: argparse.ArgumentParser,
-    settings: Any,
     task_partition: str,
     eval_split_fraction: float | None,
     min_eval_rows: int | None,
@@ -219,16 +223,16 @@ def _resolve_partition_eval_settings(
             )
         return 0.0, 0
 
-    runtime_defaults = getattr(settings, "runtime", None)
+    default_eval_split_fraction, default_min_eval_rows = _resolve_eval_split_defaults()
     resolved_eval_split_fraction = (
         float(eval_split_fraction)
         if eval_split_fraction is not None
-        else float(getattr(runtime_defaults, "eval_split_fraction", 0.0))
+        else default_eval_split_fraction
     )
     resolved_min_eval_rows = (
         int(min_eval_rows)
         if min_eval_rows is not None
-        else int(getattr(runtime_defaults, "eval_min_rows", 0))
+        else default_min_eval_rows
     )
     if resolved_eval_split_fraction < 0.0 or resolved_eval_split_fraction >= 1.0:
         parser.error("--eval-split-fraction must be in [0.0, 1.0).")
@@ -237,11 +241,47 @@ def _resolve_partition_eval_settings(
     return resolved_eval_split_fraction, resolved_min_eval_rows
 
 
+def _resolve_eval_split_defaults() -> tuple[float, int]:
+    fallback_fraction = 0.1
+    fallback_min_rows = 1
+    defaults = rft_runtime_defaults()
+    loop = defaults.get("loop")
+    if not isinstance(loop, Mapping):
+        return fallback_fraction, fallback_min_rows
+
+    fraction_value = loop.get("eval_split_fraction")
+    if isinstance(fraction_value, bool) or not isinstance(fraction_value, (int, float)):
+        resolved_fraction = fallback_fraction
+    else:
+        resolved_fraction = float(fraction_value)
+    if not 0.0 <= resolved_fraction < 1.0:
+        resolved_fraction = fallback_fraction
+
+    min_rows_value = loop.get("eval_min_rows")
+    if isinstance(min_rows_value, bool) or not isinstance(min_rows_value, int) or min_rows_value < 0:
+        resolved_min_rows = fallback_min_rows
+    else:
+        resolved_min_rows = int(min_rows_value)
+    return resolved_fraction, resolved_min_rows
+
+
 def _load_cache_payload(cache_path: Path) -> Mapping[str, Any]:
     payload = json.loads(cache_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise ValueError(f"Difficulty-band cache payload must be a mapping: {cache_path}")
     return payload
+
+
+def _build_task_pool_fingerprint(tasks: Sequence[TaskSample]) -> str:
+    digest = hashlib.sha256()
+    for task in tasks:
+        digest.update(task.task_id.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(task.task_family.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(task.image_name.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _build_expected_cache_metadata(
@@ -258,6 +298,8 @@ def _build_expected_cache_metadata(
     task_limit: int | None,
     eval_split_fraction: float,
     min_eval_rows: int,
+    task_pool_size: int,
+    task_pool_fingerprint: str,
 ) -> dict[str, Any]:
     return {
         "data_config_name": data_config_name,
@@ -273,6 +315,8 @@ def _build_expected_cache_metadata(
         "task_limit": task_limit,
         "eval_split_fraction": eval_split_fraction,
         "min_eval_rows": min_eval_rows,
+        "task_pool_size": task_pool_size,
+        "task_pool_fingerprint": task_pool_fingerprint,
     }
 
 
@@ -298,7 +342,6 @@ def main() -> int:
     settings = resolve_on_policy_settings(data_config_name=args.data_config_name)
     resolved_eval_split_fraction, resolved_min_eval_rows = _resolve_partition_eval_settings(
         parser=parser,
-        settings=settings,
         task_partition=args.task_partition,
         eval_split_fraction=args.eval_split_fraction,
         min_eval_rows=args.min_eval_rows,
@@ -323,15 +366,12 @@ def main() -> int:
         task_limit=int(args.task_limit) if args.task_limit is not None else None,
         eval_split_fraction=resolved_eval_split_fraction,
         min_eval_rows=resolved_min_eval_rows,
+        task_pool_size=0,
+        task_pool_fingerprint="",
     )
     if args.print_path_only:
         print(cache_path)
         return 0
-    if cache_path.is_file() and not bool(args.force_refresh):
-        payload = _load_cache_payload(cache_path)
-        if _cache_metadata_matches(payload=payload, expected=expected_cache_metadata):
-            print(cache_path)
-            return 0
 
     tasks = load_task_samples(
         config=settings.data,
@@ -339,6 +379,14 @@ def main() -> int:
         eval_split_fraction=resolved_eval_split_fraction,
         min_eval_rows=resolved_min_eval_rows,
     )
+    expected_cache_metadata["task_pool_size"] = len(tasks)
+    expected_cache_metadata["task_pool_fingerprint"] = _build_task_pool_fingerprint(tasks)
+    if cache_path.is_file() and not bool(args.force_refresh):
+        payload = _load_cache_payload(cache_path)
+        if _cache_metadata_matches(payload=payload, expected=expected_cache_metadata):
+            print(cache_path)
+            return 0
+
     start_index = int(args.start_task_index)
     if start_index >= len(tasks):
         raise ValueError(
@@ -404,6 +452,8 @@ def main() -> int:
         "task_limit": int(args.task_limit) if args.task_limit is not None else None,
         "eval_split_fraction": resolved_eval_split_fraction,
         "min_eval_rows": resolved_min_eval_rows,
+        "task_pool_size": expected_cache_metadata["task_pool_size"],
+        "task_pool_fingerprint": expected_cache_metadata["task_pool_fingerprint"],
         "task_count": len(records),
         "records": records,
     }

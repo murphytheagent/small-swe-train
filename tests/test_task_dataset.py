@@ -810,6 +810,17 @@ def test_resolve_on_policy_difficulty_band_cache_path_is_descriptive(tmp_path: P
     assert resolved.name == "difficulty_bands_dummy_dataset_train_positive_rft_probe.json"
 
 
+def test_resolve_on_policy_difficulty_band_cache_path_rejects_non_filename_probe_label(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="probe_label must contain at least one filename-safe character"):
+        resolve_on_policy_difficulty_band_cache_path(
+            config=_config(),
+            cache_dir=tmp_path,
+            probe_label="!!!",
+        )
+
+
 def test_load_task_batch_invalidates_cached_hf_pool_when_rollout_probe_source_changes(
     tmp_path: Path,
     monkeypatch,
