@@ -440,6 +440,47 @@ def test_load_task_batch_requires_rollout_probe_entry_for_every_task(tmp_path: P
         )
 
 
+def test_load_task_batch_rejects_duplicate_rollout_probe_task_ids(tmp_path: Path) -> None:
+    cache_path = tmp_path / "difficulty_bands.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "records": [
+                    {
+                        "task_id": "repo.sha.func_basic__0001",
+                        "task_family": "func_basic",
+                        "difficulty_band": "easy",
+                    },
+                    {
+                        "task_id": "repo.sha.func_basic__0001",
+                        "task_family": "func_basic",
+                        "difficulty_band": "near_impossible",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "repo.sha.func_basic__0001",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="duplicate task_id"):
+        load_task_batch(
+            step_index=0,
+            batch_size=1,
+            config=_rollout_probe_config(str(cache_path)),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )
+
+
 def test_load_task_batch_reraises_partitioned_rollout_probe_errors(tmp_path: Path) -> None:
     cache_path = tmp_path / "difficulty_bands.json"
     cache_path.write_text(

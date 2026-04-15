@@ -608,6 +608,11 @@ def _load_rollout_probe_cache_records_cached(
                     "Difficulty-band cache records must include non-empty task_id and "
                     f"difficulty_band fields: {cache_path}"
                 )
+            if task_id in records_by_task_id:
+                raise ValueError(
+                    "Difficulty-band cache contains duplicate task_id "
+                    f"{task_id!r}: {cache_path}"
+                )
             records_by_task_id[task_id] = {
                 "task_family": str(raw_record.get("task_family", "")).strip(),
                 "difficulty_band": difficulty_band,
