@@ -421,6 +421,124 @@ def test_main_batches_probe_tasks_when_requested(
     assert payload["records"][2]["difficulty_band"] == "learnable"
 
 
+def test_main_resumes_from_partial_progress_cache(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskSample(
+            task_id="task-a",
+            image_name="img:a",
+            problem_statement="pa",
+            fail_to_pass=["fa"],
+            pass_to_pass=["pa"],
+            raw={},
+            task_family="func_basic",
+        ),
+        TaskSample(
+            task_id="task-b",
+            image_name="img:b",
+            problem_statement="pb",
+            fail_to_pass=["fb"],
+            pass_to_pass=["pb"],
+            raw={},
+            task_family="combine_file",
+        ),
+        TaskSample(
+            task_id="task-c",
+            image_name="img:c",
+            problem_statement="pc",
+            fail_to_pass=["fc"],
+            pass_to_pass=["pc"],
+            raw={},
+            task_family="func_basic",
+        ),
+    ]
+
+    probe_calls: list[object] = []
+    run_state = {"first_run": True}
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        probe_calls.append(request)
+        if request.start_step_index == 0:
+            return {
+                "rollout_rows": [
+                    {"task_id": "task-a", "resolved": True},
+                    {"task_id": "task-b", "resolved": True},
+                ],
+                "selected_rows": [
+                    {"task_id": "task-a"},
+                    {"task_id": "task-b"},
+                ],
+                "rejected_rows": [],
+            }
+        if run_state["first_run"]:
+            raise RuntimeError("probe interrupted after first chunk")
+        return {
+            "rollout_rows": [
+                {"task_id": "task-c", "resolved": True},
+            ],
+            "selected_rows": [{"task_id": "task-c"}],
+            "rejected_rows": [],
+        }
+
+    monkeypatch.setattr(
+        band_module,
+        "resolve_on_policy_settings",
+        lambda data_config_name: _settings(),
+    )
+    monkeypatch.setattr(
+        band_module,
+        "rft_runtime_defaults",
+        lambda: {"loop": {"eval_split_fraction": 0.1, "eval_min_rows": 1}},
+    )
+    monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
+    monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
+    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preload_onpolicy_difficulty_bands.py",
+            "--initial-model",
+            "/tmp/model",
+            "--cache-dir",
+            str(tmp_path),
+            "--probe-label",
+            "resume",
+            "--task-batch-size",
+            "2",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="probe interrupted after first chunk"):
+        band_module.main()
+
+    output_path = tmp_path / "difficulty_bands_dummy_dataset_train_resume.json"
+    partial_path = tmp_path / "difficulty_bands_dummy_dataset_train_resume.partial.json"
+    assert not output_path.exists()
+    partial_payload = json.loads(partial_path.read_text(encoding="utf-8"))
+    assert partial_payload["probe_status"] == band_module.PROBE_STATUS_INCOMPLETE
+    assert partial_payload["task_count_completed"] == 2
+    assert [record["task_id"] for record in partial_payload["records"]] == ["task-a", "task-b"]
+
+    run_state["first_run"] = False
+    exit_code = band_module.main()
+    output_path = Path(capsys.readouterr().out.strip())
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert output_path == tmp_path / "difficulty_bands_dummy_dataset_train_resume.json"
+    assert not partial_path.exists()
+    assert payload["probe_status"] == band_module.PROBE_STATUS_COMPLETE
+    assert [record["task_id"] for record in payload["records"]] == ["task-a", "task-b", "task-c"]
+    assert len(probe_calls) == 3
+    assert probe_calls[-1].start_step_index == 2
+    assert probe_calls[-1].runtime_overrides["task_batch_size"] == 1
+
+
 def test_build_dataset_loader_for_tasks_preserves_task_ids_without_source_id_fields() -> None:
     config = _config()
     loader = band_module._build_dataset_loader_for_tasks(

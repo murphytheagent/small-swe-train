@@ -228,6 +228,9 @@ if [[ -n "${PROBE_VLLM_NUM_GPU_BLOCKS_OVERRIDE:-}" ]]; then
 fi
 
 CACHE_DIR="${PROBE_CACHE_DIR:-${PROJECT_ROOT}/data/on_policy_difficulty_band_cache}"
+DEFAULT_PROBE_TASK_BATCH_SIZE="${PROBE_TASK_BATCH_SIZE:-128}"
+DEFAULT_PROBE_ENV_POOL_SIZE="${PROBE_ENV_POOL_SIZE:-${DEFAULT_PROBE_TASK_BATCH_SIZE}}"
+DEFAULT_PROBE_MAX_IN_FLIGHT_TASKS="${PROBE_MAX_IN_FLIGHT_TASKS:-${DEFAULT_PROBE_ENV_POOL_SIZE}}"
 PROBE_CMD=(
   "${PYTHON_BIN}" -m env.preload_onpolicy_difficulty_bands
   --data-config-name "${PROBE_DATA_CONFIG_NAME:-on_policy_swe_smith}"
@@ -239,18 +242,12 @@ PROBE_CMD=(
   --task-partition "${PROBE_TASK_PARTITION:-all}"
   --attempts-per-task "${PROBE_ATTEMPTS_PER_TASK:-4}"
   --start-task-index "${PROBE_START_TASK_INDEX:-0}"
+  --task-batch-size "${DEFAULT_PROBE_TASK_BATCH_SIZE}"
+  --env-pool-size "${DEFAULT_PROBE_ENV_POOL_SIZE}"
+  --max-in-flight-tasks "${DEFAULT_PROBE_MAX_IN_FLIGHT_TASKS}"
 )
 if [[ -n "${PROBE_TASK_LIMIT:-}" ]]; then
   PROBE_CMD+=(--task-limit "${PROBE_TASK_LIMIT}")
-fi
-if [[ -n "${PROBE_TASK_BATCH_SIZE:-}" ]]; then
-  PROBE_CMD+=(--task-batch-size "${PROBE_TASK_BATCH_SIZE}")
-fi
-if [[ -n "${PROBE_ENV_POOL_SIZE:-}" ]]; then
-  PROBE_CMD+=(--env-pool-size "${PROBE_ENV_POOL_SIZE}")
-fi
-if [[ -n "${PROBE_MAX_IN_FLIGHT_TASKS:-}" ]]; then
-  PROBE_CMD+=(--max-in-flight-tasks "${PROBE_MAX_IN_FLIGHT_TASKS}")
 fi
 if [[ -n "${PROBE_TASK_EVAL_SPLIT_FRACTION:-}" ]]; then
   PROBE_CMD+=(--eval-split-fraction "${PROBE_TASK_EVAL_SPLIT_FRACTION}")

@@ -1067,6 +1067,9 @@ def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_visible_gpus_for_tp
     assert "--tensor-parallel-size 2" in result.stdout
     assert "--initial-model Qwen/Qwen3.5-9B" in result.stdout
     assert "--attempts-per-task 4" in result.stdout
+    assert "--task-batch-size 128" in result.stdout
+    assert "--env-pool-size 128" in result.stdout
+    assert "--max-in-flight-tasks 128" in result.stdout
 
 
 def test_onpolicy_difficulty_probe_slurm_script_dry_run_passes_parallel_probe_overrides() -> None:

@@ -35,6 +35,8 @@ from trainer.rft_runtime_loop import (
 
 DEFAULT_PROBE_LABEL = "positive_rft_probe"
 DEFAULT_ATTEMPTS_PER_TASK = 4
+PROBE_STATUS_COMPLETE = "complete"
+PROBE_STATUS_INCOMPLETE = "incomplete"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -416,6 +418,106 @@ def _load_cache_payload(cache_path: Path) -> Mapping[str, Any]:
     return payload
 
 
+def _resolve_partial_cache_path(cache_path: Path) -> Path:
+    return cache_path.with_suffix(".partial.json")
+
+
+def _cache_payload_is_complete(payload: Mapping[str, Any]) -> bool:
+    status_text = str(payload.get("probe_status", "")).strip().lower()
+    return not status_text or status_text == PROBE_STATUS_COMPLETE
+
+
+def _records_by_task_id(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    records = payload.get("records")
+    if not isinstance(records, Sequence) or isinstance(records, (str, bytes)):
+        raise ValueError("Difficulty-band cache payload must define a records list.")
+
+    records_by_task_id: dict[str, dict[str, Any]] = {}
+    for raw_record in records:
+        if not isinstance(raw_record, Mapping):
+            raise ValueError("Difficulty-band cache records must be mappings.")
+        task_id = str(raw_record.get("task_id", "")).strip()
+        difficulty_band = str(raw_record.get("difficulty_band", "")).strip()
+        if not task_id or not difficulty_band:
+            raise ValueError(
+                "Difficulty-band cache records must include non-empty task_id and "
+                "difficulty_band fields."
+            )
+        if task_id in records_by_task_id:
+            raise ValueError(f"Difficulty-band cache contains duplicate task_id {task_id!r}.")
+        records_by_task_id[task_id] = dict(raw_record)
+    return records_by_task_id
+
+
+def _ordered_records_for_tasks(
+    *,
+    tasks: Sequence[TaskSample],
+    records_by_task_id: Mapping[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ordered_records: list[dict[str, Any]] = []
+    for task in tasks:
+        record = records_by_task_id.get(task.task_id)
+        if record is not None:
+            ordered_records.append(dict(record))
+    return ordered_records
+
+
+def _build_cache_payload(
+    *,
+    expected_cache_metadata: Mapping[str, Any],
+    selected_task_count: int,
+    records: Sequence[Mapping[str, Any]],
+    probe_status: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "probe_status": str(probe_status).strip().lower() or PROBE_STATUS_COMPLETE,
+        **dict(expected_cache_metadata),
+        "task_count": len(records),
+        "task_count_completed": len(records),
+        "task_count_expected": int(selected_task_count),
+        "records": [dict(record) for record in records],
+    }
+
+
+def _write_cache_payload(
+    *,
+    cache_path: Path,
+    payload: Mapping[str, Any],
+) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cache_path.with_name(f".{cache_path.name}.tmp")
+    tmp_path.write_text(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp_path.replace(cache_path)
+
+
+def _load_resumable_records(
+    *,
+    payload: Mapping[str, Any],
+    tasks: Sequence[TaskSample],
+) -> dict[str, dict[str, Any]]:
+    records_by_task_id = _records_by_task_id(payload)
+    expected_task_ids = {task.task_id for task in tasks}
+    unexpected_task_ids = sorted(set(records_by_task_id) - expected_task_ids)
+    if unexpected_task_ids:
+        raise ValueError(
+            "Difficulty-band progress cache includes task_ids outside the selected task pool: "
+            + ", ".join(repr(task_id) for task_id in unexpected_task_ids[:5])
+        )
+
+    expected_count = payload.get("task_count_expected")
+    if expected_count is not None and int(expected_count) != len(tasks):
+        raise ValueError(
+            "Difficulty-band progress cache task_count_expected does not match the selected "
+            f"task pool: expected {len(tasks)}, got {expected_count!r}."
+        )
+    return records_by_task_id
+
+
 def _build_task_pool_fingerprint(tasks: Sequence[TaskSample]) -> str:
     digest = hashlib.sha256()
     for task in tasks:
@@ -497,24 +599,15 @@ def _cache_payload_covers_tasks(
     payload: Mapping[str, Any],
     tasks: Sequence[TaskSample],
 ) -> bool:
-    expected_task_ids = {task.task_id for task in tasks}
-    records = payload.get("records")
-    if not isinstance(records, Sequence) or isinstance(records, (str, bytes)):
+    if not _cache_payload_is_complete(payload):
         return False
 
-    seen_task_ids: set[str] = set()
-    for raw_record in records:
-        if not isinstance(raw_record, Mapping):
-            return False
-        task_id = str(raw_record.get("task_id", "")).strip()
-        difficulty_band = str(raw_record.get("difficulty_band", "")).strip()
-        if not task_id or not difficulty_band:
-            return False
-        if task_id in seen_task_ids:
-            return False
-        seen_task_ids.add(task_id)
-
-    return seen_task_ids == expected_task_ids
+    expected_task_ids = {task.task_id for task in tasks}
+    try:
+        records_by_task_id = _records_by_task_id(payload)
+    except ValueError:
+        return False
+    return set(records_by_task_id) == expected_task_ids
 
 
 def main() -> int:
@@ -619,122 +712,147 @@ def main() -> int:
         ) and _cache_payload_covers_tasks(payload=payload, tasks=sliced_tasks):
             print(cache_path)
             return 0
-
-    tokenizer = _load_tokenizer(args.initial_model)
-    records: list[dict[str, Any]] = []
-    if resolved_task_batch_size == 1:
-        for offset, task in enumerate(sliced_tasks):
-            probe_step_index = start_index + offset
-            result = collect_onpolicy_rft_runtime_batch(
-                request=OnPolicyRFTRuntimeRequest(
-                    data_config_name=args.data_config_name,
-                    turn_generator_mode=args.turn_generator_mode,
-                    total_steps=1,
-                    start_step_index=probe_step_index,
-                    runtime_overrides={
-                        "task_batch_size": 1,
-                        "attempts_per_task": int(args.attempts_per_task),
-                        "env_pool_size": 1,
-                        "max_in_flight_tasks": 1,
-                    },
-                    data_overrides=probe_source_data_overrides,
-                    handoff_overrides=handoff_overrides,
-                    task_partition=args.task_partition,
-                    task_eval_split_fraction=resolved_eval_split_fraction,
-                    task_eval_min_rows=resolved_min_eval_rows,
-                    verify_submissions=verify_submissions,
-                    stage_name=resolved_stage_name,
-                ),
-                tokenizer=tokenizer,
+    partial_cache_path = _resolve_partial_cache_path(cache_path)
+    records_by_task_id: dict[str, dict[str, Any]] = {}
+    if partial_cache_path.is_file() and not bool(args.force_refresh):
+        partial_payload = _load_cache_payload(partial_cache_path)
+        if _cache_metadata_matches(
+            payload=partial_payload,
+            expected=expected_cache_metadata,
+        ):
+            records_by_task_id = _load_resumable_records(
+                payload=partial_payload,
+                tasks=sliced_tasks,
             )
-            records.append(
-                _build_band_record(
+
+    remaining_indexed_tasks = [
+        (start_index + offset, task)
+        for offset, task in enumerate(sliced_tasks)
+        if task.task_id not in records_by_task_id
+    ]
+    if remaining_indexed_tasks:
+        tokenizer = _load_tokenizer(args.initial_model)
+        if resolved_task_batch_size == 1:
+            for probe_step_index, task in remaining_indexed_tasks:
+                result = collect_onpolicy_rft_runtime_batch(
+                    request=OnPolicyRFTRuntimeRequest(
+                        data_config_name=args.data_config_name,
+                        turn_generator_mode=args.turn_generator_mode,
+                        total_steps=1,
+                        start_step_index=probe_step_index,
+                        runtime_overrides={
+                            "task_batch_size": 1,
+                            "attempts_per_task": int(args.attempts_per_task),
+                            "env_pool_size": 1,
+                            "max_in_flight_tasks": 1,
+                        },
+                        data_overrides=probe_source_data_overrides,
+                        handoff_overrides=handoff_overrides,
+                        task_partition=args.task_partition,
+                        task_eval_split_fraction=resolved_eval_split_fraction,
+                        task_eval_min_rows=resolved_min_eval_rows,
+                        verify_submissions=verify_submissions,
+                        stage_name=resolved_stage_name,
+                    ),
+                    tokenizer=tokenizer,
+                )
+                records_by_task_id[task.task_id] = _build_band_record(
                     task=task,
                     probe_step_index=probe_step_index,
                     stage_name=resolved_stage_name,
                     result=result,
                 )
-            )
-    else:
-        for chunk_start in range(0, len(sliced_tasks), resolved_task_batch_size):
-            task_chunk = sliced_tasks[chunk_start : chunk_start + resolved_task_batch_size]
-            chunk_probe_step_index = start_index + chunk_start
-            result = collect_onpolicy_rft_runtime_batch(
-                request=OnPolicyRFTRuntimeRequest(
-                    data_config_name=args.data_config_name,
-                    turn_generator_mode=args.turn_generator_mode,
-                    total_steps=1,
-                    start_step_index=chunk_probe_step_index,
-                    runtime_overrides={
-                        "task_batch_size": len(task_chunk),
-                        "attempts_per_task": int(args.attempts_per_task),
-                        "env_pool_size": min(resolved_env_pool_size, len(task_chunk)),
-                        "max_in_flight_tasks": min(
-                            resolved_max_in_flight_tasks,
-                            len(task_chunk),
+                _write_cache_payload(
+                    cache_path=partial_cache_path,
+                    payload=_build_cache_payload(
+                        expected_cache_metadata=expected_cache_metadata,
+                        selected_task_count=len(sliced_tasks),
+                        records=_ordered_records_for_tasks(
+                            tasks=sliced_tasks,
+                            records_by_task_id=records_by_task_id,
                         ),
-                    },
-                    data_overrides=probe_source_data_overrides,
-                    handoff_overrides=handoff_overrides,
-                    task_partition="all",
-                    task_eval_split_fraction=0.0,
-                    task_eval_min_rows=0,
-                    verify_submissions=verify_submissions,
-                    stage_name=resolved_stage_name,
-                    dataset_loader=_build_dataset_loader_for_tasks(task_chunk),
-                ),
-                tokenizer=tokenizer,
-            )
-
-            fallback_task_id = task_chunk[0].task_id if len(task_chunk) == 1 else ""
-            for offset, task in enumerate(task_chunk):
-                probe_step_index = chunk_probe_step_index + offset
-                task_result = _extract_task_result(
-                    result=result,
-                    task_id=task.task_id,
-                    fallback_task_id=fallback_task_id,
+                        probe_status=PROBE_STATUS_INCOMPLETE,
+                    ),
                 )
-                records.append(
-                    _build_band_record(
+        else:
+            for chunk_start in range(0, len(remaining_indexed_tasks), resolved_task_batch_size):
+                indexed_task_chunk = remaining_indexed_tasks[
+                    chunk_start : chunk_start + resolved_task_batch_size
+                ]
+                task_chunk = [task for _, task in indexed_task_chunk]
+                chunk_probe_step_index = indexed_task_chunk[0][0]
+                result = collect_onpolicy_rft_runtime_batch(
+                    request=OnPolicyRFTRuntimeRequest(
+                        data_config_name=args.data_config_name,
+                        turn_generator_mode=args.turn_generator_mode,
+                        total_steps=1,
+                        start_step_index=chunk_probe_step_index,
+                        runtime_overrides={
+                            "task_batch_size": len(task_chunk),
+                            "attempts_per_task": int(args.attempts_per_task),
+                            "env_pool_size": min(resolved_env_pool_size, len(task_chunk)),
+                            "max_in_flight_tasks": min(
+                                resolved_max_in_flight_tasks,
+                                len(task_chunk),
+                            ),
+                        },
+                        data_overrides=probe_source_data_overrides,
+                        handoff_overrides=handoff_overrides,
+                        task_partition="all",
+                        task_eval_split_fraction=0.0,
+                        task_eval_min_rows=0,
+                        verify_submissions=verify_submissions,
+                        stage_name=resolved_stage_name,
+                        dataset_loader=_build_dataset_loader_for_tasks(task_chunk),
+                    ),
+                    tokenizer=tokenizer,
+                )
+
+                fallback_task_id = task_chunk[0].task_id if len(task_chunk) == 1 else ""
+                for probe_step_index, task in indexed_task_chunk:
+                    task_result = _extract_task_result(
+                        result=result,
+                        task_id=task.task_id,
+                        fallback_task_id=fallback_task_id,
+                    )
+                    records_by_task_id[task.task_id] = _build_band_record(
                         task=task,
                         probe_step_index=probe_step_index,
                         stage_name=resolved_stage_name,
                         result=task_result,
                     )
+                _write_cache_payload(
+                    cache_path=partial_cache_path,
+                    payload=_build_cache_payload(
+                        expected_cache_metadata=expected_cache_metadata,
+                        selected_task_count=len(sliced_tasks),
+                        records=_ordered_records_for_tasks(
+                            tasks=sliced_tasks,
+                            records_by_task_id=records_by_task_id,
+                        ),
+                        probe_status=PROBE_STATUS_INCOMPLETE,
+                    ),
                 )
 
-    payload = {
-        "schema_version": 1,
-        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        "data_config_name": args.data_config_name,
-        "dataset_id": settings.data.dataset_id,
-        "dataset_split": settings.data.dataset_split,
-        "patch_is_bug_introducing": bool(settings.data.patch_is_bug_introducing),
-        "verifier_kind": str(settings.data.verifier_kind),
-        "probe_label": str(args.probe_label).strip(),
-        "initial_model": str(args.initial_model).strip(),
-        "turn_generator_mode": str(args.turn_generator_mode).strip(),
-        "stage_name": resolved_stage_name,
-        "task_partition": str(args.task_partition).strip(),
-        "attempts_per_task": int(args.attempts_per_task),
-        "start_task_index": start_index,
-        "task_limit": int(args.task_limit) if args.task_limit is not None else None,
-        "eval_split_fraction": resolved_eval_split_fraction,
-        "min_eval_rows": resolved_min_eval_rows,
-        "verify_submissions": bool(verify_submissions),
-        "stage_handoff_overrides": dict(handoff_overrides),
-        "stage_selection_contract": dict(stage_selection_contract),
-        "stage_correctness_contract": str(stage_correctness_contract),
-        "task_pool_size": expected_cache_metadata["task_pool_size"],
-        "task_pool_fingerprint": expected_cache_metadata["task_pool_fingerprint"],
-        "task_count": len(records),
-        "records": records,
-    }
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(
-        json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
+    ordered_records = _ordered_records_for_tasks(
+        tasks=sliced_tasks,
+        records_by_task_id=records_by_task_id,
     )
+    if len(ordered_records) != len(sliced_tasks):
+        raise ValueError(
+            "Difficulty-band probe completed without records for every selected task: "
+            f"expected {len(sliced_tasks)}, got {len(ordered_records)}."
+        )
+
+    payload = _build_cache_payload(
+        expected_cache_metadata=expected_cache_metadata,
+        selected_task_count=len(sliced_tasks),
+        records=ordered_records,
+        probe_status=PROBE_STATUS_COMPLETE,
+    )
+    _write_cache_payload(cache_path=cache_path, payload=payload)
+    if partial_cache_path.exists():
+        partial_cache_path.unlink()
     print(cache_path)
     return 0
 

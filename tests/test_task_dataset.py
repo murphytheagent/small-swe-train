@@ -960,6 +960,46 @@ def test_load_task_batch_fails_fast_when_required_rollout_probe_cache_omits_task
         )
 
 
+def test_load_task_batch_rejects_incomplete_rollout_probe_cache(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_incomplete.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "probe_status": "incomplete",
+                "records": [
+                    {
+                        "task_id": "task-a",
+                        "task_family": "func_basic",
+                        "difficulty_band": "easy",
+                        "difficulty_band_source": "rollout_probe:easy",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "task-a",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+    ]
+
+    with pytest.raises(ValueError, match="Difficulty-band cache is incomplete"):
+        load_task_batch(
+            step_index=0,
+            batch_size=1,
+            config=_rollout_probe_config(str(cache_path)),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )
+
+
 def test_build_sdpo_task_rows_filters_problem_statement_length_under_4k() -> None:
     rows = [
         {

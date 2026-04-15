@@ -586,6 +586,13 @@ def _load_rollout_probe_cache_records_cached(
             f"got {schema_version!r}."
         )
 
+    probe_status = str(payload.get("probe_status", "")).strip().lower()
+    if probe_status and probe_status != "complete":
+        raise ValueError(
+            "Difficulty-band cache is incomplete at "
+            f"{cache_path}; resume the probe to materialize the final cache."
+        )
+
     band_records = payload.get("records", payload.get("task_band_records"))
     records_by_task_id: dict[str, dict[str, Any]] = {}
     if isinstance(band_records, Sequence) and not isinstance(band_records, (str, bytes)):
