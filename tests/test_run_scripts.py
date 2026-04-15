@@ -1102,6 +1102,26 @@ def test_onpolicy_difficulty_probe_slurm_script_dry_run_derives_tp_from_dp() -> 
     assert "--data-parallel-size 4" in result.stdout
 
 
+def test_onpolicy_difficulty_probe_slurm_script_rejects_tp_larger_than_visible_gpus() -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "SLURM_GPUS_ON_NODE": "8",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_VLLM_TP_SIZE": "9",
+        },
+    )
+
+    assert result.returncode != 0
+    assert "Requested PROBE_VLLM_TP_SIZE=9 exceeds visible GPU count 8." in result.stderr
+
+
 def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_overridden_base_url_port() -> None:
     result = _run_script(
         "run_onpolicy_difficulty_probe_slurm.sh",

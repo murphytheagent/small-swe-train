@@ -131,6 +131,11 @@ else
   TP_SIZE="${VISIBLE_GPU_COUNT}"
 fi
 
+if (( TP_SIZE > VISIBLE_GPU_COUNT )); then
+  echo "Requested PROBE_VLLM_TP_SIZE=${TP_SIZE} exceeds visible GPU count ${VISIBLE_GPU_COUNT}." >&2
+  exit 1
+fi
+
 if [[ -n "${DP_SIZE}" ]] && (( TP_SIZE * DP_SIZE > VISIBLE_GPU_COUNT )); then
   echo "Requested vLLM topology TP=${TP_SIZE}, DP=${DP_SIZE} exceeds visible GPU count ${VISIBLE_GPU_COUNT}." >&2
   exit 1

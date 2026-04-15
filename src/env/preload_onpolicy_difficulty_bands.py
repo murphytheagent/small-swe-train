@@ -205,6 +205,11 @@ def _build_band_record(
     infra_invalid_attempt_count = sum(
         1 for row in rollout_rows if bool(row.get("infra_invalid", False))
     )
+    if rollout_count > 0 and infra_invalid_attempt_count >= rollout_count:
+        raise ValueError(
+            "Difficulty probe produced only infra-invalid attempts for "
+            f"task_id={task.task_id!r}; refusing to assign a difficulty band."
+        )
     difficulty_band = _assign_difficulty_band(
         selected_count=selected_count,
         rollout_count=rollout_count,

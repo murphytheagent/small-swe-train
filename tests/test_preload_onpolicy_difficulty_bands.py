@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from config import (
     OnPolicyDataConfig,
     OnPolicyDatasetColumns,
@@ -219,6 +221,69 @@ def test_main_materializes_rollout_probe_cache(
     assert captured_requests[0].stage_name == "positive_rft"
     assert payload["stage_selection_contract"]["mode"] == "positive_rft"
     assert payload["stage_correctness_contract"] == "verifier"
+
+
+def test_main_fails_when_probe_task_is_pure_infra_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskSample(
+            task_id="task-infra",
+            image_name="img:infra",
+            problem_statement="pinfra",
+            fail_to_pass=["fi"],
+            pass_to_pass=["pi"],
+            raw={},
+            task_family="func_basic",
+        )
+    ]
+
+    monkeypatch.setattr(
+        band_module,
+        "resolve_on_policy_settings",
+        lambda data_config_name: _settings(),
+    )
+    monkeypatch.setattr(
+        band_module,
+        "rft_runtime_defaults",
+        lambda: {"loop": {"eval_split_fraction": 0.1, "eval_min_rows": 1}},
+    )
+    monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
+    monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
+    monkeypatch.setattr(
+        band_module,
+        "collect_onpolicy_rft_runtime_batch",
+        lambda *, request, tokenizer: {
+            "rollout_rows": [
+                {"resolved": False, "infra_invalid": True},
+                {"resolved": False, "infra_invalid": True},
+                {"resolved": False, "infra_invalid": True},
+                {"resolved": False, "infra_invalid": True},
+            ],
+            "selected_rows": [],
+            "rejected_rows": [
+                {"rft_rejection_reason": "infra_invalid", "infra_invalid": True},
+                {"rft_rejection_reason": "infra_invalid", "infra_invalid": True},
+                {"rft_rejection_reason": "infra_invalid", "infra_invalid": True},
+                {"rft_rejection_reason": "infra_invalid", "infra_invalid": True},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preload_onpolicy_difficulty_bands.py",
+            "--initial-model",
+            "/tmp/model",
+            "--cache-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="only infra-invalid attempts"):
+        band_module.main()
 
 
 def test_main_batches_probe_tasks_when_requested(
