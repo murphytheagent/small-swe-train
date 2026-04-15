@@ -313,7 +313,16 @@ def _extract_task_result(
 def _build_dataset_loader_for_tasks(
     tasks: Sequence[TaskSample],
 ) -> Callable[[str, str], Sequence[Mapping[str, Any]]]:
-    rows = tuple(dict(task.raw) for task in tasks)
+    rows = []
+    for task in tasks:
+        row = dict(task.raw)
+        row.setdefault("task_id", task.task_id)
+        row.setdefault("verifier_kind", task.verifier_kind)
+        row.setdefault("task_family", task.task_family)
+        row.setdefault("difficulty_band", task.difficulty_band)
+        row.setdefault("difficulty_band_source", task.difficulty_band_source)
+        rows.append(row)
+    rows = tuple(rows)
 
     def _load_dataset(_dataset_id: str, _split: str) -> Sequence[Mapping[str, Any]]:
         return rows

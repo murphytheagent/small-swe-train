@@ -11,7 +11,7 @@ from config import (
     OnPolicyDifficultyBandConfig,
 )
 from env import preload_onpolicy_difficulty_bands as band_module
-from env.task_dataset import TaskSample
+from env.task_dataset import TaskSample, load_task_batch
 
 
 def _config() -> OnPolicyDataConfig:
@@ -354,6 +354,38 @@ def test_main_batches_probe_tasks_when_requested(
     assert payload["records"][0]["difficulty_band"] == "easy"
     assert payload["records"][1]["difficulty_band"] == "near_impossible"
     assert payload["records"][2]["difficulty_band"] == "learnable"
+
+
+def test_build_dataset_loader_for_tasks_preserves_task_ids_without_source_id_fields() -> None:
+    config = _config()
+    loader = band_module._build_dataset_loader_for_tasks(
+        [
+            TaskSample(
+                task_id="task-original",
+                image_name="img:a",
+                problem_statement="prompt-a",
+                fail_to_pass=["fa"],
+                pass_to_pass=["pa"],
+                raw={
+                    "image_name": "img:a",
+                    "problem_statement": "prompt-a",
+                    "FAIL_TO_PASS": ["fa"],
+                    "PASS_TO_PASS": ["pa"],
+                },
+                task_family="func_basic",
+            )
+        ]
+    )
+
+    batch = load_task_batch(
+        step_index=0,
+        batch_size=1,
+        config=config,
+        dataset_loader=loader,
+    )
+
+    assert [task.task_id for task in batch] == ["task-original"]
+    assert batch[0].raw["task_id"] == "task-original"
 
 
 def test_main_uses_runtime_eval_split_defaults_for_partitioned_probe(

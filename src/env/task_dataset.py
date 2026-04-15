@@ -222,6 +222,7 @@ def _coerce_task_row(
     )
 
     raw_row = dict(row)
+    raw_row.setdefault("task_id", task_id)
     raw_row.setdefault("prompt_source", prompt_source)
     raw_row.setdefault("verifier_kind", config.verifier_kind)
     raw_row.setdefault("task_family", task_family)
