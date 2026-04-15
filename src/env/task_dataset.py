@@ -154,6 +154,11 @@ def resolve_on_policy_difficulty_band_cache_path(
     config: OnPolicyDataConfig,
     cache_dir: str | Path,
     probe_label: str,
+    task_partition: str = _TASK_PARTITION_ALL,
+    start_task_index: int = 0,
+    task_limit: int | None = None,
+    eval_split_fraction: float | None = None,
+    min_eval_rows: int | None = None,
 ) -> Path:
     """Resolve a descriptive difficulty-band cache path for one dataset config."""
     label_slug = _slugify_for_filename(probe_label, fallback="")
@@ -161,7 +166,25 @@ def resolve_on_policy_difficulty_band_cache_path(
         raise ValueError("probe_label must contain at least one filename-safe character.")
     dataset_slug = _slugify_for_filename(config.dataset_id)
     split_slug = _slugify_for_filename(config.dataset_split)
-    return Path(cache_dir) / f"difficulty_bands_{dataset_slug}_{split_slug}_{label_slug}.json"
+    normalized_partition = _normalize_task_partition(task_partition)
+    scope_parts: list[str] = []
+    if normalized_partition != _TASK_PARTITION_ALL:
+        scope_parts.append(normalized_partition)
+        if eval_split_fraction is not None:
+            scope_parts.append(f"frac_{_slugify_for_filename(str(eval_split_fraction), fallback='0')}")
+        if min_eval_rows is not None:
+            scope_parts.append(f"mineval_{int(min_eval_rows)}")
+    if int(start_task_index) != 0:
+        scope_parts.append(f"start_{int(start_task_index)}")
+    if task_limit is not None:
+        scope_parts.append(f"limit_{int(task_limit)}")
+    scope_suffix = ""
+    if scope_parts:
+        scope_slug = _slugify_for_filename("_".join(scope_parts), fallback="scope")
+        scope_suffix = f"_{scope_slug}"
+    return Path(cache_dir) / (
+        f"difficulty_bands_{dataset_slug}_{split_slug}_{label_slug}{scope_suffix}.json"
+    )
 
 
 def _coerce_task_row(
@@ -365,6 +388,8 @@ def _build_task_pool(
         try:
             task = _coerce_task_row(row, config=config, row_index=row_index)
         except ValueError as exc:
+            if _should_reraise_task_row_error(config=config, error=exc):
+                raise
             last_error = exc
             filtered_counts["invalid_row"] += 1
             continue
@@ -445,6 +470,21 @@ def _load_task_pool(
         config=config,
         bad_task_ids=bad_task_ids,
         bad_image_names=bad_image_names,
+    )
+
+
+def _should_reraise_task_row_error(
+    *,
+    config: OnPolicyDataConfig,
+    error: ValueError,
+) -> bool:
+    strategy = str(config.difficulty_banding.strategy).strip().lower()
+    if strategy != "rollout_probe" or not bool(config.difficulty_banding.rollout_probe_required):
+        return False
+    error_text = str(error)
+    return (
+        "Difficulty-band cache" in error_text
+        or "difficulty_banding.rollout_probe_required=true" in error_text
     )
 
 

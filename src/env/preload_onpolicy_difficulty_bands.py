@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from config import (
     DEFAULT_ON_POLICY_DATA_CONFIG_NAME,
+    OnPolicyDataConfig,
     resolve_on_policy_settings,
     rft_runtime_defaults,
 )
@@ -24,9 +25,11 @@ from env.task_dataset import (
 from runtime_paths import resolve_on_policy_difficulty_band_cache_dir
 from trainer.rft_runtime import OnPolicyRFTRuntimeRequest, collect_onpolicy_rft_runtime_batch
 from trainer.rft_runtime_loop import (
+    resolve_rft_stage_correctness_contract,
     _load_tokenizer,
     resolve_rft_stage_handoff_overrides,
     resolve_rft_stage_name,
+    resolve_rft_stage_selection_contract,
     resolve_rft_stage_verify_submissions,
 )
 
@@ -374,6 +377,24 @@ def _resolve_eval_split_defaults() -> tuple[float, int]:
     return resolved_fraction, resolved_min_rows
 
 
+def _resolve_probe_source_data_overrides(
+    config: OnPolicyDataConfig,
+) -> dict[str, Any] | None:
+    strategy = str(config.difficulty_banding.strategy).strip().lower()
+    if strategy != "rollout_probe":
+        return None
+    return {
+        "difficulty_banding": {
+            "strategy": "none",
+            "default_band": "unbanded",
+            "family_band_exact": {},
+            "family_band_prefix": {},
+            "rollout_probe_cache_path": "",
+            "rollout_probe_required": False,
+        }
+    }
+
+
 def _load_cache_payload(cache_path: Path) -> Mapping[str, Any]:
     payload = json.loads(cache_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
@@ -417,6 +438,10 @@ def _build_expected_cache_metadata(
     task_limit: int | None,
     eval_split_fraction: float,
     min_eval_rows: int,
+    verify_submissions: bool,
+    stage_handoff_overrides: Mapping[str, Any],
+    stage_selection_contract: Mapping[str, Any],
+    stage_correctness_contract: str,
     task_pool_size: int,
     task_pool_fingerprint: str,
 ) -> dict[str, Any]:
@@ -436,6 +461,10 @@ def _build_expected_cache_metadata(
         "task_limit": task_limit,
         "eval_split_fraction": eval_split_fraction,
         "min_eval_rows": min_eval_rows,
+        "verify_submissions": bool(verify_submissions),
+        "stage_handoff_overrides": dict(stage_handoff_overrides),
+        "stage_selection_contract": dict(stage_selection_contract),
+        "stage_correctness_contract": str(stage_correctness_contract),
         "task_pool_size": task_pool_size,
         "task_pool_fingerprint": task_pool_fingerprint,
     }
@@ -482,8 +511,18 @@ def main() -> int:
         config=settings.data,
         cache_dir=cache_dir,
         probe_label=args.probe_label,
+        task_partition=args.task_partition,
+        start_task_index=int(args.start_task_index),
+        task_limit=int(args.task_limit) if args.task_limit is not None else None,
+        eval_split_fraction=resolved_eval_split_fraction,
+        min_eval_rows=resolved_min_eval_rows,
     )
     resolved_stage_name = resolve_rft_stage_name(args.stage_name)
+    verify_submissions = resolve_rft_stage_verify_submissions(resolved_stage_name)
+    handoff_overrides = resolve_rft_stage_handoff_overrides(resolved_stage_name)
+    stage_selection_contract = resolve_rft_stage_selection_contract(resolved_stage_name)
+    stage_correctness_contract = resolve_rft_stage_correctness_contract(resolved_stage_name)
+    probe_source_data_overrides = _resolve_probe_source_data_overrides(settings.data)
     expected_cache_metadata = _build_expected_cache_metadata(
         settings=settings,
         data_config_name=str(args.data_config_name).strip(),
@@ -497,6 +536,10 @@ def main() -> int:
         task_limit=int(args.task_limit) if args.task_limit is not None else None,
         eval_split_fraction=resolved_eval_split_fraction,
         min_eval_rows=resolved_min_eval_rows,
+        verify_submissions=verify_submissions,
+        stage_handoff_overrides=handoff_overrides,
+        stage_selection_contract=stage_selection_contract,
+        stage_correctness_contract=stage_correctness_contract,
         task_pool_size=0,
         task_pool_fingerprint="",
     )
@@ -505,7 +548,12 @@ def main() -> int:
         return 0
 
     tasks = load_task_samples(
-        config=settings.data,
+        config=resolve_on_policy_settings(
+            data_config_name=args.data_config_name,
+            data_overrides=probe_source_data_overrides,
+        ).data
+        if probe_source_data_overrides is not None
+        else settings.data,
         task_partition=args.task_partition,
         eval_split_fraction=resolved_eval_split_fraction,
         min_eval_rows=resolved_min_eval_rows,
@@ -531,9 +579,6 @@ def main() -> int:
         raise ValueError("No tasks selected for difficulty-band probing.")
 
     tokenizer = _load_tokenizer(args.initial_model)
-    handoff_overrides = resolve_rft_stage_handoff_overrides(resolved_stage_name)
-    verify_submissions = resolve_rft_stage_verify_submissions(resolved_stage_name)
-
     records: list[dict[str, Any]] = []
     if resolved_task_batch_size == 1:
         for offset, task in enumerate(sliced_tasks):
@@ -550,6 +595,7 @@ def main() -> int:
                         "env_pool_size": 1,
                         "max_in_flight_tasks": 1,
                     },
+                    data_overrides=probe_source_data_overrides,
                     handoff_overrides=handoff_overrides,
                     task_partition=args.task_partition,
                     task_eval_split_fraction=resolved_eval_split_fraction,
@@ -586,6 +632,7 @@ def main() -> int:
                             len(task_chunk),
                         ),
                     },
+                    data_overrides=probe_source_data_overrides,
                     handoff_overrides=handoff_overrides,
                     task_partition="all",
                     task_eval_split_fraction=0.0,
@@ -632,6 +679,10 @@ def main() -> int:
         "task_limit": int(args.task_limit) if args.task_limit is not None else None,
         "eval_split_fraction": resolved_eval_split_fraction,
         "min_eval_rows": resolved_min_eval_rows,
+        "verify_submissions": bool(verify_submissions),
+        "stage_handoff_overrides": dict(handoff_overrides),
+        "stage_selection_contract": dict(stage_selection_contract),
+        "stage_correctness_contract": str(stage_correctness_contract),
         "task_pool_size": expected_cache_metadata["task_pool_size"],
         "task_pool_fingerprint": expected_cache_metadata["task_pool_fingerprint"],
         "task_count": len(records),

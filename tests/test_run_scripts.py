@@ -369,6 +369,10 @@ def _write_onpolicy_difficulty_probe_python_stub(tmp_path: Path) -> Path:
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "if [[ \"${1:-}\" == \"-m\" && \"${2:-}\" == \"trainer.vllm_api_server_entry\" ]]; then\n"
+        "  if [[ \"${STUB_VLLM_FAIL_FAST:-0}\" == \"1\" ]]; then\n"
+        "    echo 'stub vLLM startup failure' >&2\n"
+        "    exit 23\n"
+        "  fi\n"
         "  exec python3 - \"$@\" <<'PY'\n"
         "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
         "import json\n"
@@ -1182,6 +1186,50 @@ def test_onpolicy_difficulty_probe_slurm_script_accepts_models_endpoint_base_url
     assert result.returncode == 0, result.stderr
     cache_path = Path(result.stdout.strip())
     assert cache_path.is_file()
+
+
+def test_onpolicy_difficulty_probe_slurm_script_fails_fast_when_vllm_exits_early(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    python_stub = _write_onpolicy_difficulty_probe_python_stub(tmp_path)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "SLURM_JOB_ID": "24682",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_CACHE_DIR": str(tmp_path / "difficulty-cache-fail-fast"),
+            "DIFFICULTY_PROBE_CAPTURE": str(tmp_path / "difficulty-probe-capture.txt"),
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+            "SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE": "0",
+            "PROBE_VLLM_READY_TIMEOUT_SEC": "30",
+            "STUB_VLLM_FAIL_FAST": "1",
+        }
+    )
+
+    start = time.monotonic()
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=10,
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.returncode != 0
+    assert elapsed < 10
+    assert "vLLM process exited before readiness probe succeeded." in result.stderr
+    assert "stub vLLM startup failure" in result.stderr
 
 
 def test_onpolicy_difficulty_probe_slurm_script_rejects_non_local_base_url() -> None:

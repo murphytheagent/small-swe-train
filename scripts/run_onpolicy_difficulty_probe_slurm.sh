@@ -257,10 +257,12 @@ cd "${PROJECT_ROOT}"
 VLLM_PID=$!
 
 READY_TIMEOUT_SEC="${PROBE_VLLM_READY_TIMEOUT_SEC:-300}"
-if ! "${PYTHON_BIN}" - "${SMALL_SWE_VLLM_BASE_URL}" "${READY_TIMEOUT_SEC}" <<'PY'
+READY_STATUS=0
+"${PYTHON_BIN}" - "${SMALL_SWE_VLLM_BASE_URL}" "${READY_TIMEOUT_SEC}" "${VLLM_PID}" <<'PY' || READY_STATUS=$?
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from urllib.error import URLError
@@ -268,9 +270,14 @@ from urllib.request import Request, urlopen
 
 base_url = sys.argv[1].rstrip("/")
 deadline = time.time() + int(sys.argv[2])
+vllm_pid = int(sys.argv[3])
 endpoint = base_url + "/models"
 
 while time.time() < deadline:
+    try:
+        os.kill(vllm_pid, 0)
+    except OSError:
+        raise SystemExit(2)
     try:
         with urlopen(Request(endpoint, method="GET"), timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -281,8 +288,12 @@ while time.time() < deadline:
 
 raise SystemExit(1)
 PY
-then
+if [[ "${READY_STATUS}" -ne 0 ]]; then
+  if [[ "${READY_STATUS}" -eq 2 ]]; then
+    echo "vLLM process exited before readiness probe succeeded." >&2
+  else
   echo "Timed out waiting for vLLM readiness at ${SMALL_SWE_VLLM_BASE_URL}/models" >&2
+  fi
   tail -n 120 "${VLLM_LOG}" >&2 || true
   exit 1
 fi

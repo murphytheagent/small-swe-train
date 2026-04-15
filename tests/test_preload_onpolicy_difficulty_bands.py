@@ -5,7 +5,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from config import OnPolicyDataConfig, OnPolicyDatasetColumns
+from config import (
+    OnPolicyDataConfig,
+    OnPolicyDatasetColumns,
+    OnPolicyDifficultyBandConfig,
+)
 from env import preload_onpolicy_difficulty_bands as band_module
 from env.task_dataset import TaskSample
 
@@ -27,14 +31,43 @@ def _settings(
     *,
     eval_split_fraction: float = 0.1,
     eval_min_rows: int = 1,
+    difficulty_banding: OnPolicyDifficultyBandConfig | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        data=_config(),
+        data=OnPolicyDataConfig(
+            dataset_id="dummy/dataset",
+            dataset_split="train",
+            columns=OnPolicyDatasetColumns(
+                image_name="image_name",
+                problem_statement="problem_statement",
+                fail_to_pass="FAIL_TO_PASS",
+                pass_to_pass="PASS_TO_PASS",
+            ),
+            difficulty_banding=difficulty_banding or OnPolicyDifficultyBandConfig(),
+        ),
         runtime=SimpleNamespace(
             eval_split_fraction=eval_split_fraction,
             eval_min_rows=eval_min_rows,
         ),
     )
+
+
+def _stage_metadata(stage_name: str = "positive_rft") -> dict[str, object]:
+    resolved_stage_name = band_module.resolve_rft_stage_name(stage_name)
+    return {
+        "verify_submissions": band_module.resolve_rft_stage_verify_submissions(
+            resolved_stage_name
+        ),
+        "stage_handoff_overrides": band_module.resolve_rft_stage_handoff_overrides(
+            resolved_stage_name
+        ),
+        "stage_selection_contract": band_module.resolve_rft_stage_selection_contract(
+            resolved_stage_name
+        ),
+        "stage_correctness_contract": band_module.resolve_rft_stage_correctness_contract(
+            resolved_stage_name
+        ),
+    }
 
 
 def test_main_print_path_only_uses_resolved_cache_path(
@@ -184,6 +217,8 @@ def test_main_materializes_rollout_probe_cache(
     assert captured_requests[0].runtime_overrides["attempts_per_task"] == 4
     assert captured_requests[0].verify_submissions is True
     assert captured_requests[0].stage_name == "positive_rft"
+    assert payload["stage_selection_contract"]["mode"] == "positive_rft"
+    assert payload["stage_correctness_contract"] == "verifier"
 
 
 def test_main_batches_probe_tasks_when_requested(
@@ -385,6 +420,9 @@ def test_main_uses_runtime_eval_split_defaults_for_partitioned_probe(
     payload = json.loads(output_path.read_text(encoding="utf-8"))
 
     assert exit_code == 0
+    assert output_path.name == (
+        "difficulty_bands_dummy_dataset_train_positive_rft_probe_eval_frac_0.25_mineval_2.json"
+    )
     assert captured_load_kwargs[0]["task_partition"] == "eval"
     assert captured_load_kwargs[0]["eval_split_fraction"] == 0.25
     assert captured_load_kwargs[0]["min_eval_rows"] == 2
@@ -393,6 +431,91 @@ def test_main_uses_runtime_eval_split_defaults_for_partitioned_probe(
     assert payload["task_partition"] == "eval"
     assert payload["eval_split_fraction"] == 0.25
     assert payload["min_eval_rows"] == 2
+
+
+def test_main_disables_rollout_probe_dependency_while_building_probe(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskSample(
+            task_id="task-a",
+            image_name="img:a",
+            problem_statement="pa",
+            fail_to_pass=["fa"],
+            pass_to_pass=["pa"],
+            raw={},
+            task_family="func_basic",
+        )
+    ]
+    captured_load_configs = []
+    captured_requests = []
+
+    def _fake_load_task_samples(**kwargs):
+        captured_load_configs.append(kwargs["config"])
+        return list(tasks)
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        return {
+            "rollout_rows": [{"resolved": True}],
+            "selected_rows": [{"task_id": "task-a"}],
+            "rejected_rows": [],
+        }
+
+    monkeypatch.setattr(
+        band_module,
+        "resolve_on_policy_settings",
+        lambda data_config_name, data_overrides=None: _settings(
+            difficulty_banding=OnPolicyDifficultyBandConfig(
+                strategy=(
+                    "none"
+                    if data_overrides
+                    and data_overrides.get("difficulty_banding", {}).get("strategy") == "none"
+                    else "rollout_probe"
+                ),
+                rollout_probe_cache_path="data/on_policy_difficulty_band_cache/missing.json",
+                rollout_probe_required=not bool(data_overrides),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        band_module,
+        "rft_runtime_defaults",
+        lambda: {"loop": {"eval_split_fraction": 0.1, "eval_min_rows": 1}},
+    )
+    monkeypatch.setattr(band_module, "load_task_samples", _fake_load_task_samples)
+    monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
+    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preload_onpolicy_difficulty_bands.py",
+            "--initial-model",
+            "/tmp/model",
+            "--cache-dir",
+            str(tmp_path),
+        ],
+    )
+
+    exit_code = band_module.main()
+    _ = Path(capsys.readouterr().out.strip())
+
+    assert exit_code == 0
+    assert captured_load_configs[0].difficulty_banding.strategy == "none"
+    assert captured_requests[0].data_overrides == {
+        "difficulty_banding": {
+            "strategy": "none",
+            "default_band": "unbanded",
+            "family_band_exact": {},
+            "family_band_prefix": {},
+            "rollout_probe_cache_path": "",
+            "rollout_probe_required": False,
+        }
+    }
 
 
 def test_main_rebuilds_cache_when_existing_metadata_is_incompatible(
@@ -432,6 +555,7 @@ def test_main_rebuilds_cache_when_existing_metadata_is_incompatible(
                 "task_limit": None,
                 "eval_split_fraction": 0.0,
                 "min_eval_rows": 0,
+                **_stage_metadata(),
                 "task_count": 1,
                 "records": [
                     {
@@ -597,6 +721,7 @@ def test_main_reuses_cache_when_task_pool_fingerprint_matches(
                 "task_limit": None,
                 "eval_split_fraction": 0.0,
                 "min_eval_rows": 0,
+                **_stage_metadata(),
                 "task_pool_size": 1,
                 "task_pool_fingerprint": band_module._build_task_pool_fingerprint(tasks),
                 "task_count": 1,
@@ -687,6 +812,7 @@ def test_main_rebuilds_cache_when_task_pool_fingerprint_changes(
                 "task_limit": None,
                 "eval_split_fraction": 0.0,
                 "min_eval_rows": 0,
+                **_stage_metadata(),
                 "task_pool_size": 1,
                 "task_pool_fingerprint": "stale-task-pool",
                 "task_count": 1,

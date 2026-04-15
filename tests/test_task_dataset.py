@@ -810,6 +810,25 @@ def test_resolve_on_policy_difficulty_band_cache_path_is_descriptive(tmp_path: P
     assert resolved.name == "difficulty_bands_dummy_dataset_train_positive_rft_probe.json"
 
 
+def test_resolve_on_policy_difficulty_band_cache_path_scopes_partial_probe(tmp_path: Path) -> None:
+    resolved = resolve_on_policy_difficulty_band_cache_path(
+        config=_config(),
+        cache_dir=tmp_path,
+        probe_label="positive_rft_probe",
+        task_partition="eval",
+        start_task_index=32,
+        task_limit=16,
+        eval_split_fraction=0.25,
+        min_eval_rows=2,
+    )
+
+    assert resolved.parent == tmp_path
+    assert (
+        resolved.name
+        == "difficulty_bands_dummy_dataset_train_positive_rft_probe_eval_frac_0.25_mineval_2_start_32_limit_16.json"
+    )
+
+
 def test_resolve_on_policy_difficulty_band_cache_path_rejects_non_filename_probe_label(
     tmp_path: Path,
 ) -> None:
@@ -893,6 +912,52 @@ def test_load_task_batch_invalidates_cached_hf_pool_when_rollout_probe_source_ch
 
     assert first_batch[0].difficulty_band == "easy"
     assert second_batch[0].difficulty_band == "near_impossible"
+
+
+def test_load_task_batch_fails_fast_when_required_rollout_probe_cache_omits_task(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_partial.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "records": [
+                    {
+                        "task_id": "task-a",
+                        "task_family": "func_basic",
+                        "difficulty_band": "easy",
+                        "difficulty_band_source": "rollout_probe:easy",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "task-a",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+        {
+            "task_id": "task-b",
+            "image_name": "img:2",
+            "problem_statement": "p2",
+            "FAIL_TO_PASS": ["f2"],
+            "PASS_TO_PASS": ["p2"],
+        },
+    ]
+
+    with pytest.raises(ValueError, match="Difficulty-band cache is missing task_id 'task-b'"):
+        load_task_batch(
+            step_index=0,
+            batch_size=1,
+            config=_rollout_probe_config(str(cache_path)),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )
 
 
 def test_build_sdpo_task_rows_filters_problem_statement_length_under_4k() -> None:
