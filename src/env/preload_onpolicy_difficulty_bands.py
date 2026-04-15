@@ -487,6 +487,31 @@ def _cache_metadata_matches(
     return all(payload.get(key) == value for key, value in expected.items())
 
 
+def _cache_payload_covers_tasks(
+    *,
+    payload: Mapping[str, Any],
+    tasks: Sequence[TaskSample],
+) -> bool:
+    expected_task_ids = {task.task_id for task in tasks}
+    records = payload.get("records")
+    if not isinstance(records, Sequence) or isinstance(records, (str, bytes)):
+        return False
+
+    seen_task_ids: set[str] = set()
+    for raw_record in records:
+        if not isinstance(raw_record, Mapping):
+            return False
+        task_id = str(raw_record.get("task_id", "")).strip()
+        difficulty_band = str(raw_record.get("difficulty_band", "")).strip()
+        if not task_id or not difficulty_band:
+            return False
+        if task_id in seen_task_ids:
+            return False
+        seen_task_ids.add(task_id)
+
+    return seen_task_ids == expected_task_ids
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -569,12 +594,6 @@ def main() -> int:
     )
     expected_cache_metadata["task_pool_size"] = len(tasks)
     expected_cache_metadata["task_pool_fingerprint"] = _build_task_pool_fingerprint(tasks)
-    if cache_path.is_file() and not bool(args.force_refresh):
-        payload = _load_cache_payload(cache_path)
-        if _cache_metadata_matches(payload=payload, expected=expected_cache_metadata):
-            print(cache_path)
-            return 0
-
     start_index = int(args.start_task_index)
     if start_index >= len(tasks):
         raise ValueError(
@@ -586,6 +605,15 @@ def main() -> int:
         sliced_tasks = sliced_tasks[: int(args.task_limit)]
     if not sliced_tasks:
         raise ValueError("No tasks selected for difficulty-band probing.")
+
+    if cache_path.is_file() and not bool(args.force_refresh):
+        payload = _load_cache_payload(cache_path)
+        if _cache_metadata_matches(
+            payload=payload,
+            expected=expected_cache_metadata,
+        ) and _cache_payload_covers_tasks(payload=payload, tasks=sliced_tasks):
+            print(cache_path)
+            return 0
 
     tokenizer = _load_tokenizer(args.initial_model)
     records: list[dict[str, Any]] = []

@@ -1089,6 +1089,19 @@ def test_onpolicy_difficulty_probe_slurm_script_dry_run_passes_parallel_probe_ov
     assert "--max-in-flight-tasks 4" in result.stdout
 
 
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_derives_tp_from_dp() -> None:
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "8",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_VLLM_DP_SIZE": "4",
+        },
+    )
+    assert "--tensor-parallel-size 2" in result.stdout
+    assert "--data-parallel-size 4" in result.stdout
+
+
 def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_overridden_base_url_port() -> None:
     result = _run_script(
         "run_onpolicy_difficulty_probe_slurm.sh",

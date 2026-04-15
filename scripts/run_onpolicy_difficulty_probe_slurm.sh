@@ -97,16 +97,44 @@ fi
 
 SLURM_GPU_COUNT_RAW="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-}}"
 if [[ "${SLURM_GPU_COUNT_RAW}" =~ ^[0-9]+$ ]]; then
-  DEFAULT_TP_SIZE="${SLURM_GPU_COUNT_RAW}"
+  VISIBLE_GPU_COUNT="${SLURM_GPU_COUNT_RAW}"
 elif [[ "${SLURM_GPU_COUNT_RAW}" =~ ([0-9]+) ]]; then
-  DEFAULT_TP_SIZE="${BASH_REMATCH[1]}"
+  VISIBLE_GPU_COUNT="${BASH_REMATCH[1]}"
 else
-  DEFAULT_TP_SIZE="1"
+  VISIBLE_GPU_COUNT="1"
 fi
-if [[ "${DEFAULT_TP_SIZE}" -lt 1 ]]; then
-  DEFAULT_TP_SIZE="1"
+if [[ "${VISIBLE_GPU_COUNT}" -lt 1 ]]; then
+  VISIBLE_GPU_COUNT="1"
 fi
-TP_SIZE="${PROBE_VLLM_TP_SIZE:-${DEFAULT_TP_SIZE}}"
+
+DP_SIZE="${PROBE_VLLM_DP_SIZE:-}"
+if [[ -n "${DP_SIZE}" ]]; then
+  if ! [[ "${DP_SIZE}" =~ ^[0-9]+$ ]] || [[ "${DP_SIZE}" -lt 1 ]]; then
+    echo "PROBE_VLLM_DP_SIZE must be an integer >= 1." >&2
+    exit 1
+  fi
+fi
+
+TP_SIZE="${PROBE_VLLM_TP_SIZE:-}"
+if [[ -n "${TP_SIZE}" ]]; then
+  if ! [[ "${TP_SIZE}" =~ ^[0-9]+$ ]] || [[ "${TP_SIZE}" -lt 1 ]]; then
+    echo "PROBE_VLLM_TP_SIZE must be an integer >= 1." >&2
+    exit 1
+  fi
+elif [[ -n "${DP_SIZE}" ]]; then
+  if (( VISIBLE_GPU_COUNT % DP_SIZE != 0 )); then
+    echo "Visible GPU count ${VISIBLE_GPU_COUNT} is not divisible by PROBE_VLLM_DP_SIZE=${DP_SIZE}; set PROBE_VLLM_TP_SIZE explicitly." >&2
+    exit 1
+  fi
+  TP_SIZE="$(( VISIBLE_GPU_COUNT / DP_SIZE ))"
+else
+  TP_SIZE="${VISIBLE_GPU_COUNT}"
+fi
+
+if [[ -n "${DP_SIZE}" ]] && (( TP_SIZE * DP_SIZE > VISIBLE_GPU_COUNT )); then
+  echo "Requested vLLM topology TP=${TP_SIZE}, DP=${DP_SIZE} exceeds visible GPU count ${VISIBLE_GPU_COUNT}." >&2
+  exit 1
+fi
 
 DEFAULT_PORT="${PROBE_VLLM_PORT:-}"
 if [[ -z "${DEFAULT_PORT}" ]]; then
@@ -184,8 +212,8 @@ VLLM_CMD=(
   --gpu-memory-utilization "${PROBE_VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
   --max-model-len "${PROBE_VLLM_MAX_MODEL_LEN:-32768}"
 )
-if [[ -n "${PROBE_VLLM_DP_SIZE:-}" ]]; then
-  VLLM_CMD+=(--data-parallel-size "${PROBE_VLLM_DP_SIZE}")
+if [[ -n "${DP_SIZE}" ]]; then
+  VLLM_CMD+=(--data-parallel-size "${DP_SIZE}")
 fi
 if [[ -n "${PROBE_VLLM_KV_CACHE_MEMORY_BYTES:-}" ]]; then
   VLLM_CMD+=(--kv-cache-memory-bytes "${PROBE_VLLM_KV_CACHE_MEMORY_BYTES}")

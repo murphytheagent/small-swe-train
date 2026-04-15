@@ -807,6 +807,115 @@ def test_main_reuses_cache_when_task_pool_fingerprint_matches(
     assert payload["records"][0]["difficulty_band"] == "easy"
 
 
+def test_main_rebuilds_cache_when_matching_metadata_cache_omits_selected_task(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskSample(
+            task_id="task-a",
+            image_name="img:a",
+            problem_statement="pa",
+            fail_to_pass=["fa"],
+            pass_to_pass=["pa"],
+            raw={},
+            task_family="func_basic",
+        ),
+        TaskSample(
+            task_id="task-b",
+            image_name="img:b",
+            problem_statement="pb",
+            fail_to_pass=["fb"],
+            pass_to_pass=["pb"],
+            raw={},
+            task_family="combine_file",
+        ),
+    ]
+    captured_requests = []
+    cache_path = tmp_path / "difficulty_bands_dummy_dataset_train_smoke.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "data_config_name": "on_policy_swe_smith",
+                "dataset_id": "dummy/dataset",
+                "dataset_split": "train",
+                "patch_is_bug_introducing": True,
+                "verifier_kind": "pytest",
+                "probe_label": "smoke",
+                "initial_model": "/tmp/model",
+                "turn_generator_mode": "default",
+                "stage_name": "positive_rft",
+                "task_partition": "all",
+                "attempts_per_task": 4,
+                "start_task_index": 0,
+                "task_limit": None,
+                "eval_split_fraction": 0.0,
+                "min_eval_rows": 0,
+                **_stage_metadata(),
+                "task_pool_size": 2,
+                "task_pool_fingerprint": band_module._build_task_pool_fingerprint(tasks),
+                "task_count": 1,
+                "records": [
+                    {
+                        "task_id": "task-a",
+                        "difficulty_band": "easy",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        return {
+            "rollout_rows": [{"resolved": True, "task_id": "task-a"}, {"resolved": True, "task_id": "task-b"}],
+            "selected_rows": [{"task_id": "task-a"}, {"task_id": "task-b"}],
+            "rejected_rows": [],
+        }
+
+    monkeypatch.setattr(
+        band_module,
+        "resolve_on_policy_settings",
+        lambda data_config_name: _settings(),
+    )
+    monkeypatch.setattr(
+        band_module,
+        "rft_runtime_defaults",
+        lambda: {"loop": {"eval_split_fraction": 0.1, "eval_min_rows": 1}},
+    )
+    monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
+    monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
+    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preload_onpolicy_difficulty_bands.py",
+            "--initial-model",
+            "/tmp/model",
+            "--cache-dir",
+            str(tmp_path),
+            "--probe-label",
+            "smoke",
+            "--task-batch-size",
+            "2",
+        ],
+    )
+
+    exit_code = band_module.main()
+    output_path = Path(capsys.readouterr().out.strip())
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert len(captured_requests) == 1
+    assert output_path == cache_path
+    assert sorted(record["task_id"] for record in payload["records"]) == ["task-a", "task-b"]
+
+
 def test_main_rebuilds_cache_when_task_pool_fingerprint_changes(
     monkeypatch,
     capsys,
