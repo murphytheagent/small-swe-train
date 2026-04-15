@@ -217,6 +217,10 @@ def test_main_materializes_rollout_probe_cache(
     assert len(captured_requests) == 2
     assert captured_requests[0].runtime_overrides["task_batch_size"] == 1
     assert captured_requests[0].runtime_overrides["attempts_per_task"] == 4
+    assert captured_requests[0].task_partition == "all"
+    assert captured_requests[0].task_eval_split_fraction == 0.0
+    assert captured_requests[0].task_eval_min_rows == 0
+    assert captured_requests[0].dataset_loader is not None
     assert captured_requests[0].verify_submissions is True
     assert captured_requests[0].stage_name == "positive_rft"
     assert payload["stage_selection_contract"]["mode"] == "positive_rft"
@@ -641,8 +645,10 @@ def test_main_uses_runtime_eval_split_defaults_for_partitioned_probe(
     assert captured_load_kwargs[0]["task_partition"] == "eval"
     assert captured_load_kwargs[0]["eval_split_fraction"] == 0.25
     assert captured_load_kwargs[0]["min_eval_rows"] == 2
-    assert captured_requests[0].task_eval_split_fraction == 0.25
-    assert captured_requests[0].task_eval_min_rows == 2
+    assert captured_requests[0].task_partition == "all"
+    assert captured_requests[0].task_eval_split_fraction == 0.0
+    assert captured_requests[0].task_eval_min_rows == 0
+    assert captured_requests[0].dataset_loader is not None
     assert payload["task_partition"] == "eval"
     assert payload["eval_split_fraction"] == 0.25
     assert payload["min_eval_rows"] == 2
