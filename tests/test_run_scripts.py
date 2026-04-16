@@ -1147,6 +1147,7 @@ def test_onpolicy_difficulty_probe_slurm_script_dry_run_ignores_coordination_rep
         "run_onpolicy_difficulty_probe_slurm.sh",
         env_overrides={
             "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROJECT_ROOT": str(repo_root),
             "REPO_ROOT": str(coordination_root),
         },
     )
