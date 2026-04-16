@@ -107,11 +107,58 @@ def collect_rft_sft_batch_for_steps(
         output_dir=output_dir,
     )
     rollout_rows = _flatten_rollout_steps(rollout_steps)
+    result = build_rft_handoff_result_from_rollout_rows(
+        rollout_rows=rollout_rows,
+        max_tool_calls=_resolve_collector_max_tool_calls(collector),
+        tokenizer=tokenizer,
+        handoff_overrides=handoff_overrides,
+    )
+
+    if output_dir is not None:
+        base_dir = Path(output_dir)
+        base_dir.mkdir(parents=True, exist_ok=True)
+        write_jsonl_rows(base_dir / "rollout_rows.jsonl", rollout_rows)
+        write_jsonl_rows(base_dir / "selected_rows.jsonl", result["selected_rows"])
+        write_jsonl_rows(base_dir / "rejected_rows.jsonl", result["rejected_rows"])
+        _write_json(
+            base_dir / "rft_sft_meta.json",
+            {
+                "selected_count": len(result["selected_rows"]),
+                "rejected_count": len(result["rejected_rows"]),
+                "max_turn_level_generated_tokens": result["sft_batch"]["meta_info"][
+                    "max_turn_level_generated_tokens"
+                ],
+                "max_sequence_length_limit": result["sft_batch"]["meta_info"][
+                    "max_sequence_length_limit"
+                ],
+            },
+        )
+        _write_json(
+            base_dir / "rollout_artifact_summary.json",
+            _build_rollout_artifact_summary(
+                rollout_rows=rollout_rows,
+                total_steps=total_steps,
+                selected_count=len(result["selected_rows"]),
+                rejected_count=len(result["rejected_rows"]),
+            ),
+        )
+
+    return result
+
+
+def build_rft_handoff_result_from_rollout_rows(
+    *,
+    rollout_rows: Sequence[Mapping[str, Any]],
+    max_tool_calls: int,
+    tokenizer: SupportsOffsetsTokenizer,
+    handoff_overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply the centralized RFT handoff policy to an existing rollout row set."""
     handoff_settings = resolve_rft_handoff_settings(overrides=handoff_overrides)
     if rollout_rows:
         preprocessed_rows = preprocess_trajectories(
             rollout_rows,
-            max_tool_calls=collector.settings.runtime.max_tool_calls_per_turn,
+            max_tool_calls=max_tool_calls,
             tokenizer=tokenizer,
         )
         merged_rows = merge_rollout_and_preprocessed_rows(rollout_rows, preprocessed_rows)
@@ -148,35 +195,16 @@ def collect_rft_sft_batch_for_steps(
         "sft_batch": sft_batch,
         "dataproto_payload": dataproto_payload,
     }
-
-    if output_dir is not None:
-        base_dir = Path(output_dir)
-        base_dir.mkdir(parents=True, exist_ok=True)
-        write_jsonl_rows(base_dir / "rollout_rows.jsonl", rollout_rows)
-        write_jsonl_rows(base_dir / "selected_rows.jsonl", selected_rows)
-        write_jsonl_rows(base_dir / "rejected_rows.jsonl", rejected_rows)
-        _write_json(
-            base_dir / "rft_sft_meta.json",
-            {
-                "selected_count": len(selected_rows),
-                "rejected_count": len(rejected_rows),
-                "max_turn_level_generated_tokens": sft_batch["meta_info"][
-                    "max_turn_level_generated_tokens"
-                ],
-                "max_sequence_length_limit": sft_batch["meta_info"]["max_sequence_length_limit"],
-            },
-        )
-        _write_json(
-            base_dir / "rollout_artifact_summary.json",
-            _build_rollout_artifact_summary(
-                rollout_rows=rollout_rows,
-                total_steps=total_steps,
-                selected_count=len(selected_rows),
-                rejected_count=len(rejected_rows),
-            ),
-        )
-
     return result
+
+
+def _resolve_collector_max_tool_calls(collector: Any) -> int:
+    settings = getattr(collector, "settings", None)
+    runtime = getattr(settings, "runtime", None)
+    value = getattr(runtime, "max_tool_calls_per_turn", 0)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
 
 
 def merge_rollout_and_preprocessed_rows(

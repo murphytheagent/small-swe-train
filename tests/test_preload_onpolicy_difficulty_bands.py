@@ -50,6 +50,7 @@ def _settings(
         runtime=SimpleNamespace(
             eval_split_fraction=eval_split_fraction,
             eval_min_rows=eval_min_rows,
+            max_tool_calls_per_turn=4,
         ),
     )
 
@@ -70,6 +71,40 @@ def _stage_metadata(stage_name: str = "positive_rft") -> dict[str, object]:
             resolved_stage_name
         ),
     }
+
+
+def _stub_probe_collection(monkeypatch, collect_fn) -> None:
+    def _fake_collect_probe(**kwargs):
+        request = SimpleNamespace(
+            data_config_name=kwargs["data_config_name"],
+            turn_generator_mode=kwargs["turn_generator_mode"],
+            start_step_index=kwargs["probe_step_index"],
+            runtime_overrides={
+                "task_batch_size": 1,
+                "attempts_per_task": int(kwargs["attempts_per_task"]),
+                "env_pool_size": 1,
+                "max_in_flight_tasks": 1,
+            },
+            data_overrides=kwargs["data_overrides"],
+            task_partition="all",
+            task_eval_split_fraction=0.0,
+            task_eval_min_rows=0,
+            dataset_loader=object(),
+            verify_submissions=bool(kwargs["verify_submissions"]),
+            stage_name=str(kwargs["stage_name"]),
+        )
+        return collect_fn(request=request, tokenizer=None)
+
+    monkeypatch.setattr(
+        band_module,
+        "_collect_probe_rollout_rows_for_task",
+        _fake_collect_probe,
+    )
+    monkeypatch.setattr(
+        band_module,
+        "build_rft_handoff_result_from_rollout_rows",
+        lambda *, rollout_rows, max_tool_calls, tokenizer, handoff_overrides=None: dict(rollout_rows),
+    )
 
 
 def test_main_print_path_only_uses_resolved_cache_path(
@@ -184,7 +219,7 @@ def test_main_materializes_rollout_probe_cache(
     )
     monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
     monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
-    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    _stub_probe_collection(monkeypatch, _fake_collect)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -257,8 +292,8 @@ def test_main_fails_when_probe_task_is_pure_infra_failure(
     monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
     monkeypatch.setattr(
         band_module,
-        "collect_onpolicy_rft_runtime_batch",
-        lambda *, request, tokenizer: {
+        "_collect_probe_rollout_rows_for_task",
+        lambda **kwargs: {
             "rollout_rows": [
                 {"resolved": False, "infra_invalid": True},
                 {"resolved": False, "infra_invalid": True},
@@ -273,6 +308,13 @@ def test_main_fails_when_probe_task_is_pure_infra_failure(
                 {"rft_rejection_reason": "infra_invalid", "infra_invalid": True},
             ],
         },
+    )
+    monkeypatch.setattr(
+        band_module,
+        "build_rft_handoff_result_from_rollout_rows",
+        lambda *, rollout_rows, max_tool_calls, tokenizer, handoff_overrides=None: dict(
+            rollout_rows
+        ),
     )
     monkeypatch.setattr(
         sys,
@@ -337,10 +379,6 @@ def test_main_batches_probe_tasks_when_requested(
                     {"task_id": "task-a", "resolved": True},
                     {"task_id": "task-a", "resolved": True},
                     {"task_id": "task-a", "resolved": False},
-                    {"task_id": "task-b", "resolved": False},
-                    {"task_id": "task-b", "resolved": False},
-                    {"task_id": "task-b", "resolved": False},
-                    {"task_id": "task-b", "resolved": False},
                 ],
                 "selected_rows": [
                     {"task_id": "task-a"},
@@ -349,6 +387,18 @@ def test_main_batches_probe_tasks_when_requested(
                 ],
                 "rejected_rows": [
                     {"task_id": "task-a", "rft_rejection_reason": "unresolved"},
+                ],
+            }
+        if request.start_step_index == 1:
+            return {
+                "rollout_rows": [
+                    {"task_id": "task-b", "resolved": False},
+                    {"task_id": "task-b", "resolved": False},
+                    {"task_id": "task-b", "resolved": False},
+                    {"task_id": "task-b", "resolved": False},
+                ],
+                "selected_rows": [],
+                "rejected_rows": [
                     {"task_id": "task-b", "rft_rejection_reason": "unresolved"},
                     {"task_id": "task-b", "rft_rejection_reason": "unresolved"},
                     {"task_id": "task-b", "rft_rejection_reason": "unresolved"},
@@ -382,7 +432,7 @@ def test_main_batches_probe_tasks_when_requested(
     )
     monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
     monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
-    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    _stub_probe_collection(monkeypatch, _fake_collect)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -408,17 +458,15 @@ def test_main_batches_probe_tasks_when_requested(
     payload = json.loads(output_path.read_text(encoding="utf-8"))
 
     assert exit_code == 0
-    assert len(captured_requests) == 2
-    assert captured_requests[0].runtime_overrides["task_batch_size"] == 2
-    assert captured_requests[0].runtime_overrides["env_pool_size"] == 2
-    assert captured_requests[0].runtime_overrides["max_in_flight_tasks"] == 2
+    assert len(captured_requests) == 3
+    assert sorted(request.start_step_index for request in captured_requests) == [0, 1, 2]
+    assert captured_requests[0].runtime_overrides["task_batch_size"] == 1
+    assert captured_requests[0].runtime_overrides["env_pool_size"] == 1
+    assert captured_requests[0].runtime_overrides["max_in_flight_tasks"] == 1
     assert captured_requests[0].task_partition == "all"
     assert captured_requests[0].task_eval_split_fraction == 0.0
     assert captured_requests[0].task_eval_min_rows == 0
     assert captured_requests[0].dataset_loader is not None
-    assert captured_requests[1].runtime_overrides["task_batch_size"] == 1
-    assert captured_requests[1].runtime_overrides["env_pool_size"] == 1
-    assert captured_requests[1].runtime_overrides["max_in_flight_tasks"] == 1
     assert [record["task_id"] for record in payload["records"]] == ["task-a", "task-b", "task-c"]
     assert payload["records"][0]["difficulty_band"] == "easy"
     assert payload["records"][1]["difficulty_band"] == "near_impossible"
@@ -470,12 +518,18 @@ def test_main_resumes_from_partial_progress_cache(
             return {
                 "rollout_rows": [
                     {"task_id": "task-a", "resolved": True},
-                    {"task_id": "task-b", "resolved": True},
                 ],
                 "selected_rows": [
                     {"task_id": "task-a"},
-                    {"task_id": "task-b"},
                 ],
+                "rejected_rows": [],
+            }
+        if request.start_step_index == 1:
+            return {
+                "rollout_rows": [
+                    {"task_id": "task-b", "resolved": True},
+                ],
+                "selected_rows": [{"task_id": "task-b"}],
                 "rejected_rows": [],
             }
         if run_state["first_run"]:
@@ -500,7 +554,7 @@ def test_main_resumes_from_partial_progress_cache(
     )
     monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
     monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
-    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    _stub_probe_collection(monkeypatch, _fake_collect)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -526,7 +580,13 @@ def test_main_resumes_from_partial_progress_cache(
     partial_payload = json.loads(partial_path.read_text(encoding="utf-8"))
     assert partial_payload["probe_status"] == band_module.PROBE_STATUS_INCOMPLETE
     assert partial_payload["task_count_completed"] == 2
-    assert [record["task_id"] for record in partial_payload["records"]] == ["task-a", "task-b"]
+    partial_records_path = tmp_path / partial_payload["partial_records_path"]
+    partial_records = [
+        json.loads(line)
+        for line in partial_records_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [record["task_id"] for record in partial_records] == ["task-a", "task-b"]
 
     run_state["first_run"] = False
     exit_code = band_module.main()
@@ -536,9 +596,10 @@ def test_main_resumes_from_partial_progress_cache(
     assert exit_code == 0
     assert output_path == tmp_path / "difficulty_bands_dummy_dataset_train_resume.json"
     assert not partial_path.exists()
+    assert not partial_records_path.exists()
     assert payload["probe_status"] == band_module.PROBE_STATUS_COMPLETE
     assert [record["task_id"] for record in payload["records"]] == ["task-a", "task-b", "task-c"]
-    assert len(probe_calls) == 3
+    assert len(probe_calls) == 4
     assert probe_calls[-1].start_step_index == 2
     assert probe_calls[-1].runtime_overrides["task_batch_size"] == 1
 
@@ -619,7 +680,7 @@ def test_main_uses_runtime_eval_split_defaults_for_partitioned_probe(
     )
     monkeypatch.setattr(band_module, "load_task_samples", _fake_load_task_samples)
     monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
-    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    _stub_probe_collection(monkeypatch, _fake_collect)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -709,7 +770,7 @@ def test_main_disables_rollout_probe_dependency_while_building_probe(
     )
     monkeypatch.setattr(band_module, "load_task_samples", _fake_load_task_samples)
     monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
-    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    _stub_probe_collection(monkeypatch, _fake_collect)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -810,7 +871,7 @@ def test_main_rebuilds_cache_when_existing_metadata_is_incompatible(
     )
     monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
     monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
-    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    _stub_probe_collection(monkeypatch, _fake_collect)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -873,7 +934,7 @@ def test_main_reuses_freshly_materialized_cache(
     )
     monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
     monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
-    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    _stub_probe_collection(monkeypatch, _fake_collect)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -893,7 +954,7 @@ def test_main_reuses_freshly_materialized_cache(
 
     monkeypatch.setattr(
         band_module,
-        "collect_onpolicy_rft_runtime_batch",
+        "_collect_probe_rollout_rows_for_task",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("probe should not rerun")),
     )
 
@@ -970,7 +1031,7 @@ def test_main_reuses_cache_when_task_pool_fingerprint_matches(
     monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
     monkeypatch.setattr(
         band_module,
-        "collect_onpolicy_rft_runtime_batch",
+        "_collect_probe_rollout_rows_for_task",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("probe should not run")),
     )
     monkeypatch.setattr(
@@ -1060,9 +1121,10 @@ def test_main_rebuilds_cache_when_matching_metadata_cache_omits_selected_task(
     def _fake_collect(*, request, tokenizer):
         del tokenizer
         captured_requests.append(request)
+        task_id = "task-a" if request.start_step_index == 0 else "task-b"
         return {
-            "rollout_rows": [{"resolved": True, "task_id": "task-a"}, {"resolved": True, "task_id": "task-b"}],
-            "selected_rows": [{"task_id": "task-a"}, {"task_id": "task-b"}],
+            "rollout_rows": [{"resolved": True, "task_id": task_id}],
+            "selected_rows": [{"task_id": task_id}],
             "rejected_rows": [],
         }
 
@@ -1078,7 +1140,7 @@ def test_main_rebuilds_cache_when_matching_metadata_cache_omits_selected_task(
     )
     monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
     monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
-    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    _stub_probe_collection(monkeypatch, _fake_collect)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1100,7 +1162,7 @@ def test_main_rebuilds_cache_when_matching_metadata_cache_omits_selected_task(
     payload = json.loads(output_path.read_text(encoding="utf-8"))
 
     assert exit_code == 0
-    assert len(captured_requests) == 1
+    assert len(captured_requests) == 2
     assert output_path == cache_path
     assert sorted(record["task_id"] for record in payload["records"]) == ["task-a", "task-b"]
 
@@ -1178,7 +1240,7 @@ def test_main_rebuilds_cache_when_task_pool_fingerprint_changes(
     )
     monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
     monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
-    monkeypatch.setattr(band_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+    _stub_probe_collection(monkeypatch, _fake_collect)
     monkeypatch.setattr(
         sys,
         "argv",

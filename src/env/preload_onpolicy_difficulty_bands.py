@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from collections.abc import Callable
 from datetime import datetime, timezone
 import hashlib
@@ -23,7 +24,8 @@ from env.task_dataset import (
     resolve_on_policy_difficulty_band_cache_path,
 )
 from runtime_paths import resolve_on_policy_difficulty_band_cache_dir
-from trainer.rft_runtime import OnPolicyRFTRuntimeRequest, collect_onpolicy_rft_runtime_batch
+from trainer.rft_handoff import build_onpolicy_collector, build_rft_handoff_result_from_rollout_rows
+from trainer.rft_runtime import _resolve_turn_generator
 from trainer.rft_runtime_loop import (
     resolve_rft_stage_correctness_contract,
     _load_tokenizer,
@@ -37,6 +39,7 @@ DEFAULT_PROBE_LABEL = "positive_rft_probe"
 DEFAULT_ATTEMPTS_PER_TASK = 4
 PROBE_STATUS_COMPLETE = "complete"
 PROBE_STATUS_INCOMPLETE = "incomplete"
+PARTIAL_PROGRESS_RECORDS_SUFFIX = ".partial.records.jsonl"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -111,15 +114,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--task-batch-size",
         type=int,
         default=1,
-        help="Number of tasks to probe concurrently in each runtime batch (default: 1).",
+        help=(
+            "Maximum number of tasks kept queued in each probe window before refilling. "
+            "Active concurrency is capped separately by --env-pool-size and "
+            "--max-in-flight-tasks (default: 1)."
+        ),
     )
     parser.add_argument(
         "--env-pool-size",
         type=int,
         default=None,
         help=(
-            "Container pool size used during probing. Defaults to --task-batch-size "
-            "when omitted."
+            "Upper bound on concurrently active task environments during probing. "
+            "Defaults to --task-batch-size when omitted."
         ),
     )
     parser.add_argument(
@@ -127,7 +134,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Maximum concurrent tasks dispatched inside each probe batch. Defaults to "
+            "Upper bound on concurrently active probe tasks. Defaults to "
             "--env-pool-size when omitted."
         ),
     )
@@ -422,6 +429,10 @@ def _resolve_partial_cache_path(cache_path: Path) -> Path:
     return cache_path.with_suffix(".partial.json")
 
 
+def _resolve_partial_records_path(cache_path: Path) -> Path:
+    return cache_path.with_suffix(PARTIAL_PROGRESS_RECORDS_SUFFIX)
+
+
 def _cache_payload_is_complete(payload: Mapping[str, Any]) -> bool:
     status_text = str(payload.get("probe_status", "")).strip().lower()
     return not status_text or status_text == PROBE_STATUS_COMPLETE
@@ -481,6 +492,30 @@ def _build_cache_payload(
     }
 
 
+def _build_partial_progress_payload(
+    *,
+    expected_cache_metadata: Mapping[str, Any],
+    selected_task_count: int,
+    completed_count: int,
+    partial_records_path: Path,
+    latest_completed_task_id: str = "",
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": 1,
+        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "probe_status": PROBE_STATUS_INCOMPLETE,
+        **dict(expected_cache_metadata),
+        "task_count": int(completed_count),
+        "task_count_completed": int(completed_count),
+        "task_count_expected": int(selected_task_count),
+        "partial_records_path": partial_records_path.name,
+    }
+    normalized_task_id = str(latest_completed_task_id).strip()
+    if normalized_task_id:
+        payload["latest_completed_task_id"] = normalized_task_id
+    return payload
+
+
 def _write_cache_payload(
     *,
     cache_path: Path,
@@ -495,12 +530,77 @@ def _write_cache_payload(
     tmp_path.replace(cache_path)
 
 
+def _append_partial_record(
+    *,
+    partial_records_path: Path,
+    record: Mapping[str, Any],
+) -> None:
+    partial_records_path.parent.mkdir(parents=True, exist_ok=True)
+    with partial_records_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(record), ensure_ascii=True, sort_keys=True) + "\n")
+
+
+def _load_partial_records(
+    partial_records_path: Path,
+) -> dict[str, dict[str, Any]]:
+    records_by_task_id: dict[str, dict[str, Any]] = {}
+    with partial_records_path.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            parsed = json.loads(line)
+            if not isinstance(parsed, Mapping):
+                raise ValueError(
+                    "Difficulty-band partial progress records must be mappings: "
+                    f"{partial_records_path}:{line_number}"
+                )
+            task_id = str(parsed.get("task_id", "")).strip()
+            difficulty_band = str(parsed.get("difficulty_band", "")).strip()
+            if not task_id or not difficulty_band:
+                raise ValueError(
+                    "Difficulty-band partial progress records must include non-empty "
+                    f"task_id and difficulty_band fields: {partial_records_path}:{line_number}"
+                )
+            if task_id in records_by_task_id:
+                raise ValueError(
+                    "Difficulty-band partial progress records contain duplicate task_id "
+                    f"{task_id!r}: {partial_records_path}:{line_number}"
+                )
+            records_by_task_id[task_id] = dict(parsed)
+    return records_by_task_id
+
+
 def _load_resumable_records(
     *,
     payload: Mapping[str, Any],
     tasks: Sequence[TaskSample],
+    partial_records_path: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
-    records_by_task_id = _records_by_task_id(payload)
+    if "records" in payload:
+        records_by_task_id = _records_by_task_id(payload)
+    else:
+        resolved_partial_records_path = partial_records_path
+        if resolved_partial_records_path is None:
+            raw_path = str(payload.get("partial_records_path", "")).strip()
+            if not raw_path:
+                raise ValueError(
+                    "Difficulty-band progress cache is missing both records and "
+                    "partial_records_path."
+                )
+            resolved_partial_records_path = Path(raw_path)
+        if not resolved_partial_records_path.is_absolute():
+            raise ValueError(
+                "Difficulty-band progress cache partial_records_path must resolve to an "
+                "absolute path when loaded without an explicit override."
+            )
+        if not resolved_partial_records_path.is_file():
+            raise ValueError(
+                "Difficulty-band progress cache is missing its partial records file: "
+                f"{resolved_partial_records_path}"
+            )
+        records_by_task_id = _load_partial_records(resolved_partial_records_path)
+
     expected_task_ids = {task.task_id for task in tasks}
     unexpected_task_ids = sorted(set(records_by_task_id) - expected_task_ids)
     if unexpected_task_ids:
@@ -584,6 +684,135 @@ def _build_expected_cache_metadata(
         "task_pool_size": task_pool_size,
         "task_pool_fingerprint": task_pool_fingerprint,
     }
+
+
+def _collect_probe_rollout_rows_for_task(
+    *,
+    data_config_name: str,
+    turn_generator_mode: str,
+    attempts_per_task: int,
+    data_overrides: Mapping[str, Any] | None,
+    verify_submissions: bool,
+    stage_name: str,
+    task: TaskSample,
+    probe_step_index: int,
+) -> list[dict[str, Any]]:
+    collector = build_onpolicy_collector(
+        data_config_name=data_config_name,
+        turn_generator=_resolve_turn_generator(turn_generator_mode),
+        runtime_overrides={
+            "task_batch_size": 1,
+            "attempts_per_task": int(attempts_per_task),
+            "env_pool_size": 1,
+            "max_in_flight_tasks": 1,
+            "verify_submissions": bool(verify_submissions),
+        },
+        data_overrides=data_overrides,
+        task_partition="all",
+        task_eval_split_fraction=0.0,
+        task_eval_min_rows=0,
+        stage_name=stage_name,
+        dataset_loader=_build_dataset_loader_for_tasks([task]),
+    )
+    rows = collector.collect_step(probe_step_index)
+    return [dict(row) for row in rows]
+
+
+def _probe_tasks_with_progress_writes(
+    *,
+    remaining_indexed_tasks: Sequence[tuple[int, TaskSample]],
+    expected_cache_metadata: Mapping[str, Any],
+    selected_task_count: int,
+    partial_cache_path: Path,
+    partial_records_path: Path,
+    existing_records_by_task_id: dict[str, dict[str, Any]],
+    submission_window: int,
+    max_workers: int,
+    data_config_name: str,
+    turn_generator_mode: str,
+    attempts_per_task: int,
+    probe_source_data_overrides: Mapping[str, Any] | None,
+    handoff_overrides: Mapping[str, Any],
+    verify_submissions: bool,
+    stage_name: str,
+    max_tool_calls: int,
+    tokenizer: Any,
+) -> None:
+    if not remaining_indexed_tasks:
+        return
+
+    task_iterator = iter(remaining_indexed_tasks)
+    pending: dict[Future[list[dict[str, Any]]], tuple[int, TaskSample]] = {}
+    normalized_submission_window = max(1, int(submission_window))
+    normalized_worker_count = max(1, int(max_workers))
+
+    _write_cache_payload(
+        cache_path=partial_cache_path,
+        payload=_build_partial_progress_payload(
+            expected_cache_metadata=expected_cache_metadata,
+            selected_task_count=selected_task_count,
+            completed_count=len(existing_records_by_task_id),
+            partial_records_path=partial_records_path,
+        ),
+    )
+
+    def _submit_next(executor: ThreadPoolExecutor) -> bool:
+        try:
+            probe_step_index, task = next(task_iterator)
+        except StopIteration:
+            return False
+        future = executor.submit(
+            _collect_probe_rollout_rows_for_task,
+            data_config_name=data_config_name,
+            turn_generator_mode=turn_generator_mode,
+            attempts_per_task=attempts_per_task,
+            data_overrides=probe_source_data_overrides,
+            verify_submissions=verify_submissions,
+            stage_name=stage_name,
+            task=task,
+            probe_step_index=probe_step_index,
+        )
+        pending[future] = (probe_step_index, task)
+        return True
+
+    with ThreadPoolExecutor(max_workers=normalized_worker_count) as executor:
+        while len(pending) < normalized_submission_window and _submit_next(executor):
+            pass
+
+        while pending:
+            done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            for future in done:
+                probe_step_index, task = pending.pop(future)
+                rollout_rows = future.result()
+                task_result = build_rft_handoff_result_from_rollout_rows(
+                    rollout_rows=rollout_rows,
+                    max_tool_calls=max_tool_calls,
+                    tokenizer=tokenizer,
+                    handoff_overrides=handoff_overrides,
+                )
+                record = _build_band_record(
+                    task=task,
+                    probe_step_index=probe_step_index,
+                    stage_name=stage_name,
+                    result=task_result,
+                )
+                existing_records_by_task_id[task.task_id] = record
+                _append_partial_record(
+                    partial_records_path=partial_records_path,
+                    record=record,
+                )
+                _write_cache_payload(
+                    cache_path=partial_cache_path,
+                    payload=_build_partial_progress_payload(
+                        expected_cache_metadata=expected_cache_metadata,
+                        selected_task_count=selected_task_count,
+                        completed_count=len(existing_records_by_task_id),
+                        partial_records_path=partial_records_path,
+                        latest_completed_task_id=task.task_id,
+                    ),
+                )
+                while len(pending) < normalized_submission_window and _submit_next(executor):
+                    pass
 
 
 def _cache_metadata_matches(
@@ -713,7 +942,14 @@ def main() -> int:
             print(cache_path)
             return 0
     partial_cache_path = _resolve_partial_cache_path(cache_path)
+    partial_records_path = _resolve_partial_records_path(cache_path)
+    if bool(args.force_refresh):
+        if partial_cache_path.exists():
+            partial_cache_path.unlink()
+        if partial_records_path.exists():
+            partial_records_path.unlink()
     records_by_task_id: dict[str, dict[str, Any]] = {}
+    resumed_from_partial = False
     if partial_cache_path.is_file() and not bool(args.force_refresh):
         partial_payload = _load_cache_payload(partial_cache_path)
         if _cache_metadata_matches(
@@ -723,7 +959,14 @@ def main() -> int:
             records_by_task_id = _load_resumable_records(
                 payload=partial_payload,
                 tasks=sliced_tasks,
+                partial_records_path=partial_records_path,
             )
+            resumed_from_partial = True
+    if not resumed_from_partial:
+        if partial_cache_path.exists():
+            partial_cache_path.unlink()
+        if partial_records_path.exists():
+            partial_records_path.unlink()
 
     remaining_indexed_tasks = [
         (start_index + offset, task)
@@ -732,108 +975,39 @@ def main() -> int:
     ]
     if remaining_indexed_tasks:
         tokenizer = _load_tokenizer(args.initial_model)
-        if resolved_task_batch_size == 1:
-            for probe_step_index, task in remaining_indexed_tasks:
-                result = collect_onpolicy_rft_runtime_batch(
-                    request=OnPolicyRFTRuntimeRequest(
-                        data_config_name=args.data_config_name,
-                        turn_generator_mode=args.turn_generator_mode,
-                        total_steps=1,
-                        start_step_index=probe_step_index,
-                        runtime_overrides={
-                            "task_batch_size": 1,
-                            "attempts_per_task": int(args.attempts_per_task),
-                            "env_pool_size": 1,
-                            "max_in_flight_tasks": 1,
-                        },
-                        data_overrides=probe_source_data_overrides,
-                        handoff_overrides=handoff_overrides,
-                        task_partition="all",
-                        task_eval_split_fraction=0.0,
-                        task_eval_min_rows=0,
-                        verify_submissions=verify_submissions,
-                        stage_name=resolved_stage_name,
-                        dataset_loader=_build_dataset_loader_for_tasks([task]),
-                    ),
-                    tokenizer=tokenizer,
+        if records_by_task_id and not partial_records_path.exists():
+            for record in _ordered_records_for_tasks(
+                tasks=sliced_tasks,
+                records_by_task_id=records_by_task_id,
+            ):
+                _append_partial_record(
+                    partial_records_path=partial_records_path,
+                    record=record,
                 )
-                records_by_task_id[task.task_id] = _build_band_record(
-                    task=task,
-                    probe_step_index=probe_step_index,
-                    stage_name=resolved_stage_name,
-                    result=result,
-                )
-                _write_cache_payload(
-                    cache_path=partial_cache_path,
-                    payload=_build_cache_payload(
-                        expected_cache_metadata=expected_cache_metadata,
-                        selected_task_count=len(sliced_tasks),
-                        records=_ordered_records_for_tasks(
-                            tasks=sliced_tasks,
-                            records_by_task_id=records_by_task_id,
-                        ),
-                        probe_status=PROBE_STATUS_INCOMPLETE,
-                    ),
-                )
-        else:
-            for chunk_start in range(0, len(remaining_indexed_tasks), resolved_task_batch_size):
-                indexed_task_chunk = remaining_indexed_tasks[
-                    chunk_start : chunk_start + resolved_task_batch_size
-                ]
-                task_chunk = [task for _, task in indexed_task_chunk]
-                chunk_probe_step_index = indexed_task_chunk[0][0]
-                result = collect_onpolicy_rft_runtime_batch(
-                    request=OnPolicyRFTRuntimeRequest(
-                        data_config_name=args.data_config_name,
-                        turn_generator_mode=args.turn_generator_mode,
-                        total_steps=1,
-                        start_step_index=chunk_probe_step_index,
-                        runtime_overrides={
-                            "task_batch_size": len(task_chunk),
-                            "attempts_per_task": int(args.attempts_per_task),
-                            "env_pool_size": min(resolved_env_pool_size, len(task_chunk)),
-                            "max_in_flight_tasks": min(
-                                resolved_max_in_flight_tasks,
-                                len(task_chunk),
-                            ),
-                        },
-                        data_overrides=probe_source_data_overrides,
-                        handoff_overrides=handoff_overrides,
-                        task_partition="all",
-                        task_eval_split_fraction=0.0,
-                        task_eval_min_rows=0,
-                        verify_submissions=verify_submissions,
-                        stage_name=resolved_stage_name,
-                        dataset_loader=_build_dataset_loader_for_tasks(task_chunk),
-                    ),
-                    tokenizer=tokenizer,
-                )
-
-                fallback_task_id = task_chunk[0].task_id if len(task_chunk) == 1 else ""
-                for probe_step_index, task in indexed_task_chunk:
-                    task_result = _extract_task_result(
-                        result=result,
-                        task_id=task.task_id,
-                        fallback_task_id=fallback_task_id,
-                    )
-                    records_by_task_id[task.task_id] = _build_band_record(
-                        task=task,
-                        probe_step_index=probe_step_index,
-                        stage_name=resolved_stage_name,
-                        result=task_result,
-                    )
-                _write_cache_payload(
-                    cache_path=partial_cache_path,
-                    payload=_build_cache_payload(
-                        expected_cache_metadata=expected_cache_metadata,
-                        selected_task_count=len(sliced_tasks),
-                        records=_ordered_records_for_tasks(
-                            tasks=sliced_tasks,
-                            records_by_task_id=records_by_task_id,
-                        ),
-                        probe_status=PROBE_STATUS_INCOMPLETE,
-                    ),
-                )
+        max_workers = min(
+            resolved_env_pool_size,
+            resolved_max_in_flight_tasks,
+            len(remaining_indexed_tasks),
+        )
+        _probe_tasks_with_progress_writes(
+            remaining_indexed_tasks=remaining_indexed_tasks,
+            expected_cache_metadata=expected_cache_metadata,
+            selected_task_count=len(sliced_tasks),
+            partial_cache_path=partial_cache_path,
+            partial_records_path=partial_records_path,
+            existing_records_by_task_id=records_by_task_id,
+            submission_window=min(resolved_task_batch_size, len(remaining_indexed_tasks)),
+            max_workers=max_workers,
+            data_config_name=args.data_config_name,
+            turn_generator_mode=args.turn_generator_mode,
+            attempts_per_task=int(args.attempts_per_task),
+            probe_source_data_overrides=probe_source_data_overrides,
+            handoff_overrides=handoff_overrides,
+            verify_submissions=verify_submissions,
+            stage_name=resolved_stage_name,
+            max_tool_calls=settings.runtime.max_tool_calls_per_turn,
+            tokenizer=tokenizer,
+        )
 
     ordered_records = _ordered_records_for_tasks(
         tasks=sliced_tasks,
@@ -854,6 +1028,8 @@ def main() -> int:
     _write_cache_payload(cache_path=cache_path, payload=payload)
     if partial_cache_path.exists():
         partial_cache_path.unlink()
+    if partial_records_path.exists():
+        partial_records_path.unlink()
     print(cache_path)
     return 0
 
