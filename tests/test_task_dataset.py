@@ -1159,6 +1159,72 @@ def test_load_task_samples_accepts_completed_subset_rollout_probe_cache_as_label
     assert task_samples[0].difficulty_band_source == "rollout_probe:selected_2_of_4"
 
 
+def test_load_task_samples_reuses_partition_scoped_partial_rollout_probe_cache_without_resplitting(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_eval.complete.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "probe_status": "complete",
+                "task_partition": "eval",
+                "task_pool_size": 1,
+                "task_count_expected": 1,
+                "records": [
+                    {
+                        "task_id": "task-a",
+                        "task_family": "func_basic",
+                        "difficulty_band": "learnable",
+                        "difficulty_band_source": "rollout_probe:selected_2_of_4",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "task-a",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+        {
+            "task_id": "task-b",
+            "image_name": "img:2",
+            "problem_statement": "p2",
+            "FAIL_TO_PASS": ["f2"],
+            "PASS_TO_PASS": ["p2"],
+        },
+    ]
+
+    eval_task_samples = load_task_samples(
+        config=_rollout_probe_config(
+            str(cache_path),
+            rollout_probe_accept_partial=True,
+        ),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="eval",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+    train_task_samples = load_task_samples(
+        config=_rollout_probe_config(
+            str(cache_path),
+            rollout_probe_accept_partial=True,
+        ),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="train",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    assert [task.task_id for task in eval_task_samples] == ["task-a"]
+    assert train_task_samples == []
+
+
 def test_load_task_batch_wraps_all_partition_on_partial_rollout_probe_subset(
     tmp_path: Path,
 ) -> None:
