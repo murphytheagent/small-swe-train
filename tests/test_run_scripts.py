@@ -1136,6 +1136,26 @@ def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_overridden_base_url
     assert "--port 19191" in result.stdout
 
 
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_ignores_coordination_repo_root(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    coordination_root = tmp_path / "coordination-root"
+    coordination_root.mkdir()
+
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "REPO_ROOT": str(coordination_root),
+        },
+    )
+
+    expected_cache_dir = repo_root / "data" / "on_policy_difficulty_band_cache"
+    assert f"--cache-dir {expected_cache_dir}" in result.stdout
+    assert str(coordination_root) not in result.stdout
+
+
 def test_onpolicy_difficulty_probe_slurm_script_non_dry_run_materializes_cache(
     tmp_path: Path,
 ) -> None:

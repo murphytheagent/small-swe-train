@@ -18,7 +18,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="${REPO_ROOT:-}"
+PROJECT_ROOT="${PROJECT_ROOT:-}"
 if [[ -z "${PROJECT_ROOT}" ]]; then
   if [[ -n "${SLURM_SUBMIT_DIR:-}" ]] && [[ -d "${SLURM_SUBMIT_DIR}/src" ]]; then
     PROJECT_ROOT="${SLURM_SUBMIT_DIR}"
