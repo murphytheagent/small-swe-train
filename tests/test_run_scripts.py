@@ -1199,6 +1199,8 @@ def test_onpolicy_difficulty_probe_slurm_script_non_dry_run_preflight_sweeps_sta
         {
             "PATH": f"{tmp_path}{os.pathsep}{env.get('PATH', '')}",
             "FAKE_DOCKER_LOG_FILE": str(docker_log_path),
+            "USER": "test-runner",
+            "LOGNAME": "test-runner",
             "PYTHON_BIN": str(python_stub),
             "SLURM_GPUS_ON_NODE": "2",
             "SLURM_JOB_ID": "987654",
