@@ -74,6 +74,7 @@ class TaskPoolBuildResult:
 class RolloutProbeCacheState:
     records: Mapping[str, dict[str, Any]]
     is_complete: bool
+    is_partial_coverage: bool
 
 
 def _required_columns(config: OnPolicyDataConfig) -> tuple[str, str, str, str]:
@@ -706,7 +707,11 @@ def _load_rollout_probe_cache_records_cached(
     del modified_ns, file_size
     cache_path = Path(cache_path_text)
     if not cache_path.is_file():
-        return RolloutProbeCacheState(records={}, is_complete=True)
+        return RolloutProbeCacheState(
+            records={},
+            is_complete=True,
+            is_partial_coverage=False,
+        )
 
     payload = json.loads(cache_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
@@ -722,6 +727,26 @@ def _load_rollout_probe_cache_records_cached(
 
     probe_status = str(payload.get("probe_status", "")).strip().lower()
     is_complete = not probe_status or probe_status == "complete"
+    task_partition = str(payload.get("task_partition", "")).strip().lower()
+    start_task_index = int(payload.get("start_task_index", 0) or 0)
+    task_limit = payload.get("task_limit")
+    expected_task_count = payload.get("task_count_expected")
+    task_pool_size = payload.get("task_pool_size")
+    expected_count_value = (
+        int(expected_task_count) if expected_task_count is not None else None
+    )
+    task_pool_size_value = int(task_pool_size) if task_pool_size is not None else None
+    is_partial_coverage = (
+        not is_complete
+        or task_partition not in ("", "all")
+        or start_task_index != 0
+        or task_limit is not None
+        or (
+            expected_count_value is not None
+            and task_pool_size_value is not None
+            and expected_count_value != task_pool_size_value
+        )
+    )
     if not is_complete and not allow_partial:
         raise ValueError(
             "Difficulty-band cache is incomplete at "
@@ -736,6 +761,7 @@ def _load_rollout_probe_cache_records_cached(
                 cache_path=cache_path,
             ),
             is_complete=is_complete,
+            is_partial_coverage=is_partial_coverage,
         )
 
     if not is_complete:
@@ -751,6 +777,7 @@ def _load_rollout_probe_cache_records_cached(
                 stat.st_size,
             ),
             is_complete=False,
+            is_partial_coverage=True,
         )
 
     band_mapping = payload.get("task_band_by_task_id", payload.get("task_bands"))
@@ -779,7 +806,11 @@ def _load_rollout_probe_cache_records_cached(
                 "difficulty_band": difficulty_band,
                 "difficulty_band_source": difficulty_band_source,
             }
-        return RolloutProbeCacheState(records=records_by_task_id, is_complete=True)
+        return RolloutProbeCacheState(
+            records=records_by_task_id,
+            is_complete=True,
+            is_partial_coverage=is_partial_coverage,
+        )
 
     raise ValueError(
         "Difficulty-band cache must define either `records` or `task_band_by_task_id`: "
@@ -789,7 +820,7 @@ def _load_rollout_probe_cache_records_cached(
 
 def _load_rollout_probe_cache_records(
     difficulty_banding: OnPolicyDifficultyBandConfig,
-) -> tuple[Path | None, dict[str, dict[str, Any]], bool]:
+) -> tuple[Path | None, dict[str, dict[str, Any]], bool, bool]:
     cache_path = _resolve_rollout_probe_cache_path(difficulty_banding)
     if cache_path is None:
         if difficulty_banding.rollout_probe_required:
@@ -797,12 +828,12 @@ def _load_rollout_probe_cache_records(
                 "difficulty_banding.rollout_probe_required=true but no rollout_probe_cache_path "
                 "or SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH was provided."
             )
-        return None, {}, True
+        return None, {}, True, False
 
     if not cache_path.is_file():
         if difficulty_banding.rollout_probe_required:
             raise ValueError(f"Difficulty-band cache not found: {cache_path}")
-        return cache_path, {}, True
+        return cache_path, {}, True, False
 
     stat = cache_path.stat()
     cache_state = _load_rollout_probe_cache_records_cached(
@@ -811,13 +842,20 @@ def _load_rollout_probe_cache_records(
         stat.st_size,
         bool(difficulty_banding.rollout_probe_accept_partial),
     )
-    return cache_path, dict(cache_state.records), cache_state.is_complete
+    return (
+        cache_path,
+        dict(cache_state.records),
+        cache_state.is_complete,
+        cache_state.is_partial_coverage,
+    )
 
 
 def _rollout_probe_cache_fingerprint(
     difficulty_banding: OnPolicyDifficultyBandConfig,
 ) -> dict[str, Any]:
-    cache_path, records, is_complete = _load_rollout_probe_cache_records(difficulty_banding)
+    cache_path, records, is_complete, is_partial_coverage = _load_rollout_probe_cache_records(
+        difficulty_banding
+    )
     normalized_records = {
         task_id: {
             "difficulty_band": str(record.get("difficulty_band", "")).strip(),
@@ -835,6 +873,7 @@ def _rollout_probe_cache_fingerprint(
         "accept_partial": bool(difficulty_banding.rollout_probe_accept_partial),
         "present": bool(records),
         "complete": bool(is_complete),
+        "partial_coverage": bool(is_partial_coverage),
         "task_count": len(records),
         "digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
     }
@@ -846,10 +885,10 @@ def _resolve_partial_rollout_probe_task_ids(
     strategy = str(config.difficulty_banding.strategy).strip().lower()
     if strategy != "rollout_probe" or not bool(config.difficulty_banding.rollout_probe_accept_partial):
         return None
-    _cache_path, records, is_complete = _load_rollout_probe_cache_records(
+    _cache_path, records, _is_complete, is_partial_coverage = _load_rollout_probe_cache_records(
         config.difficulty_banding
     )
-    if is_complete:
+    if not is_partial_coverage:
         return None
     return frozenset(records)
 
@@ -886,7 +925,7 @@ def _resolve_task_difficulty_metadata(
         return task_family, default_band, "instance_id_family:default"
 
     if strategy == "rollout_probe":
-        _cache_path, records, _is_complete = _load_rollout_probe_cache_records(
+        _cache_path, records, _is_complete, _is_partial_coverage = _load_rollout_probe_cache_records(
             difficulty_banding
         )
         record = records.get(task_id)
@@ -993,7 +1032,12 @@ def load_task_batch(
     if not tasks:
         return []
 
-    if normalized_partition == _TASK_PARTITION_ALL and len(tasks) < batch_size:
+    partial_rollout_probe_task_ids = _resolve_partial_rollout_probe_task_ids(config)
+    if (
+        normalized_partition == _TASK_PARTITION_ALL
+        and len(tasks) < batch_size
+        and partial_rollout_probe_task_ids is None
+    ):
         partition_detail = (
             f" in task partition {normalized_partition!r}"
             if normalized_partition != _TASK_PARTITION_ALL

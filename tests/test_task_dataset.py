@@ -1105,6 +1105,119 @@ def test_load_task_samples_accepts_partial_rollout_probe_cache_as_labeled_subset
     assert task_samples[0].difficulty_band_source == "rollout_probe:selected_1_of_4"
 
 
+def test_load_task_samples_accepts_completed_subset_rollout_probe_cache_as_labeled_subset(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_eval.complete.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "probe_status": "complete",
+                "task_partition": "eval",
+                "task_pool_size": 1,
+                "task_count_expected": 1,
+                "records": [
+                    {
+                        "task_id": "task-a",
+                        "task_family": "func_basic",
+                        "difficulty_band": "learnable",
+                        "difficulty_band_source": "rollout_probe:selected_2_of_4",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "task-a",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+        {
+            "task_id": "task-b",
+            "image_name": "img:2",
+            "problem_statement": "p2",
+            "FAIL_TO_PASS": ["f2"],
+            "PASS_TO_PASS": ["p2"],
+        },
+    ]
+
+    task_samples = load_task_samples(
+        config=_rollout_probe_config(
+            str(cache_path),
+            rollout_probe_accept_partial=True,
+        ),
+        dataset_loader=lambda _dataset_id, _split: rows,
+    )
+
+    assert [task.task_id for task in task_samples] == ["task-a"]
+    assert task_samples[0].difficulty_band == "learnable"
+    assert task_samples[0].difficulty_band_source == "rollout_probe:selected_2_of_4"
+
+
+def test_load_task_batch_wraps_all_partition_on_partial_rollout_probe_subset(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_incomplete.partial.json"
+    partial_records_path = tmp_path / "difficulty_bands_incomplete.partial.records.jsonl"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "probe_status": "incomplete",
+                "task_count_expected": 2,
+                "task_count_completed": 1,
+                "partial_records_path": partial_records_path.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    partial_records_path.write_text(
+        json.dumps(
+            {
+                "task_id": "task-a",
+                "task_family": "func_basic",
+                "difficulty_band": "learnable",
+                "difficulty_band_source": "rollout_probe:selected_1_of_4",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "task-a",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+        {
+            "task_id": "task-b",
+            "image_name": "img:2",
+            "problem_statement": "p2",
+            "FAIL_TO_PASS": ["f2"],
+            "PASS_TO_PASS": ["p2"],
+        },
+    ]
+
+    batch = load_task_batch(
+        step_index=0,
+        batch_size=3,
+        config=_rollout_probe_config(
+            str(cache_path),
+            rollout_probe_accept_partial=True,
+        ),
+        dataset_loader=lambda _dataset_id, _split: rows,
+    )
+
+    assert [task.task_id for task in batch] == ["task-a", "task-a", "task-a"]
+
+
 def test_build_sdpo_task_rows_filters_problem_statement_length_under_4k() -> None:
     rows = [
         {
