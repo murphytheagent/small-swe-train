@@ -1182,6 +1182,58 @@ def test_onpolicy_difficulty_probe_slurm_script_non_dry_run_materializes_cache(
     assert payload["records"][0]["task_id"] == "task-1"
 
 
+def test_onpolicy_difficulty_probe_slurm_script_non_dry_run_preflight_sweeps_stale_managed_containers(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    python_stub = _write_onpolicy_difficulty_probe_python_stub(tmp_path)
+    _write_pilot_docker_cleanup_probe_stub(tmp_path)
+    _write_squeue_probe_stub(tmp_path)
+    capture_path = tmp_path / "difficulty-probe-args.txt"
+    docker_log_path = tmp_path / "docker-invocations.log"
+    cache_dir = tmp_path / "difficulty-cache-preflight"
+    vllm_log = repo_root / "outputs" / "slurm" / "difficulty-probe-vllm-987654.log"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{tmp_path}{os.pathsep}{env.get('PATH', '')}",
+            "FAKE_DOCKER_LOG_FILE": str(docker_log_path),
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "SLURM_JOB_ID": "987654",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_CACHE_DIR": str(cache_dir),
+            "DIFFICULTY_PROBE_CAPTURE": str(capture_path),
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+        }
+    )
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script_path)],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=30,
+        )
+    finally:
+        if vllm_log.exists():
+            vllm_log.unlink()
+
+    assert result.returncode == 0, result.stderr
+    docker_invocations = docker_log_path.read_text(encoding="utf-8").splitlines()
+    assert any("label=small_swe.pool_name=onpolicy-task" in line for line in docker_invocations)
+    assert any("rm -f stale-container-1 stale-container-2" in line for line in docker_invocations)
+    assert not any("rm -f live-container" in line for line in docker_invocations)
+
+
 def test_onpolicy_difficulty_probe_slurm_script_accepts_models_endpoint_base_url(
     tmp_path: Path,
 ) -> None:
