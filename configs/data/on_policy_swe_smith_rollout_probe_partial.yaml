@@ -1,0 +1,14 @@
+dataset_id: SWE-bench/SWE-smith-py
+dataset_split: train
+patch_is_bug_introducing: true
+verifier_kind: pytest
+difficulty_banding:
+  strategy: rollout_probe
+  default_band: unbanded
+  rollout_probe_required: true
+  rollout_probe_accept_partial: true
+columns:
+  image_name: image_name
+  problem_statement: problem_statement
+  fail_to_pass: FAIL_TO_PASS
+  pass_to_pass: PASS_TO_PASS

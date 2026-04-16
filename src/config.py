@@ -55,6 +55,7 @@ class OnPolicyDifficultyBandConfig:
     family_band_prefix: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     rollout_probe_cache_path: str = ""
     rollout_probe_required: bool = False
+    rollout_probe_accept_partial: bool = False
 
 
 @dataclass(frozen=True)
@@ -600,6 +601,10 @@ def _parse_on_policy_difficulty_band_config(
         rollout_probe_required=_coerce_bool(
             banding_payload.get("rollout_probe_required", False),
             label="on_policy.data.difficulty_banding.rollout_probe_required",
+        ),
+        rollout_probe_accept_partial=_coerce_bool(
+            banding_payload.get("rollout_probe_accept_partial", False),
+            label="on_policy.data.difficulty_banding.rollout_probe_accept_partial",
         ),
     )
 

@@ -334,6 +334,7 @@ def test_resolve_on_policy_settings_parses_rollout_probe_banding_override() -> N
                 "strategy": "rollout_probe",
                 "rollout_probe_cache_path": "data/on_policy_difficulty_band_cache/demo.json",
                 "rollout_probe_required": True,
+                "rollout_probe_accept_partial": True,
             }
         }
     )
@@ -344,6 +345,7 @@ def test_resolve_on_policy_settings_parses_rollout_probe_banding_override() -> N
         == "data/on_policy_difficulty_band_cache/demo.json"
     )
     assert settings.data.difficulty_banding.rollout_probe_required is True
+    assert settings.data.difficulty_banding.rollout_probe_accept_partial is True
 
 
 def test_resolve_on_policy_settings_deep_merges_difficulty_banding_rule_overrides() -> None:

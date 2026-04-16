@@ -70,6 +70,12 @@ class TaskPoolBuildResult:
     filtered_task_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RolloutProbeCacheState:
+    records: Mapping[str, dict[str, Any]]
+    is_complete: bool
+
+
 def _required_columns(config: OnPolicyDataConfig) -> tuple[str, str, str, str]:
     columns = config.columns
     return (
@@ -209,11 +215,7 @@ def _coerce_task_row(
         verifier_kind=config.verifier_kind,
     )
 
-    task_id_raw = row.get("instance_id") or row.get("task_id") or row.get("problem_id")
-    if not isinstance(task_id_raw, str) or not task_id_raw.strip():
-        task_id = f"{config.dataset_id}:{row_index}"
-    else:
-        task_id = task_id_raw.strip()
+    task_id = _resolve_task_id(row=row, config=config, row_index=row_index)
 
     task_family, difficulty_band, difficulty_band_source = _resolve_task_difficulty_metadata(
         task_id=task_id,
@@ -240,6 +242,18 @@ def _coerce_task_row(
         difficulty_band=difficulty_band,
         difficulty_band_source=difficulty_band_source,
     )
+
+
+def _resolve_task_id(
+    *,
+    row: Mapping[str, Any],
+    config: OnPolicyDataConfig,
+    row_index: int,
+) -> str:
+    task_id_raw = row.get("instance_id") or row.get("task_id") or row.get("problem_id")
+    if not isinstance(task_id_raw, str) or not task_id_raw.strip():
+        return f"{config.dataset_id}:{row_index}"
+    return task_id_raw.strip()
 
 
 def _normalize_test_targets(value: Any) -> list[str]:
@@ -374,18 +388,27 @@ def _build_task_pool(
         "invalid_row": 0,
         "cached_bad_task": 0,
         "duplicate_logical_task": 0,
+        "partial_rollout_probe_unlabeled": 0,
     }
     filtered_task_ids: dict[str, list[str]] = {
         "cached_bad_task": [],
         "duplicate_logical_task": [],
+        "partial_rollout_probe_unlabeled": [],
     }
     seen_logical_keys: set[str] = set()
+    partial_rollout_probe_task_ids = _resolve_partial_rollout_probe_task_ids(config)
     for row_index in range(len(dataset)):
         row = dataset[row_index]
         if not isinstance(row, Mapping):
             last_error = ValueError(f"Dataset row {row_index} is not a mapping.")
             filtered_counts["invalid_row"] += 1
             continue
+        if partial_rollout_probe_task_ids is not None:
+            task_id = _resolve_task_id(row=row, config=config, row_index=row_index)
+            if task_id not in partial_rollout_probe_task_ids:
+                filtered_counts["partial_rollout_probe_unlabeled"] += 1
+                filtered_task_ids["partial_rollout_probe_unlabeled"].append(task_id)
+                continue
         try:
             task = _coerce_task_row(row, config=config, row_index=row_index)
         except ValueError as exc:
@@ -480,7 +503,12 @@ def _should_reraise_task_row_error(
     error: ValueError,
 ) -> bool:
     strategy = str(config.difficulty_banding.strategy).strip().lower()
-    if strategy != "rollout_probe" or not bool(config.difficulty_banding.rollout_probe_required):
+    if strategy != "rollout_probe":
+        return False
+    if not (
+        bool(config.difficulty_banding.rollout_probe_required)
+        or bool(config.difficulty_banding.rollout_probe_accept_partial)
+    ):
         return False
     error_text = str(error)
     return (
@@ -500,6 +528,9 @@ def _difficulty_banding_fingerprint(config: OnPolicyDataConfig) -> dict[str, Any
     fingerprint = {
         "strategy": config.difficulty_banding.strategy,
         "default_band": config.difficulty_banding.default_band,
+        "rollout_probe_accept_partial": bool(
+            config.difficulty_banding.rollout_probe_accept_partial
+        ),
         "family_band_exact": [
             [family, band] for family, band in config.difficulty_banding.family_band_exact
         ],
@@ -518,6 +549,9 @@ def _difficulty_banding_cache_token(config: OnPolicyDataConfig) -> str:
     fingerprint = {
         "strategy": config.difficulty_banding.strategy,
         "default_band": config.difficulty_banding.default_band,
+        "rollout_probe_accept_partial": bool(
+            config.difficulty_banding.rollout_probe_accept_partial
+        ),
         "family_band_exact": [
             [family, band] for family, band in config.difficulty_banding.family_band_exact
         ],
@@ -563,16 +597,116 @@ def _resolve_rollout_probe_cache_path(
     return project_root / path
 
 
+def _parse_rollout_probe_records_list(
+    *,
+    band_records: Sequence[Any],
+    cache_path: Path,
+) -> dict[str, dict[str, Any]]:
+    records_by_task_id: dict[str, dict[str, Any]] = {}
+    for index, raw_record in enumerate(band_records):
+        if not isinstance(raw_record, Mapping):
+            raise ValueError(
+                f"Difficulty-band cache record {index} must be a mapping: {cache_path}"
+            )
+        task_id = str(raw_record.get("task_id", "")).strip()
+        difficulty_band = str(raw_record.get("difficulty_band", "")).strip()
+        if not task_id or not difficulty_band:
+            raise ValueError(
+                "Difficulty-band cache records must include non-empty task_id and "
+                f"difficulty_band fields: {cache_path}"
+            )
+        if task_id in records_by_task_id:
+            raise ValueError(
+                "Difficulty-band cache contains duplicate task_id "
+                f"{task_id!r}: {cache_path}"
+            )
+        records_by_task_id[task_id] = {
+            "task_family": str(raw_record.get("task_family", "")).strip(),
+            "difficulty_band": difficulty_band,
+            "difficulty_band_source": str(
+                raw_record.get("difficulty_band_source", "")
+            ).strip()
+            or "rollout_probe:task_id",
+        }
+    return records_by_task_id
+
+
+@functools.lru_cache(maxsize=8)
+def _load_rollout_probe_partial_records_cached(
+    partial_records_path_text: str,
+    modified_ns: int,
+    file_size: int,
+) -> dict[str, dict[str, Any]]:
+    del modified_ns, file_size
+    partial_records_path = Path(partial_records_path_text)
+    records_by_task_id: dict[str, dict[str, Any]] = {}
+    with partial_records_path.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            parsed = json.loads(line)
+            if not isinstance(parsed, Mapping):
+                raise ValueError(
+                    "Difficulty-band partial records must be mappings: "
+                    f"{partial_records_path}:{line_number}"
+                )
+            task_id = str(parsed.get("task_id", "")).strip()
+            difficulty_band = str(parsed.get("difficulty_band", "")).strip()
+            if not task_id or not difficulty_band:
+                raise ValueError(
+                    "Difficulty-band partial records must include non-empty task_id and "
+                    f"difficulty_band fields: {partial_records_path}:{line_number}"
+                )
+            if task_id in records_by_task_id:
+                raise ValueError(
+                    "Difficulty-band partial records contain duplicate task_id "
+                    f"{task_id!r}: {partial_records_path}:{line_number}"
+                )
+            records_by_task_id[task_id] = {
+                "task_family": str(parsed.get("task_family", "")).strip(),
+                "difficulty_band": difficulty_band,
+                "difficulty_band_source": str(
+                    parsed.get("difficulty_band_source", "")
+                ).strip()
+                or "rollout_probe:task_id",
+            }
+    return records_by_task_id
+
+
+def _resolve_rollout_probe_partial_records_path(
+    *,
+    cache_path: Path,
+    payload: Mapping[str, Any],
+) -> Path:
+    raw_partial_records_path = str(payload.get("partial_records_path", "")).strip()
+    if not raw_partial_records_path:
+        raise ValueError(
+            "Difficulty-band partial cache is missing partial_records_path: "
+            f"{cache_path}"
+        )
+    partial_records_path = Path(raw_partial_records_path)
+    if not partial_records_path.is_absolute():
+        partial_records_path = cache_path.parent / partial_records_path
+    if not partial_records_path.is_file():
+        raise ValueError(
+            "Difficulty-band partial records file not found: "
+            f"{partial_records_path}"
+        )
+    return partial_records_path
+
+
 @functools.lru_cache(maxsize=8)
 def _load_rollout_probe_cache_records_cached(
     cache_path_text: str,
     modified_ns: int,
     file_size: int,
-) -> dict[str, dict[str, Any]]:
+    allow_partial: bool,
+) -> RolloutProbeCacheState:
     del modified_ns, file_size
     cache_path = Path(cache_path_text)
     if not cache_path.is_file():
-        return {}
+        return RolloutProbeCacheState(records={}, is_complete=True)
 
     payload = json.loads(cache_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
@@ -587,43 +721,40 @@ def _load_rollout_probe_cache_records_cached(
         )
 
     probe_status = str(payload.get("probe_status", "")).strip().lower()
-    if probe_status and probe_status != "complete":
+    is_complete = not probe_status or probe_status == "complete"
+    if not is_complete and not allow_partial:
         raise ValueError(
             "Difficulty-band cache is incomplete at "
             f"{cache_path}; resume the probe to materialize the final cache."
         )
 
     band_records = payload.get("records", payload.get("task_band_records"))
-    records_by_task_id: dict[str, dict[str, Any]] = {}
     if isinstance(band_records, Sequence) and not isinstance(band_records, (str, bytes)):
-        for index, raw_record in enumerate(band_records):
-            if not isinstance(raw_record, Mapping):
-                raise ValueError(
-                    f"Difficulty-band cache record {index} must be a mapping: {cache_path}"
-                )
-            task_id = str(raw_record.get("task_id", "")).strip()
-            difficulty_band = str(raw_record.get("difficulty_band", "")).strip()
-            if not task_id or not difficulty_band:
-                raise ValueError(
-                    "Difficulty-band cache records must include non-empty task_id and "
-                    f"difficulty_band fields: {cache_path}"
-                )
-            if task_id in records_by_task_id:
-                raise ValueError(
-                    "Difficulty-band cache contains duplicate task_id "
-                    f"{task_id!r}: {cache_path}"
-                )
-            records_by_task_id[task_id] = {
-                "task_family": str(raw_record.get("task_family", "")).strip(),
-                "difficulty_band": difficulty_band,
-                "difficulty_band_source": str(
-                    raw_record.get("difficulty_band_source", "")
-                ).strip()
-                or "rollout_probe:task_id",
-            }
-        return records_by_task_id
+        return RolloutProbeCacheState(
+            records=_parse_rollout_probe_records_list(
+                band_records=band_records,
+                cache_path=cache_path,
+            ),
+            is_complete=is_complete,
+        )
+
+    if not is_complete:
+        partial_records_path = _resolve_rollout_probe_partial_records_path(
+            cache_path=cache_path,
+            payload=payload,
+        )
+        stat = partial_records_path.stat()
+        return RolloutProbeCacheState(
+            records=_load_rollout_probe_partial_records_cached(
+                str(partial_records_path),
+                stat.st_mtime_ns,
+                stat.st_size,
+            ),
+            is_complete=False,
+        )
 
     band_mapping = payload.get("task_band_by_task_id", payload.get("task_bands"))
+    records_by_task_id: dict[str, dict[str, Any]] = {}
     if isinstance(band_mapping, Mapping):
         for raw_task_id, raw_value in band_mapping.items():
             task_id = str(raw_task_id).strip()
@@ -648,7 +779,7 @@ def _load_rollout_probe_cache_records_cached(
                 "difficulty_band": difficulty_band,
                 "difficulty_band_source": difficulty_band_source,
             }
-        return records_by_task_id
+        return RolloutProbeCacheState(records=records_by_task_id, is_complete=True)
 
     raise ValueError(
         "Difficulty-band cache must define either `records` or `task_band_by_task_id`: "
@@ -658,7 +789,7 @@ def _load_rollout_probe_cache_records_cached(
 
 def _load_rollout_probe_cache_records(
     difficulty_banding: OnPolicyDifficultyBandConfig,
-) -> tuple[Path | None, dict[str, dict[str, Any]]]:
+) -> tuple[Path | None, dict[str, dict[str, Any]], bool]:
     cache_path = _resolve_rollout_probe_cache_path(difficulty_banding)
     if cache_path is None:
         if difficulty_banding.rollout_probe_required:
@@ -666,26 +797,27 @@ def _load_rollout_probe_cache_records(
                 "difficulty_banding.rollout_probe_required=true but no rollout_probe_cache_path "
                 "or SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH was provided."
             )
-        return None, {}
+        return None, {}, True
 
     if not cache_path.is_file():
         if difficulty_banding.rollout_probe_required:
             raise ValueError(f"Difficulty-band cache not found: {cache_path}")
-        return cache_path, {}
+        return cache_path, {}, True
 
     stat = cache_path.stat()
-    records = _load_rollout_probe_cache_records_cached(
+    cache_state = _load_rollout_probe_cache_records_cached(
         str(cache_path),
         stat.st_mtime_ns,
         stat.st_size,
+        bool(difficulty_banding.rollout_probe_accept_partial),
     )
-    return cache_path, records
+    return cache_path, dict(cache_state.records), cache_state.is_complete
 
 
 def _rollout_probe_cache_fingerprint(
     difficulty_banding: OnPolicyDifficultyBandConfig,
 ) -> dict[str, Any]:
-    cache_path, records = _load_rollout_probe_cache_records(difficulty_banding)
+    cache_path, records, is_complete = _load_rollout_probe_cache_records(difficulty_banding)
     normalized_records = {
         task_id: {
             "difficulty_band": str(record.get("difficulty_band", "")).strip(),
@@ -700,10 +832,26 @@ def _rollout_probe_cache_fingerprint(
     return {
         "path": str(cache_path) if cache_path is not None else "",
         "required": bool(difficulty_banding.rollout_probe_required),
+        "accept_partial": bool(difficulty_banding.rollout_probe_accept_partial),
         "present": bool(records),
+        "complete": bool(is_complete),
         "task_count": len(records),
         "digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
     }
+
+
+def _resolve_partial_rollout_probe_task_ids(
+    config: OnPolicyDataConfig,
+) -> frozenset[str] | None:
+    strategy = str(config.difficulty_banding.strategy).strip().lower()
+    if strategy != "rollout_probe" or not bool(config.difficulty_banding.rollout_probe_accept_partial):
+        return None
+    _cache_path, records, is_complete = _load_rollout_probe_cache_records(
+        config.difficulty_banding
+    )
+    if is_complete:
+        return None
+    return frozenset(records)
 
 
 def _resolve_task_difficulty_metadata(
@@ -738,7 +886,9 @@ def _resolve_task_difficulty_metadata(
         return task_family, default_band, "instance_id_family:default"
 
     if strategy == "rollout_probe":
-        _cache_path, records = _load_rollout_probe_cache_records(difficulty_banding)
+        _cache_path, records, _is_complete = _load_rollout_probe_cache_records(
+            difficulty_banding
+        )
         record = records.get(task_id)
         if record is None:
             if difficulty_banding.rollout_probe_required:
