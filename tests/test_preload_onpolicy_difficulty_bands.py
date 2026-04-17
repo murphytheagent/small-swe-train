@@ -604,6 +604,111 @@ def test_main_resumes_from_partial_progress_cache(
     assert probe_calls[-1].runtime_overrides["task_batch_size"] == 1
 
 
+def test_load_resumable_records_resolves_relative_partial_records_path_against_cache_path(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands.partial.json"
+    partial_records_path = tmp_path / "difficulty_bands.partial.records.jsonl"
+    partial_records_path.write_text(
+        json.dumps(
+            {
+                "task_id": "task-a",
+                "task_family": "func_basic",
+                "difficulty_band": "learnable",
+                "difficulty_band_source": "rollout_probe:selected_1_of_4",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    records = band_module._load_resumable_records(
+        payload={
+            "partial_records_path": partial_records_path.name,
+            "task_count_expected": 1,
+        },
+        tasks=[
+            TaskSample(
+                task_id="task-a",
+                image_name="img:a",
+                problem_statement="pa",
+                fail_to_pass=["fa"],
+                pass_to_pass=["pa"],
+                raw={},
+                task_family="func_basic",
+            )
+        ],
+        cache_path=cache_path,
+    )
+
+    assert records["task-a"]["difficulty_band"] == "learnable"
+
+
+def test_main_cancels_queued_probe_futures_after_task_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskSample(
+            task_id=f"task-{index}",
+            image_name=f"img:{index}",
+            problem_statement=f"p{index}",
+            fail_to_pass=[f"f{index}"],
+            pass_to_pass=[f"p{index}"],
+            raw={},
+            task_family="func_basic",
+        )
+        for index in range(3)
+    ]
+    observed_steps: list[int] = []
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        observed_steps.append(request.start_step_index)
+        if request.start_step_index == 0:
+            raise RuntimeError("probe boom")
+        return {
+            "rollout_rows": [{"resolved": True}],
+            "selected_rows": [{"task_id": f"task-{request.start_step_index}"}],
+            "rejected_rows": [],
+        }
+
+    monkeypatch.setattr(
+        band_module,
+        "resolve_on_policy_settings",
+        lambda data_config_name: _settings(),
+    )
+    monkeypatch.setattr(
+        band_module,
+        "rft_runtime_defaults",
+        lambda: {"loop": {"eval_split_fraction": 0.1, "eval_min_rows": 1}},
+    )
+    monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
+    monkeypatch.setattr(band_module, "_load_tokenizer", lambda model_path: object())
+    _stub_probe_collection(monkeypatch, _fake_collect)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preload_onpolicy_difficulty_bands.py",
+            "--initial-model",
+            "/tmp/model",
+            "--cache-dir",
+            str(tmp_path),
+            "--task-batch-size",
+            "3",
+            "--env-pool-size",
+            "1",
+            "--max-in-flight-tasks",
+            "1",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="probe boom"):
+        band_module.main()
+
+    assert observed_steps == [0]
+
+
 def test_build_dataset_loader_for_tasks_preserves_task_ids_without_source_id_fields() -> None:
     config = _config()
     loader = band_module._build_dataset_loader_for_tasks(

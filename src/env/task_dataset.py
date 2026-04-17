@@ -647,7 +647,13 @@ def _load_rollout_probe_partial_records_cached(
             line = raw_line.strip()
             if not line:
                 continue
-            parsed = json.loads(line)
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "Difficulty-band partial records contain invalid JSON: "
+                    f"{partial_records_path}:{line_number}"
+                ) from exc
             if not isinstance(parsed, Mapping):
                 raise ValueError(
                     "Difficulty-band partial records must be mappings: "
@@ -715,7 +721,12 @@ def _load_rollout_probe_cache_records_cached(
             task_partition=_TASK_PARTITION_ALL,
         )
 
-    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Difficulty-band cache contains invalid JSON: {cache_path}"
+        ) from exc
     if not isinstance(payload, Mapping):
         raise ValueError(f"Difficulty-band cache must be a mapping: {cache_path}")
 

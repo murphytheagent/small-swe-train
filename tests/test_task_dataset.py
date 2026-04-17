@@ -1046,6 +1046,66 @@ def test_load_task_batch_rejects_incomplete_rollout_probe_cache(
         )
 
 
+def test_load_task_samples_rejects_invalid_rollout_probe_cache_json(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_invalid.json"
+    cache_path.write_text("{\n", encoding="utf-8")
+    rows = [
+        {
+            "task_id": "task-a",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+    ]
+
+    with pytest.raises(ValueError, match="Difficulty-band cache contains invalid JSON"):
+        load_task_samples(
+            config=_rollout_probe_config(str(cache_path)),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )
+
+
+def test_load_task_samples_rejects_invalid_partial_rollout_probe_records_json(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_incomplete.partial.json"
+    partial_records_path = tmp_path / "difficulty_bands_incomplete.partial.records.jsonl"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "probe_status": "incomplete",
+                "task_count_expected": 1,
+                "task_count_completed": 0,
+                "partial_records_path": partial_records_path.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    partial_records_path.write_text("{\n", encoding="utf-8")
+    rows = [
+        {
+            "task_id": "task-a",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+    ]
+
+    with pytest.raises(ValueError, match="Difficulty-band partial records contain invalid JSON"):
+        load_task_samples(
+            config=_rollout_probe_config(
+                str(cache_path),
+                rollout_probe_accept_partial=True,
+            ),
+            dataset_loader=lambda _dataset_id, _split: rows,
+        )
+
+
 def test_load_task_samples_accepts_partial_rollout_probe_cache_as_labeled_subset(
     tmp_path: Path,
 ) -> None:

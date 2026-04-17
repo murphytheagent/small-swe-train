@@ -419,7 +419,12 @@ def _resolve_probe_source_data_overrides(
 
 
 def _load_cache_payload(cache_path: Path) -> Mapping[str, Any]:
-    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Difficulty-band cache contains invalid JSON: {cache_path}"
+        ) from exc
     if not isinstance(payload, Mapping):
         raise ValueError(f"Difficulty-band cache payload must be a mapping: {cache_path}")
     return payload
@@ -549,7 +554,13 @@ def _load_partial_records(
             line = raw_line.strip()
             if not line:
                 continue
-            parsed = json.loads(line)
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "Difficulty-band partial progress records contain invalid JSON: "
+                    f"{partial_records_path}:{line_number}"
+                ) from exc
             if not isinstance(parsed, Mapping):
                 raise ValueError(
                     "Difficulty-band partial progress records must be mappings: "
@@ -576,6 +587,7 @@ def _load_resumable_records(
     payload: Mapping[str, Any],
     tasks: Sequence[TaskSample],
     partial_records_path: Path | None = None,
+    cache_path: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     if "records" in payload:
         records_by_task_id = _records_by_task_id(payload)
@@ -590,10 +602,12 @@ def _load_resumable_records(
                 )
             resolved_partial_records_path = Path(raw_path)
         if not resolved_partial_records_path.is_absolute():
-            raise ValueError(
-                "Difficulty-band progress cache partial_records_path must resolve to an "
-                "absolute path when loaded without an explicit override."
-            )
+            if cache_path is None:
+                raise ValueError(
+                    "Difficulty-band progress cache partial_records_path must resolve to an "
+                    "absolute path when loaded without an explicit cache path."
+                )
+            resolved_partial_records_path = cache_path.parent / resolved_partial_records_path
         if not resolved_partial_records_path.is_file():
             raise ValueError(
                 "Difficulty-band progress cache is missing its partial records file: "
@@ -775,7 +789,9 @@ def _probe_tasks_with_progress_writes(
         pending[future] = (probe_step_index, task)
         return True
 
-    with ThreadPoolExecutor(max_workers=normalized_worker_count) as executor:
+    executor = ThreadPoolExecutor(max_workers=normalized_worker_count)
+    executor_closed = False
+    try:
         while len(pending) < normalized_submission_window and _submit_next(executor):
             pass
 
@@ -813,6 +829,15 @@ def _probe_tasks_with_progress_writes(
                 )
                 while len(pending) < normalized_submission_window and _submit_next(executor):
                     pass
+    except Exception:
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        executor_closed = True
+        raise
+    finally:
+        if not executor_closed:
+            executor.shutdown(wait=True)
 
 
 def _cache_metadata_matches(
