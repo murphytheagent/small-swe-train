@@ -107,7 +107,7 @@ def _stub_probe_collection(monkeypatch, collect_fn) -> None:
     )
 
 
-def test_main_print_path_only_uses_resolved_cache_path(
+def test_main_print_path_only_uses_resolved_cache_path_without_initial_model(
     monkeypatch,
     capsys,
 ) -> None:
@@ -131,8 +131,6 @@ def test_main_print_path_only_uses_resolved_cache_path(
         "argv",
         [
             "preload_onpolicy_difficulty_bands.py",
-            "--initial-model",
-            "/tmp/model",
             "--print-path-only",
         ],
     )
@@ -142,6 +140,95 @@ def test_main_print_path_only_uses_resolved_cache_path(
 
     assert exit_code == 0
     assert output == "/tmp/difficulty-bands/difficulty_bands_dummy_dataset_train_positive_rft_probe.json"
+
+
+def test_main_resumes_relative_partial_records_path_from_cache_dir(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    tasks = [
+        TaskSample(
+            task_id="task-a",
+            image_name="img:a",
+            problem_statement="pa",
+            fail_to_pass=["fa"],
+            pass_to_pass=["pa"],
+            raw={},
+            task_family="func_basic",
+        )
+    ]
+    partial_cache_path = (
+        tmp_path / "difficulty_bands_dummy_dataset_train_positive_rft_probe.partial.json"
+    )
+    partial_records_path = (
+        tmp_path / "difficulty_bands_dummy_dataset_train_positive_rft_probe.partial.records.jsonl"
+    )
+    partial_cache_path.write_text(
+        json.dumps(
+            {
+                "task_count_expected": 1,
+                "task_count_completed": 1,
+                "partial_records_path": partial_records_path.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    partial_records_path.write_text(
+        json.dumps(
+            {
+                "task_id": "task-a",
+                "task_family": "func_basic",
+                "difficulty_band": "learnable",
+                "difficulty_band_source": "rollout_probe:selected_1_of_4",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        band_module,
+        "resolve_on_policy_settings",
+        lambda data_config_name: _settings(),
+    )
+    monkeypatch.setattr(
+        band_module,
+        "rft_runtime_defaults",
+        lambda: {"loop": {"eval_split_fraction": 0.1, "eval_min_rows": 1}},
+    )
+    monkeypatch.setattr(band_module, "load_task_samples", lambda **kwargs: list(tasks))
+    monkeypatch.setattr(
+        band_module,
+        "_cache_metadata_matches",
+        lambda *, payload, expected: True,
+    )
+    monkeypatch.setattr(
+        band_module,
+        "_load_tokenizer",
+        lambda model_path: pytest.fail("resume path should not reload the tokenizer"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preload_onpolicy_difficulty_bands.py",
+            "--initial-model",
+            "/tmp/model",
+            "--cache-dir",
+            str(tmp_path),
+        ],
+    )
+
+    exit_code = band_module.main()
+    output_path = Path(capsys.readouterr().out.strip())
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert output_path.is_file()
+    assert payload["records"][0]["task_id"] == "task-a"
+    assert not partial_cache_path.exists()
+    assert not partial_records_path.exists()
 
 
 def test_main_materializes_rollout_probe_cache(

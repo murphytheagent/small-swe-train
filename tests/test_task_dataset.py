@@ -1285,6 +1285,101 @@ def test_load_task_samples_reuses_partition_scoped_partial_rollout_probe_cache_w
     assert train_task_samples == []
 
 
+def test_load_task_samples_rejects_train_eval_split_on_all_partition_partial_rollout_probe_cache(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_incomplete.partial.json"
+    partial_records_path = tmp_path / "difficulty_bands_incomplete.partial.records.jsonl"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "probe_status": "incomplete",
+                "task_count_expected": 4,
+                "task_count_completed": 2,
+                "partial_records_path": partial_records_path.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    partial_records_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "task_id": "task-a",
+                        "task_family": "func_basic",
+                        "difficulty_band": "learnable",
+                        "difficulty_band_source": "rollout_probe:selected_2_of_4",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "task_id": "task-b",
+                        "task_family": "combine_file",
+                        "difficulty_band": "near_impossible",
+                        "difficulty_band_source": "rollout_probe:selected_0_of_4",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "task-a",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+        {
+            "task_id": "task-b",
+            "image_name": "img:2",
+            "problem_statement": "p2",
+            "FAIL_TO_PASS": ["f2"],
+            "PASS_TO_PASS": ["p2"],
+        },
+        {
+            "task_id": "task-c",
+            "image_name": "img:3",
+            "problem_statement": "p3",
+            "FAIL_TO_PASS": ["f3"],
+            "PASS_TO_PASS": ["p3"],
+        },
+        {
+            "task_id": "task-d",
+            "image_name": "img:4",
+            "problem_statement": "p4",
+            "FAIL_TO_PASS": ["f4"],
+            "PASS_TO_PASS": ["p4"],
+        },
+    ]
+    config = _rollout_probe_config(
+        str(cache_path),
+        rollout_probe_accept_partial=True,
+    )
+
+    train_task_samples = load_task_samples(
+        config=config,
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="train",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+    eval_task_samples = load_task_samples(
+        config=config,
+        dataset_loader=lambda _dataset_id, _split: rows,
+        task_partition="eval",
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+    )
+
+    assert train_task_samples == []
+    assert eval_task_samples == []
+
+
 def test_load_task_batch_wraps_all_partition_on_partial_rollout_probe_subset(
     tmp_path: Path,
 ) -> None:
