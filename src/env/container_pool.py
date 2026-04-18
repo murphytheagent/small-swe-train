@@ -132,13 +132,8 @@ class BatchContainerPool:
                 )
                 self._best_effort_remove_container(container_name)
                 if name_conflict:
-                    if saw_timeout:
-                        raise RuntimeError(
-                            "Container start hit a name conflict after a timed-out launch for "
-                            f"task {task.task_id!r}; refusing to rotate names because the prior "
-                            "container may still exist."
-                        )
-                    container_name = self._new_container_name()
+                    if not saw_timeout:
+                        container_name = self._new_container_name()
 
             if attempt_index + 1 < _CONTAINER_START_MAX_ATTEMPTS:
                 backoff_sec = min(

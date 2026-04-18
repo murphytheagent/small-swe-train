@@ -173,7 +173,7 @@ def test_batch_container_pool_retries_timeout_then_raises(
         pool.acquire([_task("t1", "image:1")])
 
 
-def test_batch_container_pool_does_not_rotate_name_after_timeout_conflict(
+def test_batch_container_pool_retries_same_name_after_timeout_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[list[str]] = []
@@ -188,12 +188,17 @@ def test_batch_container_pool_does_not_rotate_name_after_timeout_conflict(
             run_attempts += 1
             if run_attempts == 1:
                 raise subprocess.TimeoutExpired(cmd=command, timeout=timeout_sec)
+            if run_attempts == 2:
+                return CommandResult(
+                    returncode=1,
+                    stderr=(
+                        'docker: Error response from daemon: Conflict. The container name '
+                        f'"{command[command.index("--name") + 1]}" is already in use.'
+                    ),
+                )
             return CommandResult(
-                returncode=1,
-                stderr=(
-                    'docker: Error response from daemon: Conflict. The container name '
-                    f'"{command[command.index("--name") + 1]}" is already in use.'
-                ),
+                returncode=0,
+                stdout="container-ok\n",
             )
         return CommandResult(returncode=1, stderr="cleanup missed container")
 
@@ -203,14 +208,16 @@ def test_batch_container_pool_does_not_rotate_name_after_timeout_conflict(
         runner=runner,
     )
 
-    with pytest.raises(RuntimeError, match="name conflict after a timed-out launch"):
-        pool.acquire([_task("t1", "image:1")])
+    handles = pool.acquire([_task("t1", "image:1")])
 
     run_commands = [cmd for cmd in commands if cmd[:2] == ["docker", "run"]]
-    assert len(run_commands) == 2
+    assert len(run_commands) == 3
     first_name = run_commands[0][run_commands[0].index("--name") + 1]
     second_name = run_commands[1][run_commands[1].index("--name") + 1]
+    third_name = run_commands[2][run_commands[2].index("--name") + 1]
     assert first_name == second_name
+    assert second_name == third_name
+    assert [handle.container_id for handle in handles] == ["container-ok"]
 
 
 def test_batch_container_pool_adds_management_labels(

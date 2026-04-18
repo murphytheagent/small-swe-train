@@ -1033,12 +1033,24 @@ def _order_tasks_for_stage(
     *,
     stage_name: str,
     task_partition: str,
+    cached_task_partition: str | None = None,
 ) -> list[TaskSample]:
     if len(tasks) < 2:
         return list(tasks)
     if _normalize_stage_name(stage_name) != _POSITIVE_RFT_STAGE_NAME:
         return list(tasks)
-    if _normalize_task_partition(task_partition) == _TASK_PARTITION_EVAL:
+    normalized_requested_partition = _normalize_task_partition(task_partition)
+    normalized_cached_partition = (
+        _normalize_task_partition(cached_task_partition)
+        if cached_task_partition is not None
+        else None
+    )
+    if normalized_requested_partition == _TASK_PARTITION_EVAL:
+        return list(tasks)
+    if (
+        normalized_requested_partition == _TASK_PARTITION_ALL
+        and normalized_cached_partition == _TASK_PARTITION_EVAL
+    ):
         return list(tasks)
 
     ranked_tasks = sorted(
@@ -1132,10 +1144,14 @@ def load_task_batch(
         ) from exc
     if not tasks:
         return []
+    partial_rollout_probe_cached_partition = _resolve_partial_rollout_probe_cached_partition(
+        config
+    )
     tasks = _order_tasks_for_stage(
         tasks,
         stage_name=stage_name,
         task_partition=normalized_partition,
+        cached_task_partition=partial_rollout_probe_cached_partition,
     )
 
     partial_rollout_probe_task_ids = _resolve_partial_rollout_probe_task_ids(config)

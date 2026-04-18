@@ -1463,6 +1463,67 @@ def test_load_task_batch_positive_stage_prioritizes_easier_bands_in_partial_subs
     ]
 
 
+def test_load_task_batch_positive_stage_preserves_eval_scoped_cached_subset_order(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_eval.complete.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "probe_status": "complete",
+                "task_partition": "eval",
+                "task_pool_size": 2,
+                "task_count_expected": 2,
+                "records": [
+                    {
+                        "task_id": "task-hard",
+                        "task_family": "combine_file",
+                        "difficulty_band": "near_impossible",
+                        "difficulty_band_source": "rollout_probe:hard",
+                    },
+                    {
+                        "task_id": "task-easy",
+                        "task_family": "func_basic",
+                        "difficulty_band": "easy",
+                        "difficulty_band_source": "rollout_probe:easy",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "task-hard",
+            "image_name": "img:1",
+            "problem_statement": "hard",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+        {
+            "task_id": "task-easy",
+            "image_name": "img:2",
+            "problem_statement": "easy",
+            "FAIL_TO_PASS": ["f2"],
+            "PASS_TO_PASS": ["p2"],
+        },
+    ]
+
+    batch = load_task_batch(
+        step_index=0,
+        batch_size=2,
+        config=_rollout_probe_config(
+            str(cache_path),
+            rollout_probe_accept_partial=True,
+        ),
+        dataset_loader=lambda _dataset_id, _split: rows,
+        stage_name="positive_rft",
+    )
+
+    assert [task.task_id for task in batch] == ["task-hard", "task-easy"]
+
+
 def test_build_sdpo_task_rows_filters_problem_statement_length_under_4k() -> None:
     rows = [
         {
