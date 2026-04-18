@@ -176,6 +176,9 @@ def test_collect_rft_sft_batch_for_steps_rejects_overlength_selected_rows(
     assert result["selected_rows"] == []
     assert len(result["rejected_rows"]) == 1
     assert result["rejected_rows"][0]["rft_rejection_reason"] == "selected_over_handoff_length"
+    assert result["rejected_rows"][0]["stage_decision_reason"] == "selected_over_handoff_length"
+    assert result["rejected_rows"][0]["stage_accepted"] is False
+    assert result["rejected_rows"][0]["rft_selected"] is False
     assert result["rejected_rows"][0]["selected_over_budget"] is True
     assert result["sft_batch"]["meta_info"]["selected_count"] == 0
 
@@ -223,6 +226,12 @@ def test_build_rft_handoff_result_rejects_selected_rows_with_invalid_preprocesse
         result["rejected_rows"][0]["rft_rejection_reason"]
         == "selected_invalid_preprocessed_payload"
     )
+    assert (
+        result["rejected_rows"][0]["stage_decision_reason"]
+        == "selected_invalid_preprocessed_payload"
+    )
+    assert result["rejected_rows"][0]["stage_accepted"] is False
+    assert result["rejected_rows"][0]["rft_selected"] is False
     assert (
         result["rejected_rows"][0]["selected_payload_error"]
         == "rows[1].input_ids must be a sequence of ints."

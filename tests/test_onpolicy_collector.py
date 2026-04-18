@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +14,7 @@ import pytest
 from config import (
     OnPolicyDataConfig,
     OnPolicyDatasetColumns,
+    OnPolicyDifficultyBandConfig,
     OnPolicyRuntimeConfig,
     OnPolicySettings,
     resolve_feedback_deterministic_truncation_settings,
@@ -306,6 +308,110 @@ def test_onpolicy_collector_uses_configured_stage_name_in_rollout_rows() -> None
 
     assert len(rows) == 1
     assert rows[0]["stage"] == "positive_rft"
+
+
+def test_onpolicy_collector_positive_stage_prioritizes_easier_bands_for_training(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "records": [
+                    {
+                        "task_id": "task-hard",
+                        "task_family": "combine_file",
+                        "difficulty_band": "near_impossible",
+                        "difficulty_band_source": "rollout_probe:hard",
+                    },
+                    {
+                        "task_id": "task-easy",
+                        "task_family": "func_basic",
+                        "difficulty_band": "easy",
+                        "difficulty_band_source": "rollout_probe:easy",
+                    },
+                    {
+                        "task_id": "task-learnable",
+                        "task_family": "func_basic",
+                        "difficulty_band": "learnable",
+                        "difficulty_band_source": "rollout_probe:learnable",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = OnPolicySettings(
+        data=OnPolicyDataConfig(
+            dataset_id="dummy/ds",
+            dataset_split="train",
+            columns=OnPolicyDatasetColumns(
+                image_name="image_name",
+                problem_statement="problem_statement",
+                fail_to_pass="FAIL_TO_PASS",
+                pass_to_pass="PASS_TO_PASS",
+            ),
+            difficulty_banding=OnPolicyDifficultyBandConfig(
+                strategy="rollout_probe",
+                default_band="unbanded",
+                rollout_probe_cache_path=str(cache_path),
+                rollout_probe_required=True,
+            ),
+        ),
+        runtime=OnPolicyRuntimeConfig(
+            enabled=True,
+            rollout_only=True,
+            task_batch_size=2,
+            attempts_per_task=1,
+            max_turns_per_attempt=3,
+            env_pool_size=2,
+            tool_timeout_sec=10,
+            container_start_timeout_sec=10,
+            attempt_timeout_sec=60,
+            max_tool_calls_per_turn=3,
+        ),
+    )
+
+    def _dataset_loader(_dataset_id: str, _split: str) -> list[dict[str, object]]:
+        return [
+            {
+                "task_id": "task-hard",
+                "image_name": "img:hard",
+                "problem_statement": "Fix hard task",
+                "FAIL_TO_PASS": ["hard"],
+                "PASS_TO_PASS": ["hard-ok"],
+            },
+            {
+                "task_id": "task-easy",
+                "image_name": "img:easy",
+                "problem_statement": "Fix easy task",
+                "FAIL_TO_PASS": ["easy"],
+                "PASS_TO_PASS": ["easy-ok"],
+            },
+            {
+                "task_id": "task-learnable",
+                "image_name": "img:learnable",
+                "problem_statement": "Fix learnable task",
+                "FAIL_TO_PASS": ["learnable"],
+                "PASS_TO_PASS": ["learnable-ok"],
+            },
+        ]
+
+    collector = OnPolicyRolloutCollector(
+        settings=settings,
+        turn_generator=lambda **_kwargs: '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>',
+        dataset_loader=_dataset_loader,
+        pool_factory=lambda _runtime: _FakePool(),
+        executor_factory=lambda _handle, _runtime: _FakeExecutor(),
+        stage_name="positive_rft",
+    )
+
+    rows = collector.collect_step(0)
+
+    assert [row["task_id"] for row in rows] == ["task-easy", "task-learnable"]
+    assert [row["difficulty_band"] for row in rows] == ["easy", "learnable"]
 
 
 def test_onpolicy_collector_truncates_tool_output_payload_fields() -> None:

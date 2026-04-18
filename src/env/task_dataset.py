@@ -35,6 +35,8 @@ _DIFFICULTY_BAND_CACHE_PATH_ENV = "SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH"
 _TASK_PARTITION_ALL = "all"
 _TASK_PARTITION_TRAIN = "train"
 _TASK_PARTITION_EVAL = "eval"
+_FORMAT_RFT_STAGE_NAME = "format_rft"
+_POSITIVE_RFT_STAGE_NAME = "positive_rft"
 _TASK_PARTITION_ALIASES = {
     "": _TASK_PARTITION_ALL,
     _TASK_PARTITION_ALL: _TASK_PARTITION_ALL,
@@ -44,6 +46,12 @@ _TASK_PARTITION_ALIASES = {
     "held_out": _TASK_PARTITION_EVAL,
     "val": _TASK_PARTITION_EVAL,
     "validation": _TASK_PARTITION_EVAL,
+}
+_POSITIVE_RFT_DIFFICULTY_BAND_PRIORITY = {
+    "easy": 0,
+    "learnable": 1,
+    "unbanded": 2,
+    "near_impossible": 3,
 }
 
 
@@ -1013,6 +1021,39 @@ def _resolve_task_family(
     return family
 
 
+def _normalize_stage_name(stage_name: str) -> str:
+    normalized = stage_name.strip().lower()
+    if normalized == _POSITIVE_RFT_STAGE_NAME:
+        return _POSITIVE_RFT_STAGE_NAME
+    return _FORMAT_RFT_STAGE_NAME
+
+
+def _order_tasks_for_stage(
+    tasks: Sequence[TaskSample],
+    *,
+    stage_name: str,
+    task_partition: str,
+) -> list[TaskSample]:
+    if len(tasks) < 2:
+        return list(tasks)
+    if _normalize_stage_name(stage_name) != _POSITIVE_RFT_STAGE_NAME:
+        return list(tasks)
+    if _normalize_task_partition(task_partition) == _TASK_PARTITION_EVAL:
+        return list(tasks)
+
+    ranked_tasks = sorted(
+        enumerate(tasks),
+        key=lambda item: (
+            _POSITIVE_RFT_DIFFICULTY_BAND_PRIORITY.get(
+                item[1].difficulty_band.strip().lower(),
+                _POSITIVE_RFT_DIFFICULTY_BAND_PRIORITY["unbanded"],
+            ),
+            item[0],
+        ),
+    )
+    return [task for _, task in ranked_tasks]
+
+
 def load_task_samples(
     *,
     config: OnPolicyDataConfig,
@@ -1065,6 +1106,7 @@ def load_task_batch(
     task_partition: str = _TASK_PARTITION_ALL,
     eval_split_fraction: float = 0.0,
     min_eval_rows: int = 0,
+    stage_name: str = _FORMAT_RFT_STAGE_NAME,
 ) -> list[TaskSample]:
     """Load a deterministic on-policy task batch for a given global step."""
     if step_index < 0:
@@ -1090,6 +1132,11 @@ def load_task_batch(
         ) from exc
     if not tasks:
         return []
+    tasks = _order_tasks_for_stage(
+        tasks,
+        stage_name=stage_name,
+        task_partition=normalized_partition,
+    )
 
     partial_rollout_probe_task_ids = _resolve_partial_rollout_probe_task_ids(config)
     if (

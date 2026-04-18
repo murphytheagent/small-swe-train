@@ -222,6 +222,7 @@ class OnPolicyRolloutCollector:
             task_partition=self._task_partition,
             eval_split_fraction=self._task_eval_split_fraction,
             min_eval_rows=self._task_eval_min_rows,
+            stage_name=self._stage_name,
         )
 
         max_workers = max(1, min(runtime.max_in_flight_tasks, runtime.env_pool_size, len(tasks)))

@@ -1344,6 +1344,125 @@ def test_load_task_batch_wraps_all_partition_on_partial_rollout_probe_subset(
     assert [task.task_id for task in batch] == ["task-a", "task-a", "task-a"]
 
 
+def test_load_task_batch_positive_stage_prioritizes_easier_bands_in_partial_subset(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_incomplete.partial.json"
+    partial_records_path = tmp_path / "difficulty_bands_incomplete.partial.records.jsonl"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "probe_status": "incomplete",
+                "task_count_expected": 4,
+                "task_count_completed": 4,
+                "partial_records_path": partial_records_path.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    partial_records_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "task_id": "task-hard-1",
+                        "task_family": "combine_file",
+                        "difficulty_band": "near_impossible",
+                        "difficulty_band_source": "rollout_probe:hard",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "task_id": "task-hard-2",
+                        "task_family": "combine_file",
+                        "difficulty_band": "near_impossible",
+                        "difficulty_band_source": "rollout_probe:hard",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "task_id": "task-easy",
+                        "task_family": "func_basic",
+                        "difficulty_band": "easy",
+                        "difficulty_band_source": "rollout_probe:easy",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "task_id": "task-learnable",
+                        "task_family": "func_basic",
+                        "difficulty_band": "learnable",
+                        "difficulty_band_source": "rollout_probe:learnable",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "task-hard-1",
+            "image_name": "img:1",
+            "problem_statement": "hard 1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        },
+        {
+            "task_id": "task-hard-2",
+            "image_name": "img:2",
+            "problem_statement": "hard 2",
+            "FAIL_TO_PASS": ["f2"],
+            "PASS_TO_PASS": ["p2"],
+        },
+        {
+            "task_id": "task-easy",
+            "image_name": "img:3",
+            "problem_statement": "easy",
+            "FAIL_TO_PASS": ["f3"],
+            "PASS_TO_PASS": ["p3"],
+        },
+        {
+            "task_id": "task-learnable",
+            "image_name": "img:4",
+            "problem_statement": "learnable",
+            "FAIL_TO_PASS": ["f4"],
+            "PASS_TO_PASS": ["p4"],
+        },
+    ]
+    config = _rollout_probe_config(
+        str(cache_path),
+        rollout_probe_accept_partial=True,
+    )
+
+    positive_batch = load_task_batch(
+        step_index=0,
+        batch_size=3,
+        config=config,
+        dataset_loader=lambda _dataset_id, _split: rows,
+        stage_name="positive_rft",
+    )
+    format_batch = load_task_batch(
+        step_index=0,
+        batch_size=3,
+        config=config,
+        dataset_loader=lambda _dataset_id, _split: rows,
+        stage_name="format_rft",
+    )
+
+    assert [task.task_id for task in positive_batch] == [
+        "task-easy",
+        "task-learnable",
+        "task-hard-1",
+    ]
+    assert [task.task_id for task in format_batch] == [
+        "task-hard-1",
+        "task-hard-2",
+        "task-easy",
+    ]
+
+
 def test_build_sdpo_task_rows_filters_problem_statement_length_under_4k() -> None:
     rows = [
         {

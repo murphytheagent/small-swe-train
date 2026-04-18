@@ -81,11 +81,11 @@ class BatchContainerPool:
     def _start_container(self, task: TaskSample) -> ContainerHandle:
         label_args = self._build_container_label_args()
         repo_root_env = _resolve_repo_root_env(task.image_name)
+        container_name = self._new_container_name()
         last_timeout = False
+        saw_timeout = False
         last_error = "<unknown error>"
         for attempt_index in range(_CONTAINER_START_MAX_ATTEMPTS):
-            suffix = uuid.uuid4().hex[:8]
-            container_name = f"{self._name_prefix}-{suffix}"
             command = [
                 "docker",
                 "run",
@@ -107,6 +107,7 @@ class BatchContainerPool:
                 result = self._runner(command, timeout_sec=self._container_start_timeout_sec)
             except subprocess.TimeoutExpired:
                 last_timeout = True
+                saw_timeout = True
                 last_error = f"docker run timed out after {self._container_start_timeout_sec}s"
                 self._best_effort_remove_container(container_name)
             else:
@@ -125,7 +126,19 @@ class BatchContainerPool:
 
                 last_timeout = False
                 last_error = result.stderr.strip() or "<empty stderr>"
+                name_conflict = _is_container_name_conflict(
+                    error_text=last_error,
+                    container_name=container_name,
+                )
                 self._best_effort_remove_container(container_name)
+                if name_conflict:
+                    if saw_timeout:
+                        raise RuntimeError(
+                            "Container start hit a name conflict after a timed-out launch for "
+                            f"task {task.task_id!r}; refusing to rotate names because the prior "
+                            "container may still exist."
+                        )
+                    container_name = self._new_container_name()
 
             if attempt_index + 1 < _CONTAINER_START_MAX_ATTEMPTS:
                 backoff_sec = min(
@@ -173,6 +186,10 @@ class BatchContainerPool:
             args.extend(["--label", f"{key}={value}"])
         return args
 
+    def _new_container_name(self) -> str:
+        suffix = uuid.uuid4().hex[:8]
+        return f"{self._name_prefix}-{suffix}"
+
     def release_all(self) -> None:
         handles = list(self._active_handles)
         self._active_handles = []
@@ -199,3 +216,14 @@ def _resolve_repo_root_env(image_name: str) -> str | None:
     if "swebench/swesmith" in normalized or "swe-smith" in normalized or "swesmith" in normalized:
         return _SWE_SMITH_REPO_ROOT
     return None
+
+
+def _is_container_name_conflict(*, error_text: str, container_name: str) -> bool:
+    normalized_error = str(error_text).strip()
+    if not normalized_error or not container_name:
+        return False
+    return (
+        "The container name" in normalized_error
+        and container_name in normalized_error
+        and "already in use" in normalized_error
+    )

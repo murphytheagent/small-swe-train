@@ -311,8 +311,11 @@ def _partition_rows_by_handoff_length(
             )
         except ValueError as exc:
             rejected_row = dict(row)
+            _mark_selected_row_rejected(
+                rejected_row,
+                reason="selected_invalid_preprocessed_payload",
+            )
             rejected_row["selected_over_budget"] = False
-            rejected_row["rft_rejection_reason"] = "selected_invalid_preprocessed_payload"
             rejected_row["selected_payload_error"] = str(exc)
             rejected_rows.append(rejected_row)
             continue
@@ -326,12 +329,23 @@ def _partition_rows_by_handoff_length(
             or len(token_labels) > padded_limit
         ):
             rejected_row = dict(row)
+            _mark_selected_row_rejected(
+                rejected_row,
+                reason="selected_over_handoff_length",
+            )
             rejected_row["selected_over_budget"] = True
-            rejected_row["rft_rejection_reason"] = "selected_over_handoff_length"
             rejected_rows.append(rejected_row)
             continue
         kept_rows.append(dict(row))
     return kept_rows, rejected_rows
+
+
+def _mark_selected_row_rejected(row: dict[str, Any], *, reason: str) -> None:
+    row["rft_selected"] = False
+    row["stage_accepted"] = False
+    row["rft_label"] = "reject"
+    row["rft_rejection_reason"] = reason
+    row["stage_decision_reason"] = reason
 
 
 def build_verl_sft_batch(
