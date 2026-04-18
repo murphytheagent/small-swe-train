@@ -113,6 +113,48 @@ def test_batch_container_pool_retries_start_until_success(
     pool.release_all()
 
 
+def test_batch_container_pool_uses_fresh_container_name_after_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    run_attempts = 0
+
+    monkeypatch.setattr("env.container_pool.time.sleep", lambda _sec: None)
+
+    def runner(command: list[str], *, timeout_sec: int) -> CommandResult:
+        nonlocal run_attempts
+        del timeout_sec
+        commands.append(list(command))
+        if command[:2] == ["docker", "run"]:
+            run_attempts += 1
+            if run_attempts == 1:
+                return CommandResult(
+                    returncode=1,
+                    stderr=(
+                        'docker: Error response from daemon: Conflict. The container name '
+                        f'"{command[command.index("--name") + 1]}" is already in use.'
+                    ),
+                )
+            return CommandResult(returncode=0, stdout="container-ok\n")
+        return CommandResult(returncode=0, stdout="")
+
+    pool = BatchContainerPool(
+        env_pool_size=1,
+        container_start_timeout_sec=10,
+        runner=runner,
+    )
+    handles = pool.acquire([_task("t1", "image:1")])
+
+    assert [handle.container_id for handle in handles] == ["container-ok"]
+    run_commands = [cmd for cmd in commands if cmd[:2] == ["docker", "run"]]
+    assert len(run_commands) == 2
+    first_name = run_commands[0][run_commands[0].index("--name") + 1]
+    second_name = run_commands[1][run_commands[1].index("--name") + 1]
+    assert first_name != second_name
+
+    pool.release_all()
+
+
 def test_batch_container_pool_retries_timeout_then_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -300,14 +300,22 @@ def _partition_rows_by_handoff_length(
     kept_rows: list[dict[str, Any]] = []
     rejected_rows: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
-        input_ids = _coerce_int_sequence(
-            row.get("input_ids"),
-            label=f"rows[{index}].input_ids",
-        )
-        action_mask = _coerce_loss_mask_sequence(
-            row.get("action_mask_rft"),
-            label=f"rows[{index}].action_mask_rft",
-        )
+        try:
+            input_ids = _coerce_int_sequence(
+                row.get("input_ids"),
+                label=f"rows[{index}].input_ids",
+            )
+            action_mask = _coerce_loss_mask_sequence(
+                row.get("action_mask_rft"),
+                label=f"rows[{index}].action_mask_rft",
+            )
+        except ValueError as exc:
+            rejected_row = dict(row)
+            rejected_row["selected_over_budget"] = False
+            rejected_row["rft_rejection_reason"] = "selected_invalid_preprocessed_payload"
+            rejected_row["selected_payload_error"] = str(exc)
+            rejected_rows.append(rejected_row)
+            continue
         token_labels = _coerce_token_labels(
             row.get("token_labels"),
             length_hint=len(input_ids),

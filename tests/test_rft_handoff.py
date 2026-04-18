@@ -8,6 +8,7 @@ import pytest
 
 from config import resolve_rft_handoff_settings
 from trainer.rft_handoff import (
+    build_rft_handoff_result_from_rollout_rows,
     build_verl_sft_batch,
     collect_rft_sft_batch_for_steps,
     merge_rollout_and_preprocessed_rows,
@@ -177,3 +178,52 @@ def test_collect_rft_sft_batch_for_steps_rejects_overlength_selected_rows(
     assert result["rejected_rows"][0]["rft_rejection_reason"] == "selected_over_handoff_length"
     assert result["rejected_rows"][0]["selected_over_budget"] is True
     assert result["sft_batch"]["meta_info"]["selected_count"] == 0
+
+
+def test_build_rft_handoff_result_rejects_selected_rows_with_invalid_preprocessed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "trainer.rft_handoff.preprocess_trajectories",
+        lambda rollout_rows, **kwargs: [
+            {
+                "input_ids": [1, 2, 3],
+                "action_mask_rft": [1, 1, 1],
+                "token_labels": ["a", "b", "c"],
+                "format_valid": True,
+            },
+            {
+                "input_ids": None,
+                "action_mask_rft": [1, 1],
+                "token_labels": ["a", "b"],
+                "format_valid": False,
+                "parse_error": "Invalid tool_call JSON",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "trainer.rft_handoff.select_rft_attempt_rows",
+        lambda rows, selection_policy: (list(rows), []),
+    )
+
+    result = build_rft_handoff_result_from_rollout_rows(
+        rollout_rows=[
+            {"task_id": "task-valid", "resolved": True},
+            {"task_id": "task-invalid", "resolved": True},
+        ],
+        max_tool_calls=3,
+        tokenizer=object(),
+        handoff_overrides=None,
+    )
+
+    assert [row["task_id"] for row in result["selected_rows"]] == ["task-valid"]
+    assert len(result["rejected_rows"]) == 1
+    assert result["rejected_rows"][0]["task_id"] == "task-invalid"
+    assert (
+        result["rejected_rows"][0]["rft_rejection_reason"]
+        == "selected_invalid_preprocessed_payload"
+    )
+    assert (
+        result["rejected_rows"][0]["selected_payload_error"]
+        == "rows[1].input_ids must be a sequence of ints."
+    )

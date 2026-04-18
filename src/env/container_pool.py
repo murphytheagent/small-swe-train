@@ -79,13 +79,13 @@ class BatchContainerPool:
             raise
 
     def _start_container(self, task: TaskSample) -> ContainerHandle:
-        suffix = uuid.uuid4().hex[:8]
-        container_name = f"{self._name_prefix}-{suffix}"
         label_args = self._build_container_label_args()
         repo_root_env = _resolve_repo_root_env(task.image_name)
         last_timeout = False
         last_error = "<unknown error>"
         for attempt_index in range(_CONTAINER_START_MAX_ATTEMPTS):
+            suffix = uuid.uuid4().hex[:8]
+            container_name = f"{self._name_prefix}-{suffix}"
             command = [
                 "docker",
                 "run",
