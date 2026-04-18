@@ -515,14 +515,9 @@ def _should_reraise_task_row_error(
     strategy = str(config.difficulty_banding.strategy).strip().lower()
     if strategy != "rollout_probe":
         return False
-    if not (
-        bool(config.difficulty_banding.rollout_probe_required)
-        or bool(config.difficulty_banding.rollout_probe_accept_partial)
-    ):
-        return False
     error_text = str(error)
     return (
-        "Difficulty-band cache" in error_text
+        "Difficulty-band" in error_text
         or "difficulty_banding.rollout_probe_required=true" in error_text
     )
 
@@ -1100,6 +1095,8 @@ def load_task_samples(
         return []
     if normalized_partition == _TASK_PARTITION_ALL:
         return tasks
+    if partial_rollout_probe_cached_partition == _TASK_PARTITION_ALL:
+        return []
 
     train_tasks, eval_tasks = split_task_samples_for_eval(
         tasks,
