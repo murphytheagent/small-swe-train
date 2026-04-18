@@ -73,7 +73,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--initial-model",
-        required=True,
+        default="",
         help="Model or checkpoint path used to load the tokenizer for length filtering.",
     )
     parser.add_argument(
@@ -903,6 +903,11 @@ def main() -> int:
         eval_split_fraction=resolved_eval_split_fraction,
         min_eval_rows=resolved_min_eval_rows,
     )
+    if args.print_path_only:
+        print(cache_path)
+        return 0
+    if not str(args.initial_model or "").strip():
+        parser.error("--initial-model is required unless --print-path-only is set.")
     resolved_stage_name = resolve_rft_stage_name(args.stage_name)
     verify_submissions = resolve_rft_stage_verify_submissions(resolved_stage_name)
     handoff_overrides = resolve_rft_stage_handoff_overrides(resolved_stage_name)
@@ -929,9 +934,6 @@ def main() -> int:
         task_pool_size=0,
         task_pool_fingerprint="",
     )
-    if args.print_path_only:
-        print(cache_path)
-        return 0
 
     tasks = load_task_samples(
         config=resolve_on_policy_settings(
@@ -985,6 +987,7 @@ def main() -> int:
                 payload=partial_payload,
                 tasks=sliced_tasks,
                 partial_records_path=partial_records_path,
+                cache_path=cache_path,
             )
             resumed_from_partial = True
     if not resumed_from_partial:
