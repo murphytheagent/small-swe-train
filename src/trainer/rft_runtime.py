@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME
 from data.tokenization import SupportsOffsetsTokenizer
+from rollout.action_format import render_tool_call_block
 from rollout.vllm_turn_generator import build_vllm_turn_generator
 from trainer.rft_handoff import (
     build_onpolicy_collector,
@@ -192,35 +193,26 @@ def _proof_tool_chain_turn_generator(
     del task, step_index, history
     path = f"/tmp/rft_proof_attempt_{attempt_index}.txt"
     if turn_index == 0:
-        return (
-            "<tool_call>"
-            '{"tool":"bash","args":{"command":"printf \'proof_seed\\n\' > '
-            + path
-            + "\"}}"
-            "</tool_call>"
+        return render_tool_call_block(
+            {"tool": "bash", "args": {"command": f"printf 'proof_seed\\n' > {path}"}},
+            compact=True,
         )
     if turn_index == 1:
-        return (
-            "<tool_call>"
-            '{"tool":"text_search","args":{"query":"proof_seed","path_hint":"/tmp","top_k":5}}'
-            "</tool_call>"
+        return render_tool_call_block(
+            {"tool": "text_search", "args": {"query": "proof_seed", "path_hint": "/tmp", "top_k": 5}},
+            compact=True,
         )
     if turn_index == 2:
-        return (
-            "<tool_call>"
-            '{"tool":"apply_patch","args":{"path":"'
-            + path
-            + '","patch":"proof_patch"}}'
-            "</tool_call>"
+        return render_tool_call_block(
+            {"tool": "apply_patch", "args": {"path": path, "patch": "proof_patch"}},
+            compact=True,
         )
     if turn_index == 3:
-        return (
-            "<tool_call>"
-            '{"tool":"text_search","args":{"query":"proof_patch","path_hint":"/tmp","top_k":5}}'
-            "</tool_call>"
+        return render_tool_call_block(
+            {"tool": "text_search", "args": {"query": "proof_patch", "path_hint": "/tmp", "top_k": 5}},
+            compact=True,
         )
-    return (
-        "<tool_call>"
-        '{"tool":"submit","args":{"final_response":"proof terminal submit"}}'
-        "</tool_call>"
+    return render_tool_call_block(
+        {"tool": "submit", "args": {"final_response": "proof terminal submit"}},
+        compact=True,
     )

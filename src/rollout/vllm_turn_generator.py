@@ -16,6 +16,7 @@ from prompts.runtime_messages import (
     build_onpolicy_initial_user_message,
     build_onpolicy_system_prompt,
 )
+from rollout.action_format import render_tool_call_block
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
 
@@ -279,15 +280,9 @@ def _extract_assistant_content(payload: Mapping[str, Any]) -> str:
             args_payload = function_payload.get("arguments", "{}")
             args_dict = _coerce_json_mapping(args_payload, fallback={})
             if tool_name:
-                return (
-                    "<tool_call>"
-                    + json.dumps(
-                        {"tool": tool_name, "args": args_dict},
-                        ensure_ascii=True,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                    + "</tool_call>"
+                return render_tool_call_block(
+                    {"tool": tool_name, "args": dict(args_dict)},
+                    compact=True,
                 )
 
     raise RuntimeError("vLLM response did not include assistant content.")

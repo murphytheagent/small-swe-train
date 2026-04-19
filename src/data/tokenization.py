@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping, Protocol, Sequence, cast
 
 from losses.action_masking import TokenLabel
 from prompts.model_delimiters import ModelDelimiters, default_delimiters
+from rollout.action_format import render_tool_call_block
 from schemas import ActionEnvelope
 
 LabeledSpan = tuple[int, int, TokenLabel]
@@ -167,8 +167,7 @@ def build_labeled_spans(
         cursor += len(block)
 
     for call in envelope.tool_calls:
-        payload = json.dumps(call.to_dict(), sort_keys=True, ensure_ascii=True)
-        block = f"{d.tool_call_start}{payload}{d.tool_call_end}"
+        block = render_tool_call_block(call, delimiters=d)
         spans.append((cursor, cursor + len(block), "tool_call"))
         chunks.append(block)
         cursor += len(block)

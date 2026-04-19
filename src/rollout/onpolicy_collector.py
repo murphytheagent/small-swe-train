@@ -15,6 +15,7 @@ from prompts.runtime_messages import (
     build_onpolicy_initial_user_message,
     build_onpolicy_system_prompt,
 )
+from rollout.action_format import render_tool_call_block
 from schemas import RolloutRow
 from verl_integration.env_bridge import build_tool_response_payload, run_env_bridge_step
 from verl_integration.submission_verifier import run_submission_verifier
@@ -62,15 +63,13 @@ def _default_turn_generator(
 ) -> str:
     del task, attempt_index, step_index, history
     if turn_index == 0:
-        return (
-            "<tool_call>"
-            '{"tool":"bash","args":{"command":"true"}}'
-            "</tool_call>"
+        return render_tool_call_block(
+            {"tool": "bash", "args": {"command": "true"}},
+            compact=True,
         )
-    return (
-        "<tool_call>"
-        '{"tool":"submit","args":{"final_response":"collector default terminal submit"}}'
-        "</tool_call>"
+    return render_tool_call_block(
+        {"tool": "submit", "args": {"final_response": "collector default terminal submit"}},
+        compact=True,
     )
 
 
