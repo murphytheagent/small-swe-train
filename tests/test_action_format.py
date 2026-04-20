@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import pytest
+
 from rollout.action_format import (
     is_chatml_assistant_turn,
     parse_assistant_text,
+    parse_assistant_text_result,
     render_assistant_action_text,
     render_tool_call_block,
     serialize_tool_call_payload,
 )
+from rollout.turn_parser import TurnParseError
 from schemas import ActionEnvelope, ToolCall
 
 
@@ -28,9 +32,34 @@ def test_parse_assistant_text_accepts_chatml_assistant_turn() -> None:
     assert envelope.tool_calls[0].tool == "submit"
 
 
+def test_parse_assistant_text_accepts_xml_payload_in_xml_only_mode() -> None:
+    envelope = parse_assistant_text(
+        '<tool_call name="submit">'
+        "<final_response><![CDATA[done]]></final_response>"
+        "<changed_paths><path><![CDATA[src/app.py]]></path><path><![CDATA[tests/test_app.py]]></path></changed_paths>"
+        "</tool_call>",
+        parse_mode="xml_only",
+    )
+
+    assert envelope.tool_calls[0].tool == "submit"
+    assert envelope.tool_calls[0].args["final_response"] == "done"
+    assert envelope.tool_calls[0].args["changed_paths"] == ["src/app.py", "tests/test_app.py"]
+
+
+def test_parse_assistant_text_result_reports_xml_payload_format() -> None:
+    parsed = parse_assistant_text_result(
+        '<tool_call name="bash"><command><![CDATA[pytest -q]]></command><cwd><![CDATA[.]]></cwd></tool_call>',
+        parse_mode="dual",
+    )
+
+    assert parsed.payload_format == "xml"
+    assert parsed.envelope.tool_calls[0].tool == "bash"
+
+
 def test_render_tool_call_block_preserves_legacy_json_contract() -> None:
     rendered = render_tool_call_block(
         ToolCall(tool="bash", args={"command": "pytest -q", "cwd": "."}),
+        payload_format="json",
     )
 
     assert rendered == '<tool_call>{"args": {"command": "pytest -q", "cwd": "."}, "tool": "bash"}</tool_call>'
@@ -39,10 +68,36 @@ def test_render_tool_call_block_preserves_legacy_json_contract() -> None:
 def test_render_tool_call_block_supports_compact_mode() -> None:
     rendered = render_tool_call_block(
         {"tool": "submit", "args": {"final_response": "done"}},
+        payload_format="json",
         compact=True,
     )
 
     assert rendered == '<tool_call>{"args":{"final_response":"done"},"tool":"submit"}</tool_call>'
+
+
+def test_render_tool_call_block_supports_xml_payload_format() -> None:
+    rendered = render_tool_call_block(
+        ToolCall(tool="bash", args={"command": "pytest -q", "cwd": "."}),
+        payload_format="xml",
+    )
+
+    assert rendered == (
+        '<tool_call name="bash">'
+        "<command><![CDATA[pytest -q]]></command>"
+        "<cwd><![CDATA[.]]></cwd>"
+        "</tool_call>"
+    )
+
+
+def test_render_tool_call_block_xml_splits_cdata_end_marker() -> None:
+    rendered = render_tool_call_block(
+        ToolCall(tool="submit", args={"final_response": "done ]]> now"}),
+        payload_format="xml",
+    )
+
+    assert "]]]]><![CDATA[>" in rendered
+    parsed = parse_assistant_text(rendered, parse_mode="xml_only")
+    assert parsed.tool_calls[0].args["final_response"] == "done ]]> now"
 
 
 def test_render_assistant_action_text_includes_thinking_and_calls() -> None:
@@ -51,9 +106,21 @@ def test_render_assistant_action_text_includes_thinking_and_calls() -> None:
         tool_calls=(ToolCall(tool="read", args={"path": "src/app.py"}),),
     )
 
-    assert render_assistant_action_text(envelope) == (
+    assert render_assistant_action_text(envelope, payload_format="json") == (
         '<think>check file</think>'
         '<tool_call>{"args": {"path": "src/app.py"}, "tool": "read"}</tool_call>'
+    )
+
+
+def test_render_assistant_action_text_supports_xml_payload_format() -> None:
+    envelope = ActionEnvelope(
+        thinking="check file",
+        tool_calls=(ToolCall(tool="read", args={"path": "src/app.py", "start_line": 10}),),
+    )
+
+    assert render_assistant_action_text(envelope, payload_format="xml") == (
+        "<think>check file</think>"
+        '<tool_call name="read"><path><![CDATA[src/app.py]]></path><start_line>10</start_line></tool_call>'
     )
 
 
@@ -70,3 +137,108 @@ def test_serialize_tool_call_payload_supports_compact_mode() -> None:
         )
         == '{"args":{"final_response":"done"},"tool":"submit"}'
     )
+
+
+def test_parse_assistant_text_dual_mode_rejects_mixed_json_and_xml_blocks() -> None:
+    payload = (
+        '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+        '<tool_call name="bash"><command><![CDATA[pytest -q]]></command></tool_call>'
+    )
+
+    with pytest.raises(TurnParseError, match="Mixed JSON/XML"):
+        parse_assistant_text(payload, parse_mode="dual")
+
+
+def test_parse_assistant_text_dual_mode_allows_xml_looking_text_inside_json_string() -> None:
+    payload = (
+        '<tool_call>{"tool":"submit","args":{"final_response":"see <tool_call name=\\"bash\\"> example"}}</tool_call>'
+    )
+
+    envelope = parse_assistant_text(payload, parse_mode="dual")
+
+    assert envelope.tool_calls[0].tool == "submit"
+    assert envelope.tool_calls[0].args["final_response"] == 'see <tool_call name="bash"> example'
+
+
+def test_parse_assistant_text_dual_mode_allows_json_looking_text_inside_xml_cdata() -> None:
+    payload = (
+        '<tool_call name="submit">'
+        '<final_response><![CDATA[old: <tool_call>{"tool":"submit","args":{}}</tool_call>]]></final_response>'
+        "</tool_call>"
+    )
+
+    parsed = parse_assistant_text_result(payload, parse_mode="dual")
+
+    assert parsed.payload_format == "xml"
+    assert parsed.envelope.tool_calls[0].args["final_response"] == (
+        'old: <tool_call>{"tool":"submit","args":{}}</tool_call>'
+    )
+
+
+def test_parse_assistant_text_xml_rejects_duplicate_scalar_fields() -> None:
+    payload = (
+        '<tool_call name="bash">'
+        "<command><![CDATA[pytest -q]]></command>"
+        "<command><![CDATA[pytest -q tests/test_app.py]]></command>"
+        "</tool_call>"
+    )
+
+    with pytest.raises(TurnParseError, match="Duplicate XML arg field <command>"):
+        parse_assistant_text(payload, parse_mode="xml_only")
+
+
+def test_parse_assistant_text_xml_rejects_attributes_on_arg_elements() -> None:
+    payload = (
+        '<tool_call name="bash">'
+        '<command foo="bar"><![CDATA[pytest -q]]></command>'
+        "</tool_call>"
+    )
+
+    with pytest.raises(TurnParseError, match="Unsupported attributes on XML arg <command>"):
+        parse_assistant_text(payload, parse_mode="xml_only")
+
+
+def test_parse_assistant_text_xml_allows_literal_xml_text_inside_cdata() -> None:
+    payload = (
+        '<tool_call name="apply_patch">'
+        "<path><![CDATA[src/app.py]]></path>"
+        "<patch><![CDATA[<?xml version=\"1.0\"?><root xmlns=\"u\"/>]]></patch>"
+        "</tool_call>"
+    )
+
+    envelope = parse_assistant_text(payload, parse_mode="xml_only")
+
+    assert envelope.tool_calls[0].tool == "apply_patch"
+    assert "<?xml version=\"1.0\"?>" in envelope.tool_calls[0].args["patch"]
+
+
+def test_parse_assistant_text_xml_rejects_raw_text_outside_blocks() -> None:
+    payload = 'oops<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+
+    with pytest.raises(TurnParseError, match="Unexpected raw text outside XML assistant blocks"):
+        parse_assistant_text(payload, parse_mode="xml_only")
+
+
+def test_parse_assistant_text_xml_rejects_raw_text_after_think() -> None:
+    payload = (
+        "<think>plan</think>"
+        'oops<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+    )
+
+    with pytest.raises(TurnParseError, match="Unexpected raw text outside XML assistant blocks"):
+        parse_assistant_text(payload, parse_mode="xml_only")
+
+
+def test_parse_assistant_text_xml_coerces_numeric_args() -> None:
+    payload = (
+        '<tool_call name="read">'
+        "<path><![CDATA[src/app.py]]></path>"
+        "<start_line>10</start_line>"
+        "<end_line>40</end_line>"
+        "</tool_call>"
+    )
+
+    envelope = parse_assistant_text(payload, parse_mode="xml_only")
+
+    assert envelope.tool_calls[0].args["start_line"] == 10
+    assert envelope.tool_calls[0].args["end_line"] == 40

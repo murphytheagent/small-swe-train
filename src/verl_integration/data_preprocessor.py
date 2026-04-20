@@ -13,7 +13,7 @@ from data.tokenization import (
 )
 from data.tool_schema_adapter import adapt_external_tool_call
 from losses.action_masking import build_action_token_mask
-from rollout.action_format import parse_assistant_text, serialize_tool_call_payload
+from rollout.action_format import parse_assistant_text, render_tool_call_block
 from rollout.turn_parser import TurnParseError
 from config import MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, ToolCall, validate_tool_call
@@ -51,7 +51,7 @@ def _label_blocks_from_envelope(envelope: ActionEnvelope) -> list[dict[str, str]
     if envelope.thinking:
         blocks.append({"type": "think", "text": envelope.thinking})
     for call in envelope.tool_calls:
-        blocks.append({"type": "tool_call", "text": serialize_tool_call_payload(call)})
+        blocks.append({"type": "tool_call", "text": render_tool_call_block(call)})
     return blocks
 
 
@@ -68,7 +68,7 @@ def _approx_labels_from_envelope(envelope: ActionEnvelope) -> list[str]:
         labels.extend(["think"] * think_tokens)
 
     for call in envelope.tool_calls:
-        serialized = serialize_tool_call_payload(call)
+        serialized = render_tool_call_block(call)
         tool_tokens = max(1, len(serialized.split()))
         labels.extend(["tool_call"] * tool_tokens)
 

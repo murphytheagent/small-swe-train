@@ -1,7 +1,7 @@
 # Research: Migration from JSON Tool-Call Payloads to XML Field Payloads
 
 Generated: 2026-04-19 20:00 UTC
-Status: implementation plan with P0 started in this branch
+Status: implemented in this branch; XML is the default assistant payload surface with dual parse for historical JSON compatibility
 Related thread: 1776538929.912089
 
 ## 1) Executive Summary
@@ -70,12 +70,17 @@ The migration should add one explicit action-format contract to runtime defaults
 - `action_payload_format = json | xml`
 - `action_parse_mode = json_only | dual | xml_only`
 
-Recommended rollout default until XML is proven:
+Conservative rollout default if a downstream consumer is not ready yet:
 
 - `action_payload_format = json`
 - `action_parse_mode = json_only`
 
-Those knobs should govern prompt wording, assistant-action rendering, and parse behavior. They should not affect tool backend semantics.
+Current branch default:
+
+- `action_payload_format = xml`
+- `action_parse_mode = dual`
+
+Those knobs govern prompt wording, assistant-action rendering, and parse behavior. They do not affect tool backend semantics.
 
 ## 5) Recommended XML Contract
 
@@ -84,7 +89,7 @@ Use one intentionally boring contract:
 - Outer block: `<tool_call name="bash"> ... </tool_call>`
 - Direct child elements for args
 - No `<args>` wrapper
-- CDATA for string-valued fields so multiline `command`, `patch`, and `final_response` stay byte-exact
+- CDATA for string-valued fields so multiline `command`, `patch`, and `final_response` round-trip cleanly
 - Repeated children only for real list fields
 - No namespaces, DTDs, processing instructions, or external entities
 - Reject duplicate scalar fields
@@ -223,12 +228,23 @@ Required checks before making XML the default:
 - no executor-regression in bridge/runtime behavior
 - no evidence of degraded rollout quality relative to current JSON prompting
 
-## 10) What This Branch Starts
+## 10) What This Branch Implements
 
-This branch starts P0 only:
+This branch now implements P0 through P3:
 
 - a dedicated XML migration note
 - a shared assistant-action parse/render module
-- migration of current JSON helper sites onto that shared module
+- XML parse/render support with shared canonicalization back into `ToolCall` / `ActionEnvelope`
+- dual parse so historical JSON assistant traces still work
+- XML-aware prompt contracts for runtime and teacher prompting
+- XML-aware assistant-action rendering in tokenization, preprocessing, collector/runtime helpers, and vLLM structured-tool fallback
+- centralized defaults flipped to `action_payload_format = xml` and `action_parse_mode = dual`
 
-That is intentional. It shrinks the later XML diff, exposes the true call graph, and gives the next PR a single place to add XML parse/render support instead of re-editing every consumer separately.
+What is still intentionally unchanged:
+
+- internal tool/backend schema
+- validators and executor semantics
+- `<tool_response>{json}</tool_response>`
+- historical JSON artifacts on disk
+
+The only remaining item from the original rollout plan is the empirical A/B gate in P4.

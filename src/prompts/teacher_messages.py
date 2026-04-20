@@ -30,6 +30,7 @@ def build_teacher_output_contract_block(
     delimiters: ModelDelimiters | None = None,
     max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
     terminal_tool: str = TERMINAL_TOOL_NAME,
+    action_payload_format: str | None = None,
     supervision_mode: str = _TURN_SUPERVISION_NEXT,
 ) -> str:
     """Build OUTPUT_CONTRACT_BLOCK text that steers teacher policy improvement."""
@@ -38,6 +39,7 @@ def build_teacher_output_contract_block(
         delimiters=delimiters,
         max_tool_calls=max_tool_calls,
         terminal_tool=terminal_tool,
+        action_payload_format=action_payload_format,
         include_tool_schema=False,
         include_examples=False,
         include_repeat_warning=False,

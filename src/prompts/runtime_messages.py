@@ -6,7 +6,13 @@ import json
 import types
 from typing import Any, Mapping, get_args, get_origin, get_type_hints
 
-from config import MAX_TOOL_CALLS_PER_TURN, TERMINAL_TOOL_NAME
+from config import (
+    ACTION_PAYLOAD_FORMAT,
+    MAX_TOOL_CALLS_PER_TURN,
+    SUPPORTED_ACTION_PAYLOAD_FORMATS,
+    TERMINAL_TOOL_NAME,
+)
+from rollout.action_format import render_tool_call_block
 from schemas import ALLOWED_TOOLS, TOOL_SCHEMAS
 
 from .model_delimiters import ModelDelimiters, default_delimiters
@@ -148,7 +154,21 @@ def _build_required_args_prompt() -> str:
     return f"Required args by tool: {rendered}."
 
 
-def _build_tool_examples_prompt() -> str:
+def _normalize_action_payload_format(value: str | None) -> str:
+    normalized = str(value or ACTION_PAYLOAD_FORMAT).strip().lower()
+    if normalized not in SUPPORTED_ACTION_PAYLOAD_FORMATS:
+        allowed = ", ".join(SUPPORTED_ACTION_PAYLOAD_FORMATS)
+        raise ValueError(f"Unsupported action payload format {normalized!r}. Expected one of: {allowed}.")
+    return normalized
+
+
+def _render_contract_signature(*, delimiters: ModelDelimiters, action_payload_format: str) -> str:
+    if action_payload_format == "json":
+        return f'{delimiters.tool_call_start}{{"tool":"...","args":{{...}}}}{delimiters.tool_call_end}'
+    return '<tool_call name="tool_name"><arg_name><![CDATA[value]]></arg_name></tool_call>'
+
+
+def _build_tool_examples_prompt(*, action_payload_format: str) -> str:
     examples: list[str] = []
     for tool_name in ALLOWED_TOOLS:
         schema = TOOL_SCHEMAS.get(tool_name)
@@ -157,7 +177,13 @@ def _build_tool_examples_prompt() -> str:
         example_raw = schema.get("prompt_example")
         if not isinstance(example_raw, Mapping):
             continue
-        serialized = json.dumps(dict(example_raw), ensure_ascii=True, sort_keys=True)
+        if action_payload_format == "json":
+            serialized = json.dumps(dict(example_raw), ensure_ascii=True, sort_keys=True)
+        else:
+            serialized = render_tool_call_block(
+                dict(example_raw),
+                payload_format=action_payload_format,
+            )
         examples.append(f"   - {tool_name}: {serialized}")
     if not examples:
         return ""
@@ -184,27 +210,50 @@ def build_assistant_contract_prompt(
     delimiters: ModelDelimiters | None = None,
     max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
     terminal_tool: str = TERMINAL_TOOL_NAME,
+    action_payload_format: str | None = None,
     include_tool_schema: bool = True,
     include_examples: bool = True,
     include_repeat_warning: bool = True,
 ) -> str:
     """Return an instruction block that matches the v1.6 action contract."""
     d = delimiters or default_delimiters()
+    resolved_payload_format = _normalize_action_payload_format(action_payload_format)
     allowed_tools_text = ", ".join(ALLOWED_TOOLS)
     tool_schema_block = _build_tool_schema_prompt() if include_tool_schema else ""
-    tool_examples_block = _build_tool_examples_prompt() if include_examples else ""
+    tool_examples_block = (
+        _build_tool_examples_prompt(action_payload_format=resolved_payload_format)
+        if include_examples
+        else ""
+    )
     tool_usage_guardrails_block = _build_tool_usage_guardrails_prompt()
 
     lines: list[str] = []
     lines.append("Surround each tool action with a tool-call delimiter block.")
     lines.append(
         f"Emit ordered tool calls (max {max_tool_calls}): "
-        f"{d.tool_call_start}{{\"tool\":\"...\",\"args\":{{...}}}}{d.tool_call_end}"
+        f"{_render_contract_signature(delimiters=d, action_payload_format=resolved_payload_format)}"
     )
-    lines.append(
-        "Every tool-call JSON object MUST include both keys: 'tool' and 'args'. "
-        "'args' MUST be a JSON object (never put command/query/path at top level)."
-    )
+    if resolved_payload_format == "json":
+        lines.append(
+            "Every tool-call JSON object MUST include both keys: 'tool' and 'args'. "
+            "'args' MUST be a JSON object (never put command/query/path at top level)."
+        )
+    else:
+        lines.append(
+            "Every XML tool call MUST use a 'name' attribute for the tool and direct child elements for args. "
+            "Do not add an <args> wrapper."
+        )
+        lines.append(
+            "Use CDATA for string-valued args so multiline command, patch, and final_response round-trip cleanly. "
+            "XML still normalizes line endings to LF."
+        )
+        lines.append(
+            "For list-valued args, wrap repeated children in one container element, for example "
+            "<changed_paths><path><![CDATA[src/app.py]]></path></changed_paths>."
+        )
+        lines.append(
+            "Do not emit namespaces, DTDs, processing instructions, extra attributes, or mixed JSON/XML payloads."
+        )
     lines.append("Begin with a tool-call block. Do not emit prose before the first tool call.")
     lines.append(f"Allowed tools: {allowed_tools_text}.")
     lines.append(_build_required_args_prompt())
@@ -232,12 +281,12 @@ def build_assistant_contract_prompt(
     return "Assistant output contract:\n" + "\n".join(numbered_lines)
 
 
-def build_onpolicy_system_prompt() -> str:
+def build_onpolicy_system_prompt(*, action_payload_format: str | None = None) -> str:
     """Build the default system prompt for on-policy runtime rollouts."""
     return (
         _DEFAULT_SYSTEM_PROMPT_PREFIX
         + _DEFAULT_SYSTEM_PROMPT_WORKFLOW
-        + build_assistant_contract_prompt()
+        + build_assistant_contract_prompt(action_payload_format=action_payload_format or ACTION_PAYLOAD_FORMAT)
     )
 
 

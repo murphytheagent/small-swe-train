@@ -57,8 +57,12 @@ def test_extract_assistant_content_supports_tool_calls_payload() -> None:
         ]
     }
     content = _extract_assistant_content(payload)
-    assert '"tool":"submit"' in content
-    assert '"final_response":"done"' in content
+    if config.ACTION_PAYLOAD_FORMAT == "xml":
+        assert '<tool_call name="submit">' in content
+        assert "<final_response><![CDATA[done]]></final_response>" in content
+    else:
+        assert '"tool":"submit"' in content
+        assert '"final_response":"done"' in content
 
 
 def test_build_vllm_turn_generator_calls_chat_completion(monkeypatch) -> None:
@@ -105,7 +109,7 @@ def test_build_vllm_turn_generator_calls_chat_completion(monkeypatch) -> None:
         history=['<tool_response>{"stdout":"ok","stderr":"","exit_code":0}</tool_response>'],
     )
 
-    assert '"tool":"submit"' in turn
+    assert turn == '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
     assert captured["base_url"] == "http://localhost:8000/v1"
     assert captured["timeout_sec"] == 12
     payload = captured["payload"]
