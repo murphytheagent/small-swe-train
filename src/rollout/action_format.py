@@ -202,9 +202,20 @@ def _parse_json_assistant_turn_payload_dual(
         think_start = payload.find(d.think_start, cursor)
         tool_start = payload.find(d.tool_call_start, cursor)
         xml_match = _XML_TOOL_CALL_RE.search(payload, cursor)
-        xml_start = xml_match.start() if xml_match else -1
-        if xml_start != -1 and payload[cursor:xml_start].strip():
-            xml_start = -1
+        xml_start = -1
+        if xml_match is not None:
+            candidate_xml_start = xml_match.start()
+            supported_starts = [
+                start
+                for start in (think_start, tool_start)
+                if start != -1 and start > candidate_xml_start
+            ]
+            candidate_end = min(supported_starts) if supported_starts else len(payload)
+            if _looks_like_standalone_xml_payload(
+                payload[cursor:candidate_end],
+                max_tool_calls=max_tool_calls,
+            ):
+                xml_start = candidate_xml_start
         starts = [start for start in (think_start, tool_start, xml_start) if start != -1]
         if not starts:
             break
@@ -267,6 +278,21 @@ def _parse_json_assistant_turn_payload_dual(
         return ActionEnvelope(tool_calls=tuple(tool_calls), thinking=thinking)
     except ValueError as exc:
         raise TurnParseError(str(exc)) from exc
+
+
+def _looks_like_standalone_xml_payload(
+    payload_segment: str,
+    *,
+    max_tool_calls: int,
+) -> bool:
+    candidate = payload_segment.strip()
+    if not candidate:
+        return False
+    try:
+        parse_xml_assistant_turn_payload(candidate, max_tool_calls=max_tool_calls)
+    except TurnParseError:
+        return False
+    return True
 
 
 def serialize_tool_call_payload(
