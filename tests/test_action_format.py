@@ -119,9 +119,24 @@ def test_render_assistant_action_text_supports_xml_payload_format() -> None:
     )
 
     assert render_assistant_action_text(envelope, payload_format="xml") == (
-        "<think>check file</think>"
+        "<think><![CDATA[check file]]></think>"
         '<tool_call name="read"><path><![CDATA[src/app.py]]></path><start_line>10</start_line></tool_call>'
     )
+
+
+def test_render_assistant_action_text_xml_wraps_thinking_in_cdata_and_round_trips() -> None:
+    envelope = ActionEnvelope(
+        thinking="x < y & </think>",
+        tool_calls=(ToolCall(tool="submit", args={"final_response": "done"}),),
+    )
+
+    rendered = render_assistant_action_text(envelope, payload_format="xml")
+
+    assert rendered.startswith("<think><![CDATA[x < y & </think>]]></think>")
+    parsed = parse_assistant_text_result(rendered, parse_mode="dual")
+    assert parsed.payload_format == "xml"
+    assert parsed.envelope.thinking == "x < y & </think>"
+    assert parsed.envelope.tool_calls[0].tool == "submit"
 
 
 def test_is_chatml_assistant_turn_detects_assistant_prefix() -> None:
@@ -222,6 +237,50 @@ def test_parse_assistant_text_dual_mode_rejects_xml_with_cdata_containing_think_
         '<tool_call name="submit">'
         "<final_response><![CDATA[<think>not a real JSON-mode think block</think>]]></final_response>"
         "</tool_call>"
+    )
+
+    with pytest.raises(TurnParseError, match="Mixed JSON/XML"):
+        parse_assistant_text(payload, parse_mode="dual")
+
+
+def test_parse_assistant_text_dual_mode_rejects_xml_tool_call_before_later_xml_think_after_json_call() -> None:
+    payload = (
+        '<tool_call>{"tool":"bash","args":{"command":"echo hi"}}</tool_call>'
+        '<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+        "<think><![CDATA[afterthought]]></think>"
+    )
+
+    with pytest.raises(TurnParseError, match="Mixed JSON/XML"):
+        parse_assistant_text(payload, parse_mode="dual")
+
+
+def test_parse_assistant_text_dual_mode_rejects_xml_tool_call_before_later_xml_think_with_space_after_json_call() -> None:
+    payload = (
+        '<tool_call>{"tool":"bash","args":{"command":"echo hi"}}</tool_call>'
+        '<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+        "<think ><![CDATA[afterthought]]></think>"
+    )
+
+    with pytest.raises(TurnParseError, match="Mixed JSON/XML"):
+        parse_assistant_text(payload, parse_mode="dual")
+
+
+def test_parse_assistant_text_dual_mode_rejects_xml_think_with_space_before_later_xml_tool_call_after_json_call() -> None:
+    payload = (
+        '<tool_call>{"tool":"bash","args":{"command":"echo hi"}}</tool_call>'
+        "<think >afterthought</think>"
+        '<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+    )
+
+    with pytest.raises(TurnParseError, match="Mixed JSON/XML"):
+        parse_assistant_text(payload, parse_mode="dual")
+
+
+def test_parse_assistant_text_dual_mode_rejects_xml_tool_call_before_later_raw_text_xml_think_with_space_after_json_call() -> None:
+    payload = (
+        '<tool_call>{"tool":"bash","args":{"command":"echo hi"}}</tool_call>'
+        '<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+        "<think >afterthought</think>"
     )
 
     with pytest.raises(TurnParseError, match="Mixed JSON/XML"):

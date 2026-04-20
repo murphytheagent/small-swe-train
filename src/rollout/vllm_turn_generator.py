@@ -259,8 +259,9 @@ def _extract_assistant_content(payload: Mapping[str, Any]) -> str:
 
     content = message.get("content")
     if isinstance(content, str):
-        return content
-    if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
+        if content.strip():
+            return content
+    elif isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
         chunks: list[str] = []
         for item in content:
             if isinstance(item, Mapping):

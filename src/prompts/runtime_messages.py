@@ -252,7 +252,7 @@ def build_assistant_contract_prompt(
             "<changed_paths><path><![CDATA[src/app.py]]></path></changed_paths>."
         )
         lines.append(
-            "Do not emit namespaces, DTDs, processing instructions, extra attributes, or mixed JSON/XML payloads."
+            "Do not emit comments, namespaces, DTDs, processing instructions, extra attributes, or mixed JSON/XML payloads."
         )
     lines.append("Begin with a tool-call block. Do not emit prose before the first tool call.")
     lines.append(f"Allowed tools: {allowed_tools_text}.")

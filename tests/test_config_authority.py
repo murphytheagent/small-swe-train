@@ -197,7 +197,10 @@ def test_prompt_contract_supports_xml_payload_mode() -> None:
     assert "Do not add an <args> wrapper." in prompt
     assert "Use CDATA for string-valued args" in prompt
     assert "<changed_paths><path><![CDATA[src/app.py]]></path></changed_paths>" in prompt
-    assert "Do not emit namespaces, DTDs, processing instructions, extra attributes, or mixed JSON/XML payloads." in prompt
+    assert (
+        "Do not emit comments, namespaces, DTDs, processing instructions, extra attributes, or mixed JSON/XML payloads."
+        in prompt
+    )
     assert '   - bash: <tool_call name="bash"><command><![CDATA[make test-target]]></command><cwd><![CDATA[.]]></cwd><timeout_sec>120</timeout_sec></tool_call>' in prompt
 
 

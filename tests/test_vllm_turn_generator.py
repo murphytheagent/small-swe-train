@@ -106,6 +106,30 @@ def test_extract_assistant_content_preserves_nested_invalid_arg_types_as_json() 
     )
 
 
+def test_extract_assistant_content_uses_structured_tool_calls_when_content_is_blank() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": "   ",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "bash",
+                                "arguments": '{"command":"pytest -q"}',
+                            }
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+    assert _extract_assistant_content(payload) == (
+        '<tool_call>{"args":{"command":"pytest -q"},"tool":"bash"}</tool_call>'
+    )
+
+
 def test_build_vllm_turn_generator_calls_chat_completion(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

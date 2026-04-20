@@ -206,28 +206,35 @@ def _parse_json_assistant_turn_payload_dual(
         next_supported_start = min(supported_starts) if supported_starts else -1
 
         xml_think_match = _XML_THINK_RE.search(payload, cursor)
+        xml_think_start = xml_think_match.start() if xml_think_match is not None else -1
+        xml_match = _XML_TOOL_CALL_RE.search(payload, cursor)
+        xml_tool_start = xml_match.start() if xml_match is not None else -1
+
         if xml_think_match is not None and (
-            next_supported_start == -1 or xml_think_match.start() <= next_supported_start
+            (next_supported_start == -1 or xml_think_start <= next_supported_start)
+            and (xml_tool_start == -1 or xml_think_start < xml_tool_start)
         ):
-            xml_think_end = _find_xml_cdata_think_end(payload, xml_think_match.start())
+            xml_think_end = _find_xml_cdata_think_end(payload, xml_think_start)
             if xml_think_end is not None:
                 cursor = xml_think_end
                 continue
 
-        xml_match = _XML_TOOL_CALL_RE.search(payload, cursor)
-        if xml_match is not None and (next_supported_start == -1 or xml_match.start() < next_supported_start):
-            xml_sequence = _find_xml_tool_call_sequence(payload, xml_match.start())
+        if xml_match is not None and (next_supported_start == -1 or xml_tool_start < next_supported_start):
+            xml_sequence = _find_xml_tool_call_sequence(payload, xml_tool_start)
             if xml_sequence is not None:
                 xml_end, _ = xml_sequence
-                if _looks_like_xml_tool_call_sequence(payload[xml_match.start() : xml_end]):
-                    next_think_after_xml = payload.find(d.think_start, xml_end)
+                if _looks_like_xml_tool_call_sequence(payload[xml_tool_start:xml_end]):
+                    xml_think_after_match = _XML_THINK_RE.search(payload, xml_end)
+                    next_think_after_xml = (
+                        xml_think_after_match.start() if xml_think_after_match is not None else -1
+                    )
                     next_json_after_xml = payload.find(d.tool_call_start, xml_end)
                     boundary_candidates = [
                         start for start in (next_think_after_xml, next_json_after_xml) if start != -1
                     ]
                     boundary = min(boundary_candidates) if boundary_candidates else len(payload)
                     if (
-                        not payload[cursor : xml_match.start()].strip()
+                        _is_whitespace_or_single_xml_think(payload, cursor, xml_tool_start)
                         and not payload[xml_end:boundary].strip()
                     ):
                         raise TurnParseError("Mixed JSON/XML assistant payloads are not allowed.")
@@ -402,14 +409,21 @@ def _find_xml_tag_end(payload: str, start: int) -> int | None:
 
 
 def _find_xml_cdata_think_end(payload: str, start: int) -> int | None:
+    element_end = _find_xml_think_end(payload, start)
+    if element_end is None:
+        return None
+    if "<![CDATA[" not in payload[start:element_end]:
+        return None
+    return element_end
+
+
+def _find_xml_think_end(payload: str, start: int) -> int | None:
     if not payload.startswith("<think", start):
         return None
     element_end = _find_xml_element_end(payload, start)
     if element_end is None:
         return None
     candidate = payload[start:element_end]
-    if "<![CDATA[" not in candidate:
-        return None
     try:
         _reject_disallowed_xml_constructs(candidate)
         element = ET.fromstring(candidate)
@@ -420,6 +434,19 @@ def _find_xml_cdata_think_end(payload: str, start: int) -> int | None:
     if element.attrib or list(element):
         return None
     return element_end
+
+
+def _is_whitespace_or_single_xml_think(payload: str, start: int, end: int) -> bool:
+    cursor = start
+    while cursor < end and payload[cursor].isspace():
+        cursor += 1
+    if cursor >= end:
+        return True
+
+    think_end = _find_xml_think_end(payload, cursor)
+    if think_end is None or think_end > end:
+        return False
+    return not payload[think_end:end].strip()
 
 
 def serialize_tool_call_payload(
@@ -477,14 +504,18 @@ def render_assistant_action_text(
 ) -> str:
     """Render one assistant action envelope using the current delimiter contract."""
     d = delimiters or default_delimiters()
+    resolved_payload_format = _normalize_action_payload_format(payload_format)
     chunks: list[str] = []
     if envelope.thinking:
-        chunks.append(f"{d.think_start}{envelope.thinking}{d.think_end}")
+        if resolved_payload_format == "xml":
+            chunks.append(f"{d.think_start}{_wrap_cdata(envelope.thinking)}{d.think_end}")
+        else:
+            chunks.append(f"{d.think_start}{envelope.thinking}{d.think_end}")
     chunks.extend(
         render_tool_call_block(
             call,
             delimiters=d,
-            payload_format=payload_format,
+            payload_format=resolved_payload_format,
             compact=compact,
         )
         for call in envelope.tool_calls
