@@ -57,12 +57,7 @@ def test_extract_assistant_content_supports_tool_calls_payload() -> None:
         ]
     }
     content = _extract_assistant_content(payload)
-    if config.ACTION_PAYLOAD_FORMAT == "xml":
-        assert '<tool_call name="submit">' in content
-        assert "<final_response><![CDATA[done]]></final_response>" in content
-    else:
-        assert '"tool":"submit"' in content
-        assert '"final_response":"done"' in content
+    assert content == '<tool_call>{"args":{"final_response":"done"},"tool":"submit"}</tool_call>'
 
 
 def test_extract_assistant_content_preserves_invalid_tool_call_args() -> None:
@@ -85,6 +80,29 @@ def test_extract_assistant_content_preserves_invalid_tool_call_args() -> None:
 
     assert _extract_assistant_content(payload) == (
         '<tool_call>{"args":{"bogus":"oops","final_response":"done"},"tool":"submit"}</tool_call>'
+    )
+
+
+def test_extract_assistant_content_preserves_nested_invalid_arg_types_as_json() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "bash",
+                                "arguments": '{"command":{"cmd":"pytest -q"}}',
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    assert _extract_assistant_content(payload) == (
+        '<tool_call>{"args":{"command":{"cmd":"pytest -q"}},"tool":"bash"}</tool_call>'
     )
 
 
