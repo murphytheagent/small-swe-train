@@ -392,9 +392,24 @@ def _find_xml_tag_end(payload: str, start: int) -> int | None:
 
 
 def _find_xml_cdata_think_end(payload: str, start: int) -> int | None:
-    if not payload.startswith("<think><![CDATA[", start):
+    if not payload.startswith("<think", start):
         return None
-    return _find_xml_element_end(payload, start)
+    element_end = _find_xml_element_end(payload, start)
+    if element_end is None:
+        return None
+    candidate = payload[start:element_end]
+    if "<![CDATA[" not in candidate:
+        return None
+    try:
+        _reject_disallowed_xml_constructs(candidate)
+        element = ET.fromstring(candidate)
+    except (TurnParseError, ET.ParseError):
+        return None
+    if _local_xml_name(element.tag) != "think":
+        return None
+    if element.attrib or list(element):
+        return None
+    return element_end
 
 
 def serialize_tool_call_payload(

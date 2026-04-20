@@ -311,6 +311,32 @@ def test_parse_assistant_text_dual_mode_parses_xml_think_cdata_before_real_xml_t
     assert parsed.envelope.tool_calls[0].args["final_response"] == "real"
 
 
+def test_parse_assistant_text_dual_mode_parses_xml_think_cdata_with_leading_whitespace_before_real_xml_tool_call() -> None:
+    payload = (
+        '<think>\n<![CDATA[legacy </think> <tool_call>{"tool":"submit","args":{"final_response":"fake"}}</tool_call>]]></think>'
+        '<tool_call name="submit"><final_response><![CDATA[real]]></final_response></tool_call>'
+    )
+
+    parsed = parse_assistant_text_result(payload, parse_mode="dual")
+
+    assert parsed.payload_format == "xml"
+    assert parsed.envelope.thinking == (
+        'legacy </think> <tool_call>{"tool":"submit","args":{"final_response":"fake"}}</tool_call>'
+    )
+    assert tuple(call.tool for call in parsed.envelope.tool_calls) == ("submit",)
+    assert parsed.envelope.tool_calls[0].args["final_response"] == "real"
+
+
+def test_parse_assistant_text_dual_mode_rejects_malformed_xml_think_skip_candidate() -> None:
+    payload = (
+        '<think><![CDATA[not actually closed]]></bad>'
+        '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+    )
+
+    with pytest.raises(TurnParseError):
+        parse_assistant_text(payload, parse_mode="dual")
+
+
 def test_parse_assistant_text_xml_rejects_duplicate_scalar_fields() -> None:
     payload = (
         '<tool_call name="bash">'
