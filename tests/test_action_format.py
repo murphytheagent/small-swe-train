@@ -175,6 +175,20 @@ def test_parse_assistant_text_dual_mode_allows_json_looking_text_inside_xml_cdat
     )
 
 
+def test_parse_assistant_text_dual_mode_falls_back_when_json_hint_came_from_xml_cdata() -> None:
+    payload = (
+        "<think><![CDATA[legacy <tool_call>{\"tool\":\"submit\",\"args\":{}}</tool_call>]]></think>"
+        '<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+    )
+
+    parsed = parse_assistant_text_result(payload, parse_mode="dual")
+
+    assert parsed.payload_format == "xml"
+    assert parsed.envelope.thinking == 'legacy <tool_call>{"tool":"submit","args":{}}</tool_call>'
+    assert parsed.envelope.tool_calls[0].tool == "submit"
+    assert parsed.envelope.tool_calls[0].args["final_response"] == "done"
+
+
 def test_parse_assistant_text_xml_rejects_duplicate_scalar_fields() -> None:
     payload = (
         '<tool_call name="bash">'

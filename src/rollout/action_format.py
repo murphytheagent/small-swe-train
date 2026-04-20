@@ -115,18 +115,50 @@ def parse_assistant_payload(
     """Parse bare assistant payload text with the configured format policy."""
     normalized_mode = _normalize_action_parse_mode(parse_mode)
     if normalized_mode == "json_only":
-        return ParsedAssistantAction(
-            envelope=parse_assistant_turn_payload(payload, max_tool_calls=max_tool_calls),
+        return _parse_assistant_payload_as(
+            payload,
             payload_format="json",
+            max_tool_calls=max_tool_calls,
         )
     if normalized_mode == "xml_only":
-        return ParsedAssistantAction(
-            envelope=parse_xml_assistant_turn_payload(payload, max_tool_calls=max_tool_calls),
+        return _parse_assistant_payload_as(
+            payload,
             payload_format="xml",
+            max_tool_calls=max_tool_calls,
         )
 
     format_hint = _detect_payload_format_hint(payload)
+    candidate_formats: tuple[ActionPayloadFormat, ...]
     if format_hint == "json":
+        candidate_formats = ("json", "xml")
+    elif format_hint == "xml":
+        candidate_formats = ("xml", "json")
+    else:
+        candidate_formats = ("json", "xml")
+
+    first_error: TurnParseError | None = None
+    for candidate_format in candidate_formats:
+        try:
+            return _parse_assistant_payload_as(
+                payload,
+                payload_format=candidate_format,
+                max_tool_calls=max_tool_calls,
+            )
+        except TurnParseError as exc:
+            if first_error is None:
+                first_error = exc
+
+    assert first_error is not None
+    raise first_error
+
+
+def _parse_assistant_payload_as(
+    payload: str,
+    *,
+    payload_format: ActionPayloadFormat,
+    max_tool_calls: int,
+) -> ParsedAssistantAction:
+    if payload_format == "json":
         return ParsedAssistantAction(
             envelope=_parse_json_assistant_turn_payload_dual(
                 payload,
@@ -134,33 +166,10 @@ def parse_assistant_payload(
             ),
             payload_format="json",
         )
-    if format_hint == "xml":
-        return ParsedAssistantAction(
-            envelope=parse_xml_assistant_turn_payload(payload, max_tool_calls=max_tool_calls),
-            payload_format="xml",
-        )
-
-    json_error: TurnParseError | None = None
-    try:
-        return ParsedAssistantAction(
-            envelope=_parse_json_assistant_turn_payload_dual(
-                payload,
-                max_tool_calls=max_tool_calls,
-            ),
-            payload_format="json",
-        )
-    except TurnParseError as exc:
-        json_error = exc
-
-    try:
-        return ParsedAssistantAction(
-            envelope=parse_xml_assistant_turn_payload(payload, max_tool_calls=max_tool_calls),
-            payload_format="xml",
-        )
-    except TurnParseError as xml_error:
-        if json_error is not None:
-            raise json_error from xml_error
-        raise
+    return ParsedAssistantAction(
+        envelope=parse_xml_assistant_turn_payload(payload, max_tool_calls=max_tool_calls),
+        payload_format="xml",
+    )
 
 
 def _detect_payload_format_hint(payload: str) -> ActionPayloadFormat | None:
@@ -279,15 +288,29 @@ def render_tool_call_block(
     *,
     delimiters: ModelDelimiters | None = None,
     payload_format: str | None = None,
+    fallback_payload_format: str | None = None,
     compact: bool = False,
 ) -> str:
     """Render one tool-call block using the current delimiter contract."""
     resolved_format = _normalize_action_payload_format(payload_format)
     d = delimiters or default_delimiters()
-    if resolved_format == "json":
-        payload = serialize_tool_call_payload(call, compact=compact)
-        return f"{d.tool_call_start}{payload}{d.tool_call_end}"
-    return _render_xml_tool_call_block(call)
+    try:
+        if resolved_format == "json":
+            payload = serialize_tool_call_payload(call, compact=compact)
+            return f"{d.tool_call_start}{payload}{d.tool_call_end}"
+        return _render_xml_tool_call_block(call)
+    except ValueError:
+        if fallback_payload_format is None:
+            raise
+        resolved_fallback = _normalize_action_payload_format(fallback_payload_format)
+        if resolved_fallback == resolved_format:
+            raise
+        return render_tool_call_block(
+            call,
+            delimiters=d,
+            payload_format=resolved_fallback,
+            compact=compact,
+        )
 
 
 def render_assistant_action_text(

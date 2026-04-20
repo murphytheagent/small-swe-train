@@ -51,7 +51,12 @@ def _label_blocks_from_envelope(envelope: ActionEnvelope) -> list[dict[str, str]
     if envelope.thinking:
         blocks.append({"type": "think", "text": envelope.thinking})
     for call in envelope.tool_calls:
-        blocks.append({"type": "tool_call", "text": render_tool_call_block(call)})
+        blocks.append(
+            {
+                "type": "tool_call",
+                "text": render_tool_call_block(call, fallback_payload_format="json"),
+            }
+        )
     return blocks
 
 
@@ -68,7 +73,7 @@ def _approx_labels_from_envelope(envelope: ActionEnvelope) -> list[str]:
         labels.extend(["think"] * think_tokens)
 
     for call in envelope.tool_calls:
-        serialized = render_tool_call_block(call)
+        serialized = render_tool_call_block(call, fallback_payload_format="json")
         tool_tokens = max(1, len(serialized.split()))
         labels.extend(["tool_call"] * tool_tokens)
 
@@ -193,7 +198,10 @@ def preprocess_trajectories(
         canonical_text: str | None = None
 
         if envelope is not None and tokenizer is not None:
-            canonical_text, labeled_spans = build_labeled_spans(envelope)
+            canonical_text, labeled_spans = build_labeled_spans(
+                envelope,
+                tool_call_fallback_payload_format="json",
+            )
             token_labels = []
             tokenization_row_indexes.append(len(rows))
             tokenization_texts.append(canonical_text)

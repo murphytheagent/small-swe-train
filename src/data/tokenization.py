@@ -149,6 +149,7 @@ def tokenize_batch_with_labels(
 def build_labeled_spans(
     envelope: ActionEnvelope,
     delimiters: ModelDelimiters | None = None,
+    tool_call_fallback_payload_format: str | None = None,
 ) -> tuple[str, list[LabeledSpan]]:
     """Construct canonical text from *envelope* and track character-level label spans.
 
@@ -167,7 +168,11 @@ def build_labeled_spans(
         cursor += len(block)
 
     for call in envelope.tool_calls:
-        block = render_tool_call_block(call, delimiters=d)
+        block = render_tool_call_block(
+            call,
+            delimiters=d,
+            fallback_payload_format=tool_call_fallback_payload_format,
+        )
         spans.append((cursor, cursor + len(block), "tool_call"))
         chunks.append(block)
         cursor += len(block)
