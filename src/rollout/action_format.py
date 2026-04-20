@@ -205,17 +205,12 @@ def _parse_json_assistant_turn_payload_dual(
         xml_start = -1
         if xml_match is not None:
             candidate_xml_start = xml_match.start()
-            supported_starts = [
-                start
-                for start in (think_start, tool_start)
-                if start != -1 and start > candidate_xml_start
-            ]
-            candidate_end = min(supported_starts) if supported_starts else len(payload)
-            if _looks_like_standalone_xml_payload(
-                payload[cursor:candidate_end],
+            xml_start = _detect_standalone_xml_start(
+                payload,
+                cursor=cursor,
+                xml_start=candidate_xml_start,
                 max_tool_calls=max_tool_calls,
-            ):
-                xml_start = candidate_xml_start
+            )
         starts = [start for start in (think_start, tool_start, xml_start) if start != -1]
         if not starts:
             break
@@ -293,6 +288,108 @@ def _looks_like_standalone_xml_payload(
     except TurnParseError:
         return False
     return True
+
+
+def _detect_standalone_xml_start(
+    payload: str,
+    *,
+    cursor: int,
+    xml_start: int,
+    max_tool_calls: int,
+) -> int:
+    if payload[cursor:xml_start].strip():
+        return -1
+
+    xml_end = _find_xml_tool_call_sequence_end(payload, xml_start)
+    if xml_end is None:
+        return -1
+
+    next_think_start = payload.find(default_delimiters().think_start, xml_end)
+    next_json_tool_start = payload.find(default_delimiters().tool_call_start, xml_end)
+    supported_starts = [start for start in (next_think_start, next_json_tool_start) if start != -1]
+    boundary = min(supported_starts) if supported_starts else len(payload)
+    if payload[xml_end:boundary].strip():
+        return -1
+
+    if _looks_like_standalone_xml_payload(
+        payload[cursor:xml_end],
+        max_tool_calls=max_tool_calls,
+    ):
+        return xml_start
+    return -1
+
+
+def _find_xml_tool_call_sequence_end(payload: str, start: int) -> int | None:
+    cursor = start
+    while cursor < len(payload):
+        if not _XML_TOOL_CALL_RE.match(payload, cursor):
+            return None if cursor == start else cursor
+        element_end = _find_xml_element_end(payload, cursor)
+        if element_end is None:
+            return None
+        cursor = element_end
+        while cursor < len(payload) and payload[cursor].isspace():
+            cursor += 1
+        if not _XML_TOOL_CALL_RE.match(payload, cursor):
+            return cursor
+    return cursor
+
+
+def _find_xml_element_end(payload: str, start: int) -> int | None:
+    if start < 0 or start >= len(payload) or payload[start] != "<":
+        return None
+
+    cursor = start
+    depth = 0
+    while cursor < len(payload):
+        if payload.startswith("<![CDATA[", cursor):
+            cdata_end = payload.find("]]>", cursor + len("<![CDATA["))
+            if cdata_end < 0:
+                return None
+            cursor = cdata_end + len("]]>")
+            continue
+
+        if payload[cursor] != "<":
+            cursor += 1
+            continue
+
+        tag_end = _find_xml_tag_end(payload, cursor)
+        if tag_end is None:
+            return None
+        tag_body = payload[cursor + 1 : tag_end - 1].strip()
+        if not tag_body or tag_body.startswith("?") or tag_body.startswith("!"):
+            return None
+
+        if tag_body.startswith("/"):
+            depth -= 1
+            if depth == 0:
+                return tag_end
+            if depth < 0:
+                return None
+        else:
+            depth += 1
+            if tag_body.endswith("/"):
+                depth -= 1
+                if depth == 0:
+                    return tag_end
+        cursor = tag_end
+    return None
+
+
+def _find_xml_tag_end(payload: str, start: int) -> int | None:
+    quote_char: str | None = None
+    cursor = start + 1
+    while cursor < len(payload):
+        char = payload[cursor]
+        if quote_char is None:
+            if char in {'"', "'"}:
+                quote_char = char
+            elif char == ">":
+                return cursor + 1
+        elif char == quote_char:
+            quote_char = None
+        cursor += 1
+    return None
 
 
 def serialize_tool_call_payload(

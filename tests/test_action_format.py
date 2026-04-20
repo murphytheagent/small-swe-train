@@ -216,6 +216,30 @@ def test_parse_assistant_text_dual_mode_ignores_leading_literal_xml_examples_bef
     assert parsed.envelope.tool_calls[0].args["final_response"] == "done"
 
 
+def test_parse_assistant_text_dual_mode_rejects_xml_with_cdata_containing_think_after_json_call() -> None:
+    payload = (
+        '<tool_call>{"tool":"bash","args":{"command":"echo hi"}}</tool_call>'
+        '<tool_call name="submit">'
+        "<final_response><![CDATA[<think>not a real JSON-mode think block</think>]]></final_response>"
+        "</tool_call>"
+    )
+
+    with pytest.raises(TurnParseError, match="Mixed JSON/XML"):
+        parse_assistant_text(payload, parse_mode="dual")
+
+
+def test_parse_assistant_text_dual_mode_rejects_xml_with_cdata_containing_json_tool_call_after_json_call() -> None:
+    payload = (
+        '<tool_call>{"tool":"bash","args":{"command":"echo hi"}}</tool_call>'
+        '<tool_call name="submit">'
+        '<final_response><![CDATA[old: <tool_call>{"tool":"submit","args":{"final_response":"inner"}}</tool_call>]]></final_response>'
+        "</tool_call>"
+    )
+
+    with pytest.raises(TurnParseError, match="Mixed JSON/XML"):
+        parse_assistant_text(payload, parse_mode="dual")
+
+
 def test_parse_assistant_text_xml_rejects_duplicate_scalar_fields() -> None:
     payload = (
         '<tool_call name="bash">'
