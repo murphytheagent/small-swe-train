@@ -36,6 +36,7 @@ ActionPayloadFormat = Literal["json", "xml"]
 ActionParseMode = Literal["json_only", "dual", "xml_only"]
 
 _XML_TOOL_CALL_RE = re.compile(r"<tool_call\b[^>]*\bname\s*=")
+_XML_THINK_RE = re.compile(r"<think\b")
 _DISALLOWED_XML_SNIPPETS = ("<!doctype", "<!entity", "<?", "<!--")
 _VALID_XML_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 _JSON_DECODER = json.JSONDecoder()
@@ -203,6 +204,15 @@ def _parse_json_assistant_turn_payload_dual(
         tool_start = payload.find(d.tool_call_start, cursor)
         supported_starts = [start for start in (think_start, tool_start) if start != -1]
         next_supported_start = min(supported_starts) if supported_starts else -1
+
+        xml_think_match = _XML_THINK_RE.search(payload, cursor)
+        if xml_think_match is not None and (
+            next_supported_start == -1 or xml_think_match.start() <= next_supported_start
+        ):
+            xml_think_end = _find_xml_cdata_think_end(payload, xml_think_match.start())
+            if xml_think_end is not None:
+                cursor = xml_think_end
+                continue
 
         xml_match = _XML_TOOL_CALL_RE.search(payload, cursor)
         if xml_match is not None and (next_supported_start == -1 or xml_match.start() < next_supported_start):
@@ -509,6 +519,9 @@ def parse_xml_assistant_turn_payload(
         if tag == "think":
             if think_seen:
                 raise TurnParseError("At most one <think> block is allowed per assistant turn.")
+            if child.attrib:
+                extras = ", ".join(sorted(str(name) for name in child.attrib))
+                raise TurnParseError(f"Unsupported attributes on <think>: {extras}.")
             if list(child):
                 raise TurnParseError("<think> blocks may not contain nested XML elements.")
             think_seen = True

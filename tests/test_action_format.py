@@ -327,6 +327,22 @@ def test_parse_assistant_text_dual_mode_parses_xml_think_cdata_with_leading_whit
     assert parsed.envelope.tool_calls[0].args["final_response"] == "real"
 
 
+def test_parse_assistant_text_dual_mode_parses_xml_think_cdata_with_space_in_opening_tag() -> None:
+    payload = (
+        '<think ><![CDATA[legacy </think> <tool_call>{"tool":"submit","args":{"final_response":"fake"}}</tool_call>]]></think>'
+        '<tool_call name="submit"><final_response><![CDATA[real]]></final_response></tool_call>'
+    )
+
+    parsed = parse_assistant_text_result(payload, parse_mode="dual")
+
+    assert parsed.payload_format == "xml"
+    assert parsed.envelope.thinking == (
+        'legacy </think> <tool_call>{"tool":"submit","args":{"final_response":"fake"}}</tool_call>'
+    )
+    assert tuple(call.tool for call in parsed.envelope.tool_calls) == ("submit",)
+    assert parsed.envelope.tool_calls[0].args["final_response"] == "real"
+
+
 def test_parse_assistant_text_dual_mode_rejects_malformed_xml_think_skip_candidate() -> None:
     payload = (
         '<think><![CDATA[not actually closed]]></bad>'
@@ -335,6 +351,16 @@ def test_parse_assistant_text_dual_mode_rejects_malformed_xml_think_skip_candida
 
     with pytest.raises(TurnParseError):
         parse_assistant_text(payload, parse_mode="dual")
+
+
+def test_parse_assistant_text_xml_rejects_think_attributes() -> None:
+    payload = (
+        '<think note="x">plan</think>'
+        '<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+    )
+
+    with pytest.raises(TurnParseError, match="Unsupported attributes on <think>"):
+        parse_assistant_text(payload, parse_mode="xml_only")
 
 
 def test_parse_assistant_text_xml_rejects_duplicate_scalar_fields() -> None:
