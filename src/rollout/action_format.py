@@ -507,10 +507,13 @@ def render_assistant_action_text(
     resolved_payload_format = _normalize_action_payload_format(payload_format)
     chunks: list[str] = []
     if envelope.thinking:
-        if resolved_payload_format == "xml":
-            chunks.append(f"{d.think_start}{_wrap_cdata(envelope.thinking)}{d.think_end}")
-        else:
-            chunks.append(f"{d.think_start}{envelope.thinking}{d.think_end}")
+        chunks.append(
+            render_think_block(
+                envelope.thinking,
+                delimiters=d,
+                payload_format=resolved_payload_format,
+            )
+        )
     chunks.extend(
         render_tool_call_block(
             call,
@@ -521,6 +524,20 @@ def render_assistant_action_text(
         for call in envelope.tool_calls
     )
     return "".join(chunks)
+
+
+def render_think_block(
+    thinking: str,
+    *,
+    delimiters: ModelDelimiters | None = None,
+    payload_format: str | None = None,
+) -> str:
+    """Render one think block using the current payload-format policy."""
+    d = delimiters or default_delimiters()
+    resolved_payload_format = _normalize_action_payload_format(payload_format)
+    if resolved_payload_format == "xml":
+        return f"{d.think_start}{_wrap_cdata(thinking)}{d.think_end}"
+    return f"{d.think_start}{thinking}{d.think_end}"
 
 
 def parse_xml_assistant_turn_payload(
@@ -839,7 +856,11 @@ def _render_xml_arg(field_name: str, value: Any) -> str:
         return f"<{field_name}>{rendered_value}</{field_name}>"
     if isinstance(value, (int, float)):
         return f"<{field_name}>{value}</{field_name}>"
-    return f"<{field_name}>{_wrap_cdata(str(value))}</{field_name}>"
+    if isinstance(value, str):
+        return f"<{field_name}>{_wrap_cdata(value)}</{field_name}>"
+    raise ValueError(
+        f"XML arg <{field_name}> must be a string, number, boolean, or list; got {type(value).__name__}."
+    )
 
 
 def _wrap_cdata(text: str) -> str:

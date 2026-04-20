@@ -7,6 +7,7 @@ from rollout.action_format import (
     parse_assistant_text,
     parse_assistant_text_result,
     render_assistant_action_text,
+    render_think_block,
     render_tool_call_block,
     serialize_tool_call_payload,
 )
@@ -139,6 +140,12 @@ def test_render_assistant_action_text_xml_wraps_thinking_in_cdata_and_round_trip
     assert parsed.envelope.tool_calls[0].tool == "submit"
 
 
+def test_render_think_block_supports_xml_payload_format() -> None:
+    assert render_think_block("x < y & </think>", payload_format="xml") == (
+        "<think><![CDATA[x < y & </think>]]></think>"
+    )
+
+
 def test_is_chatml_assistant_turn_detects_assistant_prefix() -> None:
     assert is_chatml_assistant_turn("<|im_start|>assistant\nhello\n<|im_end|>")
     assert not is_chatml_assistant_turn('<tool_call>{"tool":"submit","args":{}}</tool_call>')
@@ -241,6 +248,25 @@ def test_parse_assistant_text_dual_mode_rejects_xml_with_cdata_containing_think_
 
     with pytest.raises(TurnParseError, match="Mixed JSON/XML"):
         parse_assistant_text(payload, parse_mode="dual")
+
+
+def test_render_tool_call_block_xml_rejects_non_scalar_arg_types_without_json_fallback() -> None:
+    with pytest.raises(ValueError, match="must be a string, number, boolean, or list"):
+        render_tool_call_block(
+            {"tool": "bash", "args": {"command": {"cmd": "pytest -q"}}},
+            payload_format="xml",
+        )
+
+
+def test_render_tool_call_block_xml_falls_back_to_json_for_non_scalar_arg_types() -> None:
+    rendered = render_tool_call_block(
+        {"tool": "bash", "args": {"command": {"cmd": "pytest -q"}}},
+        payload_format="xml",
+        fallback_payload_format="json",
+        compact=True,
+    )
+
+    assert rendered == '<tool_call>{"args":{"command":{"cmd":"pytest -q"}},"tool":"bash"}</tool_call>'
 
 
 def test_parse_assistant_text_dual_mode_rejects_xml_tool_call_before_later_xml_think_after_json_call() -> None:

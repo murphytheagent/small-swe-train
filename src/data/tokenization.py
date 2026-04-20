@@ -6,7 +6,7 @@ from typing import Any, Mapping, Protocol, Sequence, cast
 
 from losses.action_masking import TokenLabel
 from prompts.model_delimiters import ModelDelimiters, default_delimiters
-from rollout.action_format import render_tool_call_block
+from rollout.action_format import render_think_block, render_tool_call_block
 from schemas import ActionEnvelope
 
 LabeledSpan = tuple[int, int, TokenLabel]
@@ -162,7 +162,7 @@ def build_labeled_spans(
     cursor = 0
 
     if envelope.thinking:
-        block = f"{d.think_start}{envelope.thinking}{d.think_end}"
+        block = render_think_block(envelope.thinking, delimiters=d)
         spans.append((cursor, cursor + len(block), "think"))
         chunks.append(block)
         cursor += len(block)
