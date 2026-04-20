@@ -36,7 +36,7 @@ ActionPayloadFormat = Literal["json", "xml"]
 ActionParseMode = Literal["json_only", "dual", "xml_only"]
 
 _XML_TOOL_CALL_RE = re.compile(r"<tool_call\b[^>]*\bname\s*=")
-_DISALLOWED_XML_SNIPPETS = ("<!doctype", "<!entity", "<?")
+_DISALLOWED_XML_SNIPPETS = ("<!doctype", "<!entity", "<?", "<!--")
 _VALID_XML_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 _JSON_DECODER = json.JSONDecoder()
 
@@ -230,6 +230,10 @@ def _parse_json_assistant_turn_payload_dual(
 
         next_start = min(starts)
         if think_start != -1 and think_start == next_start and (tool_start == -1 or think_start < tool_start):
+            xml_think_end = _find_xml_cdata_think_end(payload, think_start)
+            if xml_think_end is not None:
+                cursor = xml_think_end
+                continue
             if think_seen:
                 raise TurnParseError(
                     f"At most one {d.think_start} block is allowed per assistant turn."
@@ -337,6 +341,12 @@ def _find_xml_element_end(payload: str, start: int) -> int | None:
                 return None
             cursor = cdata_end + len("]]>")
             continue
+        if payload.startswith("<!--", cursor):
+            comment_end = payload.find("-->", cursor + len("<!--"))
+            if comment_end < 0:
+                return None
+            cursor = comment_end + len("-->")
+            continue
 
         if payload[cursor] != "<":
             cursor += 1
@@ -379,6 +389,12 @@ def _find_xml_tag_end(payload: str, start: int) -> int | None:
             quote_char = None
         cursor += 1
     return None
+
+
+def _find_xml_cdata_think_end(payload: str, start: int) -> int | None:
+    if not payload.startswith("<think><![CDATA[", start):
+        return None
+    return _find_xml_element_end(payload, start)
 
 
 def serialize_tool_call_payload(
@@ -524,7 +540,7 @@ def _reject_disallowed_xml_constructs(payload: str) -> None:
         for snippet in _DISALLOWED_XML_SNIPPETS:
             if snippet in lowered:
                 raise TurnParseError(
-                    "XML assistant payloads do not allow DTDs, entities, processing instructions, or namespaces."
+                    "XML assistant payloads do not allow comments, DTDs, entities, processing instructions, or namespaces."
                 )
 
 

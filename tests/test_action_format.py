@@ -283,6 +283,34 @@ def test_parse_assistant_text_dual_mode_rejects_xml_sequence_even_when_it_exceed
         parse_assistant_text(payload, parse_mode="dual", max_tool_calls=1)
 
 
+def test_parse_assistant_text_xml_rejects_comments() -> None:
+    payload = (
+        '<tool_call name="submit">'
+        "<!-- note -->"
+        "<final_response><![CDATA[done]]></final_response>"
+        "</tool_call>"
+    )
+
+    with pytest.raises(TurnParseError, match="do not allow comments"):
+        parse_assistant_text(payload, parse_mode="xml_only")
+
+
+def test_parse_assistant_text_dual_mode_parses_xml_think_cdata_before_real_xml_tool_call() -> None:
+    payload = (
+        '<think><![CDATA[legacy </think> <tool_call>{"tool":"submit","args":{"final_response":"fake"}}</tool_call>]]></think>'
+        '<tool_call name="submit"><final_response><![CDATA[real]]></final_response></tool_call>'
+    )
+
+    parsed = parse_assistant_text_result(payload, parse_mode="dual")
+
+    assert parsed.payload_format == "xml"
+    assert parsed.envelope.thinking == (
+        'legacy </think> <tool_call>{"tool":"submit","args":{"final_response":"fake"}}</tool_call>'
+    )
+    assert tuple(call.tool for call in parsed.envelope.tool_calls) == ("submit",)
+    assert parsed.envelope.tool_calls[0].args["final_response"] == "real"
+
+
 def test_parse_assistant_text_xml_rejects_duplicate_scalar_fields() -> None:
     payload = (
         '<tool_call name="bash">'
