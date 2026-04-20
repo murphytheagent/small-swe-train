@@ -240,6 +240,49 @@ def test_parse_assistant_text_dual_mode_rejects_xml_with_cdata_containing_json_t
         parse_assistant_text(payload, parse_mode="dual")
 
 
+def test_parse_assistant_text_dual_mode_ignores_leading_xml_example_with_cdata_json_before_real_json_call() -> None:
+    payload = (
+        '<tool_call name="bash">'
+        '<command><![CDATA[legacy <tool_call>{"tool":"bash","args":{"command":"fake"}}</tool_call>]]></command>'
+        "</tool_call>"
+        " example "
+        '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+    )
+
+    parsed = parse_assistant_text_result(payload, parse_mode="dual")
+
+    assert parsed.payload_format == "json"
+    assert tuple(call.tool for call in parsed.envelope.tool_calls) == ("submit",)
+    assert parsed.envelope.thinking is None
+
+
+def test_parse_assistant_text_dual_mode_ignores_leading_xml_example_with_cdata_think_before_real_json_call() -> None:
+    payload = (
+        '<tool_call name="bash">'
+        "<command><![CDATA[<think>legacy plan</think>]]></command>"
+        "</tool_call>"
+        " example "
+        '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+    )
+
+    parsed = parse_assistant_text_result(payload, parse_mode="dual")
+
+    assert parsed.payload_format == "json"
+    assert tuple(call.tool for call in parsed.envelope.tool_calls) == ("submit",)
+    assert parsed.envelope.thinking is None
+
+
+def test_parse_assistant_text_dual_mode_rejects_xml_sequence_even_when_it_exceeds_max_tool_calls() -> None:
+    payload = (
+        '<tool_call>{"tool":"bash","args":{"command":"echo hi"}}</tool_call>'
+        '<tool_call name="submit"><final_response><![CDATA[a]]></final_response></tool_call>'
+        '<tool_call name="submit"><final_response><![CDATA[b]]></final_response></tool_call>'
+    )
+
+    with pytest.raises(TurnParseError, match="Mixed JSON/XML"):
+        parse_assistant_text(payload, parse_mode="dual", max_tool_calls=1)
+
+
 def test_parse_assistant_text_xml_rejects_duplicate_scalar_fields() -> None:
     payload = (
         '<tool_call name="bash">'

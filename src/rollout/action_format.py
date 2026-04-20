@@ -201,24 +201,34 @@ def _parse_json_assistant_turn_payload_dual(
     while cursor < len(payload):
         think_start = payload.find(d.think_start, cursor)
         tool_start = payload.find(d.tool_call_start, cursor)
+        supported_starts = [start for start in (think_start, tool_start) if start != -1]
+        next_supported_start = min(supported_starts) if supported_starts else -1
+
         xml_match = _XML_TOOL_CALL_RE.search(payload, cursor)
-        xml_start = -1
-        if xml_match is not None:
-            candidate_xml_start = xml_match.start()
-            xml_start = _detect_standalone_xml_start(
-                payload,
-                cursor=cursor,
-                xml_start=candidate_xml_start,
-                max_tool_calls=max_tool_calls,
-            )
-        starts = [start for start in (think_start, tool_start, xml_start) if start != -1]
+        if xml_match is not None and (next_supported_start == -1 or xml_match.start() < next_supported_start):
+            xml_sequence = _find_xml_tool_call_sequence(payload, xml_match.start())
+            if xml_sequence is not None:
+                xml_end, _ = xml_sequence
+                if _looks_like_xml_tool_call_sequence(payload[xml_match.start() : xml_end]):
+                    next_think_after_xml = payload.find(d.think_start, xml_end)
+                    next_json_after_xml = payload.find(d.tool_call_start, xml_end)
+                    boundary_candidates = [
+                        start for start in (next_think_after_xml, next_json_after_xml) if start != -1
+                    ]
+                    boundary = min(boundary_candidates) if boundary_candidates else len(payload)
+                    if (
+                        not payload[cursor : xml_match.start()].strip()
+                        and not payload[xml_end:boundary].strip()
+                    ):
+                        raise TurnParseError("Mixed JSON/XML assistant payloads are not allowed.")
+                    cursor = xml_end
+                    continue
+
+        starts = [start for start in (think_start, tool_start) if start != -1]
         if not starts:
             break
 
         next_start = min(starts)
-        if xml_start == next_start and tool_start != next_start:
-            raise TurnParseError("Mixed JSON/XML assistant payloads are not allowed.")
-
         if think_start != -1 and think_start == next_start and (tool_start == -1 or think_start < tool_start):
             if think_seen:
                 raise TurnParseError(
@@ -275,64 +285,43 @@ def _parse_json_assistant_turn_payload_dual(
         raise TurnParseError(str(exc)) from exc
 
 
-def _looks_like_standalone_xml_payload(
-    payload_segment: str,
-    *,
-    max_tool_calls: int,
-) -> bool:
+def _looks_like_xml_tool_call_sequence(payload_segment: str) -> bool:
     candidate = payload_segment.strip()
     if not candidate:
         return False
     try:
-        parse_xml_assistant_turn_payload(candidate, max_tool_calls=max_tool_calls)
-    except TurnParseError:
+        root = ET.fromstring(f"<assistant_payload>{candidate}</assistant_payload>")
+    except ET.ParseError:
         return False
+    if root.text and root.text.strip():
+        return False
+    for child in root:
+        if _local_xml_name(child.tag) != "tool_call":
+            return False
+        if child.tail and child.tail.strip():
+            return False
+        name = str(child.attrib.get("name", "")).strip()
+        if not name:
+            return False
     return True
 
 
-def _detect_standalone_xml_start(
-    payload: str,
-    *,
-    cursor: int,
-    xml_start: int,
-    max_tool_calls: int,
-) -> int:
-    if payload[cursor:xml_start].strip():
-        return -1
-
-    xml_end = _find_xml_tool_call_sequence_end(payload, xml_start)
-    if xml_end is None:
-        return -1
-
-    next_think_start = payload.find(default_delimiters().think_start, xml_end)
-    next_json_tool_start = payload.find(default_delimiters().tool_call_start, xml_end)
-    supported_starts = [start for start in (next_think_start, next_json_tool_start) if start != -1]
-    boundary = min(supported_starts) if supported_starts else len(payload)
-    if payload[xml_end:boundary].strip():
-        return -1
-
-    if _looks_like_standalone_xml_payload(
-        payload[cursor:xml_end],
-        max_tool_calls=max_tool_calls,
-    ):
-        return xml_start
-    return -1
-
-
-def _find_xml_tool_call_sequence_end(payload: str, start: int) -> int | None:
+def _find_xml_tool_call_sequence(payload: str, start: int) -> tuple[int, int] | None:
     cursor = start
+    block_count = 0
     while cursor < len(payload):
         if not _XML_TOOL_CALL_RE.match(payload, cursor):
-            return None if cursor == start else cursor
+            return None if cursor == start else (cursor, block_count)
         element_end = _find_xml_element_end(payload, cursor)
         if element_end is None:
             return None
+        block_count += 1
         cursor = element_end
         while cursor < len(payload) and payload[cursor].isspace():
             cursor += 1
         if not _XML_TOOL_CALL_RE.match(payload, cursor):
-            return cursor
-    return cursor
+            return cursor, block_count
+    return cursor, block_count
 
 
 def _find_xml_element_end(payload: str, start: int) -> int | None:
