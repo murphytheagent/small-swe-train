@@ -65,6 +65,29 @@ def test_extract_assistant_content_supports_tool_calls_payload() -> None:
         assert '"final_response":"done"' in content
 
 
+def test_extract_assistant_content_preserves_invalid_tool_call_args() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "submit",
+                                "arguments": '{"final_response":"done","bogus":"oops"}',
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    assert _extract_assistant_content(payload) == (
+        '<tool_call>{"args":{"bogus":"oops","final_response":"done"},"tool":"submit"}</tool_call>'
+    )
+
+
 def test_build_vllm_turn_generator_calls_chat_completion(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

@@ -203,6 +203,8 @@ def _parse_json_assistant_turn_payload_dual(
         tool_start = payload.find(d.tool_call_start, cursor)
         xml_match = _XML_TOOL_CALL_RE.search(payload, cursor)
         xml_start = xml_match.start() if xml_match else -1
+        if xml_start != -1 and payload[cursor:xml_start].strip():
+            xml_start = -1
         starts = [start for start in (think_start, tool_start, xml_start) if start != -1]
         if not starts:
             break
