@@ -357,6 +357,16 @@ def test_parse_assistant_text_dual_mode_ignores_leading_xml_example_with_cdata_t
     assert parsed.envelope.thinking is None
 
 
+def test_parse_assistant_text_dual_mode_rejects_leading_xml_cdata_think_without_prose_before_json_call() -> None:
+    payload = (
+        "<think><![CDATA[legacy plan]]></think>"
+        '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+    )
+
+    with pytest.raises(TurnParseError, match="Mixed JSON/XML"):
+        parse_assistant_text(payload, parse_mode="dual")
+
+
 def test_parse_assistant_text_dual_mode_rejects_xml_sequence_even_when_it_exceeds_max_tool_calls() -> None:
     payload = (
         '<tool_call>{"tool":"bash","args":{"command":"echo hi"}}</tool_call>'

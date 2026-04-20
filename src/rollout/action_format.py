@@ -216,6 +216,30 @@ def _parse_json_assistant_turn_payload_dual(
         ):
             xml_think_end = _find_xml_cdata_think_end(payload, xml_think_start)
             if xml_think_end is not None:
+                next_json_think_after_xml = payload.find(d.think_start, xml_think_end)
+                next_json_after_xml = payload.find(d.tool_call_start, xml_think_end)
+                next_xml_tool_after_xml_match = _XML_TOOL_CALL_RE.search(payload, xml_think_end)
+                next_xml_tool_after_xml = (
+                    next_xml_tool_after_xml_match.start()
+                    if next_xml_tool_after_xml_match is not None
+                    else -1
+                )
+                boundary_candidates = [
+                    start
+                    for start in (
+                        next_json_think_after_xml,
+                        next_json_after_xml,
+                        next_xml_tool_after_xml,
+                    )
+                    if start != -1
+                ]
+                if boundary_candidates:
+                    boundary = min(boundary_candidates)
+                    if (
+                        not payload[cursor:xml_think_start].strip()
+                        and not payload[xml_think_end:boundary].strip()
+                    ):
+                        raise TurnParseError("Mixed JSON/XML assistant payloads are not allowed.")
                 cursor = xml_think_end
                 continue
 
