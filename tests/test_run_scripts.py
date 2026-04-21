@@ -561,6 +561,68 @@ def test_run_rft_script_dry_run_direct_mode_propagates_task_holdout_settings() -
     assert "+data.on_policy.task_eval_min_rows=2" in result.stdout
 
 
+def test_run_rft_script_dry_run_rejects_eval_split_for_all_partition_partial_rollout_probe_cache(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_incomplete.partial.json"
+    partial_records_path = tmp_path / "difficulty_bands_incomplete.partial.records.jsonl"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "probe_status": "incomplete",
+                "task_count_expected": 4,
+                "task_count_completed": 2,
+                "partial_records_path": partial_records_path.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    partial_records_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "task_id": "task-a",
+                        "task_family": "func_basic",
+                        "difficulty_band": "learnable",
+                        "difficulty_band_source": "rollout_probe:selected_2_of_4",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "task_id": "task-b",
+                        "task_family": "combine_file",
+                        "difficulty_band": "near_impossible",
+                        "difficulty_band_source": "rollout_probe:selected_0_of_4",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    script_path = _repo_root() / "scripts" / "run_rft.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=_repo_root(),
+        check=False,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "RFT_DATA_CONFIG_NAME": "on_policy_swe_smith_rollout_probe_partial",
+            "RFT_EVAL_SPLIT_FRACTION": "0.25",
+            "SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH": str(cache_path),
+        },
+    )
+
+    assert result.returncode == 1
+    assert "task_partition='all'" in result.stderr
+    assert "Set eval_split_fraction=0" in result.stderr
+
+
 def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
     expected_tp, expected_dp = config.resolve_rft_vllm_parallel_defaults(nproc_per_node=8)
     result = _run_script(

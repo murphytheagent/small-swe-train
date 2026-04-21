@@ -591,6 +591,30 @@ print(
 PY
 }
 
+_validate_partial_rollout_probe_partition_surface() {
+  "${PYTHON_BIN}" - "${RFT_DATA_CONFIG_NAME}" "${RFT_EVAL_SPLIT_FRACTION}" <<'PY'
+import sys
+
+from config import resolve_on_policy_settings
+from env.task_dataset import validate_partial_rollout_probe_partition_request
+
+data_config_name = sys.argv[1].strip()
+eval_split_fraction = float(sys.argv[2])
+if eval_split_fraction <= 0.0:
+    raise SystemExit(0)
+
+settings = resolve_on_policy_settings(data_config_name=data_config_name)
+validate_partial_rollout_probe_partition_request(
+    settings.data,
+    task_partition="train",
+)
+validate_partial_rollout_probe_partition_request(
+    settings.data,
+    task_partition="eval",
+)
+PY
+}
+
 RFT_DEFAULTS="$(_load_rft_runtime_defaults)"
 read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_RFT_EVAL_SPLIT_FRACTION DEFAULT_RFT_EVAL_MIN_ROWS DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT DEFAULT_RFT_MAX_SEQUENCE_LENGTH DEFAULT_ADAPTATION_MODE DEFAULT_ADAPTATION_COMPUTE_PRECISION DEFAULT_LORA_RANK DEFAULT_LORA_ALPHA DEFAULT_LORA_TARGET_MODULES <<<"${RFT_DEFAULTS}"
 
@@ -707,6 +731,10 @@ export SMALL_SWE_VLLM_TOP_P="${SMALL_SWE_VLLM_TOP_P:-${DEFAULT_VLLM_TOP_P}}"
 export SMALL_SWE_RFT_MODEL_DTYPE="${SMALL_SWE_RFT_MODEL_DTYPE:-${RFT_MODEL_DTYPE}}"
 export EXPERIMENT="${EXPERIMENT:-${RFT_TASK_NAME}}"
 export SMALL_SWE_RFT_LOOP_WANDB_ENABLE="${SMALL_SWE_RFT_LOOP_WANDB_ENABLE:-1}"
+
+if ! _validate_partial_rollout_probe_partition_surface; then
+  exit 1
+fi
 
 if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
   CMD=(

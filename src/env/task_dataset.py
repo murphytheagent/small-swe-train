@@ -942,6 +942,27 @@ def _resolve_partial_rollout_probe_cached_partition(
     return task_partition
 
 
+def validate_partial_rollout_probe_partition_request(
+    config: OnPolicyDataConfig,
+    *,
+    task_partition: str,
+) -> None:
+    normalized_requested_partition = _normalize_task_partition(task_partition)
+    if normalized_requested_partition == _TASK_PARTITION_ALL:
+        return
+
+    cached_partition = _resolve_partial_rollout_probe_cached_partition(config)
+    if cached_partition != _TASK_PARTITION_ALL:
+        return
+
+    raise ValueError(
+        "Partial rollout-probe cache metadata is task_partition='all', so it cannot satisfy "
+        f"task_partition={normalized_requested_partition!r} requests deterministically. "
+        "Set eval_split_fraction=0 to consume the labeled partial subset as task_partition='all', "
+        "or use a train/eval-partitioned rollout-probe cache."
+    )
+
+
 def _resolve_task_difficulty_metadata(
     *,
     task_id: str,
@@ -1080,9 +1101,11 @@ def load_task_samples(
             f"Collected 0 valid rows after scanning {task_pool.scanned_rows}. "
             f"Last validation error: {detail}"
         )
-    partial_rollout_probe_cached_partition = _resolve_partial_rollout_probe_cached_partition(
-        config
+    validate_partial_rollout_probe_partition_request(
+        config,
+        task_partition=normalized_partition,
     )
+    partial_rollout_probe_cached_partition = _resolve_partial_rollout_probe_cached_partition(config)
     if partial_rollout_probe_cached_partition in {
         _TASK_PARTITION_TRAIN,
         _TASK_PARTITION_EVAL,
@@ -1095,8 +1118,6 @@ def load_task_samples(
         return []
     if normalized_partition == _TASK_PARTITION_ALL:
         return tasks
-    if partial_rollout_probe_cached_partition == _TASK_PARTITION_ALL:
-        return []
 
     train_tasks, eval_tasks = split_task_samples_for_eval(
         tasks,

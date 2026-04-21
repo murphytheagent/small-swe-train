@@ -1361,23 +1361,22 @@ def test_load_task_samples_rejects_train_eval_split_on_all_partition_partial_rol
         rollout_probe_accept_partial=True,
     )
 
-    train_task_samples = load_task_samples(
-        config=config,
-        dataset_loader=lambda _dataset_id, _split: rows,
-        task_partition="train",
-        eval_split_fraction=0.25,
-        min_eval_rows=1,
-    )
-    eval_task_samples = load_task_samples(
-        config=config,
-        dataset_loader=lambda _dataset_id, _split: rows,
-        task_partition="eval",
-        eval_split_fraction=0.25,
-        min_eval_rows=1,
-    )
-
-    assert train_task_samples == []
-    assert eval_task_samples == []
+    with pytest.raises(ValueError, match="task_partition='all'"):
+        load_task_samples(
+            config=config,
+            dataset_loader=lambda _dataset_id, _split: rows,
+            task_partition="train",
+            eval_split_fraction=0.25,
+            min_eval_rows=1,
+        )
+    with pytest.raises(ValueError, match="task_partition='all'"):
+        load_task_samples(
+            config=config,
+            dataset_loader=lambda _dataset_id, _split: rows,
+            task_partition="eval",
+            eval_split_fraction=0.25,
+            min_eval_rows=1,
+        )
 
 
 def test_load_task_batch_wraps_all_partition_on_partial_rollout_probe_subset(
