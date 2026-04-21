@@ -591,8 +591,32 @@ print(
 PY
 }
 
+_resolve_direct_mode_partial_rollout_probe_validation_surface() {
+  PARTIAL_ROLLOUT_PROBE_VALIDATION_DATA_CONFIG_NAME="${RFT_DATA_CONFIG_NAME}"
+  PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_SPLIT_FRACTION="${RFT_EVAL_SPLIT_FRACTION}"
+  local override normalized_override override_key override_value
+  for override in "$@"; do
+    normalized_override="${override}"
+    while [[ "${normalized_override}" == +* ]]; do
+      normalized_override="${normalized_override#+}"
+    done
+    override_key="${normalized_override%%=*}"
+    override_value="${normalized_override#*=}"
+    case "${override_key}" in
+      data.on_policy.data_config_name)
+        PARTIAL_ROLLOUT_PROBE_VALIDATION_DATA_CONFIG_NAME="${override_value}"
+        ;;
+      data.on_policy.task_eval_split_fraction)
+        PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_SPLIT_FRACTION="${override_value}"
+        ;;
+    esac
+  done
+}
+
 _validate_partial_rollout_probe_partition_surface() {
-  "${PYTHON_BIN}" - "${RFT_DATA_CONFIG_NAME}" "${RFT_EVAL_SPLIT_FRACTION}" <<'PY'
+  local data_config_name="${1}"
+  local eval_split_fraction="${2}"
+  "${PYTHON_BIN}" - "${data_config_name}" "${eval_split_fraction}" <<'PY'
 import sys
 
 from config import resolve_on_policy_settings
@@ -732,7 +756,15 @@ export SMALL_SWE_RFT_MODEL_DTYPE="${SMALL_SWE_RFT_MODEL_DTYPE:-${RFT_MODEL_DTYPE
 export EXPERIMENT="${EXPERIMENT:-${RFT_TASK_NAME}}"
 export SMALL_SWE_RFT_LOOP_WANDB_ENABLE="${SMALL_SWE_RFT_LOOP_WANDB_ENABLE:-1}"
 
-if ! _validate_partial_rollout_probe_partition_surface; then
+PARTIAL_ROLLOUT_PROBE_VALIDATION_DATA_CONFIG_NAME="${RFT_DATA_CONFIG_NAME}"
+PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_SPLIT_FRACTION="${RFT_EVAL_SPLIT_FRACTION}"
+if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
+  _resolve_direct_mode_partial_rollout_probe_validation_surface "$@"
+fi
+
+if ! _validate_partial_rollout_probe_partition_surface \
+  "${PARTIAL_ROLLOUT_PROBE_VALIDATION_DATA_CONFIG_NAME}" \
+  "${PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_SPLIT_FRACTION}"; then
   exit 1
 fi
 
