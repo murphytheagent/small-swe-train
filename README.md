@@ -2,15 +2,25 @@
 
 Repository for a chat-style SWE training stack with `format_rft`, optional `positive_rft`, and `turn_sdpo` stages.
 
-Latest doc update: 2026-04-01.
+Latest doc update: 2026-04-22.
 
 ## Current status
-- `main` now carries the held-out / positive-RFT fixes from merged PR `#26` (`1281994`) plus the docs-first planning stack from PRs `#14`-`#17`, `#23`, and `#27` (`c2831a6`, `d171bbf`, `940cc8e`, `be3f3d1`, `4c38d6a`, `ae492c6`). There is no open GitHub PR surface left on this repo.
-- The real missing artifact is still the staged remote `format_rft 3 -> positive_rft 3` run. The scratch checkout and launcher remain ready at `/data/scratch/murphy/projects/worktrees/small-swe-train-1773739092/tmp/run_format_positive_e2e.sh`.
-- The old queue note in earlier maintenance docs is stale: `wth-gpu-01` is now `mixed`, with only `zhijianliu`'s 1-GPU job `1942` scheduled through `2026-04-01 14:27 UTC`, so the next step is a readiness check plus requeue rather than waiting for a full-node blocker to disappear.
-- Wangzhi's latest instruction is to queue the job once readiness is confirmed and then let him monitor completion; there is no need to babysit the queue from here.
-- PR #18 (`plan/1772102085-current-turn-supervision`) merged into `main` on 2026-03-08 05:02 UTC, so current-turn supervision is now on the base branch.
-- The latest validated E2E execution remains the 8-GPU rerun chain `826` / `827` / `828`; detailed metrics and follow-up notes live in `IMPLEMENTATION_BLUEPRINT.md`.
+- `main` carries the merged training/runtime base, but the live review/runtime surface is still split across three open PRs:
+  - PR `#33` head `47289ea` is the current `format_rft -> positive_rft` retry branch.
+  - PR `#34` head `4d811e6` is the XML-default assistant-action payload branch.
+  - Older PR `#30` remains parked and `DIRTY`.
+- There is still no usable positive-stage checkpoint on the live PR `#33` path. The saved `2711` step-0 artifact already showed `selected_count=0` on `1,024` `combine_file` / `near_impossible` rows, and the repaired retry surface moved on to jobs `2753` / `2754` on head `47289ea` instead of the older `2750` / `2751` queue story.
+- PR `#33` is still not merge-ready:
+  - GitHub shows `11` unresolved non-outdated review threads.
+  - `2753` is the live retry on the `2,813`-task partial labeled subset, with `2754` queued behind it.
+  - maintenance is still treating the branch as blocked until that retry yields a real positive-stage artifact and the current head gets a clean detached-head review verdict.
+- PR `#34` still has a separate runtime proof surface:
+  - isolated scratch worktree `/data/scratch/murphy/projects/worktrees/small-swe-train-pr34-xml`
+  - shared `.venv` reuse
+  - isolated Slurm proof job `2752`
+- PR `#34` is also still not merge-ready:
+  - GitHub shows `1` unresolved non-outdated review thread.
+  - the last full `python3 -m pytest -q` maintenance audit still failed during collection with a circular import through `prompts.runtime_messages`, `rollout.action_format`, `env.container_pool`, and `task_dataset`.
 
 Canonical staged pipeline:
 - `format_rft`
