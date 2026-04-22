@@ -7,7 +7,7 @@ Latest doc update: 2026-04-22.
 ## Current status
 - `main` carries the merged training/runtime base, but the live review/runtime surface is still split across three open PRs:
   - PR `#33` head `47289ea` is the current `format_rft -> positive_rft` retry branch.
-  - PR `#34` head `4d811e6` is the XML-default assistant-action payload branch.
+  - PR `#34` head `9d7cd54` is the XML-default assistant-action payload branch.
   - Older PR `#30` remains parked and `DIRTY`.
 - There is still no usable positive-stage checkpoint on the live PR `#33` path. The saved `2711` step-0 artifact already showed `selected_count=0` on `1,024` `combine_file` / `near_impossible` rows, and the repaired retry surface moved on to jobs `2753` / `2754` on head `47289ea` instead of the older `2750` / `2751` queue story.
 - PR `#33` is still not merge-ready:
