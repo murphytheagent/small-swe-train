@@ -107,11 +107,58 @@ def collect_rft_sft_batch_for_steps(
         output_dir=output_dir,
     )
     rollout_rows = _flatten_rollout_steps(rollout_steps)
+    result = build_rft_handoff_result_from_rollout_rows(
+        rollout_rows=rollout_rows,
+        max_tool_calls=_resolve_collector_max_tool_calls(collector),
+        tokenizer=tokenizer,
+        handoff_overrides=handoff_overrides,
+    )
+
+    if output_dir is not None:
+        base_dir = Path(output_dir)
+        base_dir.mkdir(parents=True, exist_ok=True)
+        write_jsonl_rows(base_dir / "rollout_rows.jsonl", rollout_rows)
+        write_jsonl_rows(base_dir / "selected_rows.jsonl", result["selected_rows"])
+        write_jsonl_rows(base_dir / "rejected_rows.jsonl", result["rejected_rows"])
+        _write_json(
+            base_dir / "rft_sft_meta.json",
+            {
+                "selected_count": len(result["selected_rows"]),
+                "rejected_count": len(result["rejected_rows"]),
+                "max_turn_level_generated_tokens": result["sft_batch"]["meta_info"][
+                    "max_turn_level_generated_tokens"
+                ],
+                "max_sequence_length_limit": result["sft_batch"]["meta_info"][
+                    "max_sequence_length_limit"
+                ],
+            },
+        )
+        _write_json(
+            base_dir / "rollout_artifact_summary.json",
+            _build_rollout_artifact_summary(
+                rollout_rows=rollout_rows,
+                total_steps=total_steps,
+                selected_count=len(result["selected_rows"]),
+                rejected_count=len(result["rejected_rows"]),
+            ),
+        )
+
+    return result
+
+
+def build_rft_handoff_result_from_rollout_rows(
+    *,
+    rollout_rows: Sequence[Mapping[str, Any]],
+    max_tool_calls: int,
+    tokenizer: SupportsOffsetsTokenizer,
+    handoff_overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply the centralized RFT handoff policy to an existing rollout row set."""
     handoff_settings = resolve_rft_handoff_settings(overrides=handoff_overrides)
     if rollout_rows:
         preprocessed_rows = preprocess_trajectories(
             rollout_rows,
-            max_tool_calls=collector.settings.runtime.max_tool_calls_per_turn,
+            max_tool_calls=max_tool_calls,
             tokenizer=tokenizer,
         )
         merged_rows = merge_rollout_and_preprocessed_rows(rollout_rows, preprocessed_rows)
@@ -148,35 +195,16 @@ def collect_rft_sft_batch_for_steps(
         "sft_batch": sft_batch,
         "dataproto_payload": dataproto_payload,
     }
-
-    if output_dir is not None:
-        base_dir = Path(output_dir)
-        base_dir.mkdir(parents=True, exist_ok=True)
-        write_jsonl_rows(base_dir / "rollout_rows.jsonl", rollout_rows)
-        write_jsonl_rows(base_dir / "selected_rows.jsonl", selected_rows)
-        write_jsonl_rows(base_dir / "rejected_rows.jsonl", rejected_rows)
-        _write_json(
-            base_dir / "rft_sft_meta.json",
-            {
-                "selected_count": len(selected_rows),
-                "rejected_count": len(rejected_rows),
-                "max_turn_level_generated_tokens": sft_batch["meta_info"][
-                    "max_turn_level_generated_tokens"
-                ],
-                "max_sequence_length_limit": sft_batch["meta_info"]["max_sequence_length_limit"],
-            },
-        )
-        _write_json(
-            base_dir / "rollout_artifact_summary.json",
-            _build_rollout_artifact_summary(
-                rollout_rows=rollout_rows,
-                total_steps=total_steps,
-                selected_count=len(selected_rows),
-                rejected_count=len(rejected_rows),
-            ),
-        )
-
     return result
+
+
+def _resolve_collector_max_tool_calls(collector: Any) -> int:
+    settings = getattr(collector, "settings", None)
+    runtime = getattr(settings, "runtime", None)
+    value = getattr(runtime, "max_tool_calls_per_turn", 0)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
 
 
 def merge_rollout_and_preprocessed_rows(
@@ -221,6 +249,9 @@ def merge_rollout_and_preprocessed_rows(
             {
                 "stage": rollout_row.get("stage", preprocessed_row.get("stage", "format_rft")),
                 "task_id": task_id,
+                "task_family": rollout_row.get("task_family", ""),
+                "difficulty_band": rollout_row.get("difficulty_band", "unbanded"),
+                "difficulty_band_source": rollout_row.get("difficulty_band_source", "none"),
                 "attempt_index": rollout_row.get("attempt_index", 0),
                 "turn_index": rollout_row.get("turn_index", 0),
                 "step_index": rollout_row.get("step_index", 0),
@@ -269,14 +300,25 @@ def _partition_rows_by_handoff_length(
     kept_rows: list[dict[str, Any]] = []
     rejected_rows: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
-        input_ids = _coerce_int_sequence(
-            row.get("input_ids"),
-            label=f"rows[{index}].input_ids",
-        )
-        action_mask = _coerce_loss_mask_sequence(
-            row.get("action_mask_rft"),
-            label=f"rows[{index}].action_mask_rft",
-        )
+        try:
+            input_ids = _coerce_int_sequence(
+                row.get("input_ids"),
+                label=f"rows[{index}].input_ids",
+            )
+            action_mask = _coerce_loss_mask_sequence(
+                row.get("action_mask_rft"),
+                label=f"rows[{index}].action_mask_rft",
+            )
+        except ValueError as exc:
+            rejected_row = dict(row)
+            _mark_selected_row_rejected(
+                rejected_row,
+                reason="selected_invalid_preprocessed_payload",
+            )
+            rejected_row["selected_over_budget"] = False
+            rejected_row["selected_payload_error"] = str(exc)
+            rejected_rows.append(rejected_row)
+            continue
         token_labels = _coerce_token_labels(
             row.get("token_labels"),
             length_hint=len(input_ids),
@@ -287,12 +329,23 @@ def _partition_rows_by_handoff_length(
             or len(token_labels) > padded_limit
         ):
             rejected_row = dict(row)
+            _mark_selected_row_rejected(
+                rejected_row,
+                reason="selected_over_handoff_length",
+            )
             rejected_row["selected_over_budget"] = True
-            rejected_row["rft_rejection_reason"] = "selected_over_handoff_length"
             rejected_rows.append(rejected_row)
             continue
         kept_rows.append(dict(row))
     return kept_rows, rejected_rows
+
+
+def _mark_selected_row_rejected(row: dict[str, Any], *, reason: str) -> None:
+    row["rft_selected"] = False
+    row["stage_accepted"] = False
+    row["rft_label"] = "reject"
+    row["rft_rejection_reason"] = reason
+    row["stage_decision_reason"] = reason
 
 
 def build_verl_sft_batch(
@@ -379,6 +432,11 @@ def build_verl_sft_batch(
                 "attempt_index": attempt_index,
                 "step_index": _coerce_int(row.get("step_index"), fallback=index),
                 "turn_index": _coerce_int(row.get("turn_index"), fallback=0),
+                "task_family": str(row.get("task_family", "")).strip(),
+                "difficulty_band": str(row.get("difficulty_band", "unbanded")).strip()
+                or "unbanded",
+                "difficulty_band_source": str(row.get("difficulty_band_source", "none")).strip()
+                or "none",
                 "resolved": _coerce_bool(row.get("resolved"), fallback=False),
                 "is_terminal": _coerce_bool(row.get("is_terminal"), fallback=False),
                 "format_valid": _coerce_bool(row.get("format_valid"), fallback=False),
@@ -396,6 +454,9 @@ def build_verl_sft_batch(
     attempt_indexes: list[int] = []
     step_indexes: list[int] = []
     turn_indexes: list[int] = []
+    task_families: list[str] = []
+    difficulty_bands: list[str] = []
+    difficulty_band_sources: list[str] = []
     resolved_flags: list[bool] = []
     terminal_flags: list[bool] = []
     format_valid_flags: list[bool] = []
@@ -413,6 +474,9 @@ def build_verl_sft_batch(
         attempt_indexes.append(row["attempt_index"])
         step_indexes.append(row["step_index"])
         turn_indexes.append(row["turn_index"])
+        task_families.append(row["task_family"])
+        difficulty_bands.append(row["difficulty_band"])
+        difficulty_band_sources.append(row["difficulty_band_source"])
         resolved_flags.append(row["resolved"])
         terminal_flags.append(row["is_terminal"])
         format_valid_flags.append(row["format_valid"])
@@ -430,6 +494,9 @@ def build_verl_sft_batch(
             "attempt_index": attempt_indexes,
             "step_index": step_indexes,
             "turn_index": turn_indexes,
+            "task_family": task_families,
+            "difficulty_band": difficulty_bands,
+            "difficulty_band_source": difficulty_band_sources,
             "resolved": resolved_flags,
             "is_terminal": terminal_flags,
             "format_valid": format_valid_flags,
@@ -458,6 +525,9 @@ def _build_empty_verl_sft_batch(*, handoff_settings: RFTHandoffSettings) -> dict
             "attempt_index": [],
             "step_index": [],
             "turn_index": [],
+            "task_family": [],
+            "difficulty_band": [],
+            "difficulty_band_source": [],
             "resolved": [],
             "is_terminal": [],
             "format_valid": [],
@@ -732,9 +802,32 @@ def _build_rollout_artifact_summary(
         "rollout_row_count": len(rollout_rows),
         "selected_count": int(selected_count),
         "rejected_count": int(rejected_count),
+        "rollout_task_family_counts": _count_rows_by_text_field(
+            rollout_rows,
+            field_name="task_family",
+            default_label="unknown",
+        ),
+        "rollout_difficulty_band_counts": _count_rows_by_text_field(
+            rollout_rows,
+            field_name="difficulty_band",
+            default_label="unbanded",
+        ),
         "unique_task_ids": unique_task_ids,
         "unique_image_names": unique_image_names,
         "task_image_pairs": task_image_pairs,
         "rows_with_trajectory_steps": rows_with_trajectory_steps,
         "trajectory_step_count": trajectory_step_count,
     }
+
+
+def _count_rows_by_text_field(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    field_name: str,
+    default_label: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        label = str(row.get(field_name, "")).strip() or default_label
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items()))

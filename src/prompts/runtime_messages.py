@@ -12,7 +12,6 @@ from config import (
     SUPPORTED_ACTION_PAYLOAD_FORMATS,
     TERMINAL_TOOL_NAME,
 )
-from rollout.action_format import render_tool_call_block
 from schemas import ALLOWED_TOOLS, TOOL_SCHEMAS
 
 from .model_delimiters import ModelDelimiters, default_delimiters
@@ -180,6 +179,8 @@ def _build_tool_examples_prompt(*, action_payload_format: str) -> str:
         if action_payload_format == "json":
             serialized = json.dumps(dict(example_raw), ensure_ascii=True, sort_keys=True)
         else:
+            from rollout.action_format import render_tool_call_block
+
             serialized = render_tool_call_block(
                 dict(example_raw),
                 payload_format=action_payload_format,

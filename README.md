@@ -2,25 +2,10 @@
 
 Repository for a chat-style SWE training stack with `format_rft`, optional `positive_rft`, and `turn_sdpo` stages.
 
-Latest doc update: 2026-04-22.
+Latest doc update: 2026-04-25.
 
 ## Current status
-- `main` carries the merged training/runtime base, but the live review/runtime surface is still split across three open PRs:
-  - PR `#33` head `47289ea` is the current `format_rft -> positive_rft` retry branch.
-  - PR `#34` is the XML-default assistant-action payload branch.
-  - Older PR `#30` remains parked and `DIRTY`.
-- There is still no usable positive-stage checkpoint on the live PR `#33` path. The saved `2711` step-0 artifact already showed `selected_count=0` on `1,024` `combine_file` / `near_impossible` rows, and the repaired retry surface moved on to jobs `2753` / `2754` on head `47289ea` instead of the older `2750` / `2751` queue story.
-- PR `#33` is still not merge-ready:
-  - GitHub shows `11` unresolved non-outdated review threads.
-  - `2753` is the live retry on the `2,813`-task partial labeled subset, with `2754` queued behind it.
-  - maintenance is still treating the branch as blocked until that retry yields a real positive-stage artifact and the current head gets a clean detached-head review verdict.
-- PR `#34` still has a separate runtime proof surface:
-  - isolated scratch worktree `/data/scratch/murphy/projects/worktrees/small-swe-train-pr34-xml`
-  - shared `.venv` reuse
-  - isolated Slurm proof job `2752`
-- PR `#34` is also still not merge-ready:
-  - GitHub shows `1` unresolved non-outdated review thread.
-  - the last full `python3 -m pytest -q` maintenance audit still failed during collection with a circular import through `prompts.runtime_messages`, `rollout.action_format`, `env.container_pool`, and `task_dataset`.
+See `STATUS.md` for the current tracker and open follow-ups.
 
 Canonical staged pipeline:
 - `format_rft`
@@ -149,5 +134,6 @@ For 8-GPU runs (`NPROC_PER_NODE=8`), the locked rollout defaults are:
 
 ## Notes
 - End-to-end RFT runtime orchestration lives in `src/trainer/rft_runtime_loop.py`.
-- Design and implementation history remains in `design.md` and `IMPLEMENTATION_BLUEPRINT.md`.
-- SWE-smith language-expansion plan lives in `swe_smith_language_expansion_plan.md`.
+- Design and implementation history lives in `docs/design.md`.
+- SWE-smith language-expansion planning lives in `docs/swe_smith_language_expansion_plan.md`.
+- Additional research and implementation plans live under `docs/`.

@@ -64,6 +64,17 @@ def test_on_policy_bad_task_cache_default_is_centralized() -> None:
     assert config.resolve_on_policy_bad_task_cache_dir(project_root=repo_root) == repo_root / "data" / "on_policy_bad_task_cache"
 
 
+def test_on_policy_difficulty_band_cache_default_is_centralized() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    assert (
+        config.DEFAULT_ON_POLICY_DIFFICULTY_BAND_CACHE_RELATIVE_DIR
+        == Path("data") / "on_policy_difficulty_band_cache"
+    )
+    assert config.resolve_on_policy_difficulty_band_cache_dir(
+        project_root=repo_root
+    ) == repo_root / "data" / "on_policy_difficulty_band_cache"
+
+
 def test_phase_transition_gates_defaults_load() -> None:
     gates = config.phase_transition_gates_defaults()
     assert "entry_gate_for_main_sdpo" in gates
@@ -304,6 +315,10 @@ def test_on_policy_data_defaults_load_from_configs_data() -> None:
     assert str(data_defaults["dataset_id"]).strip()
     assert data_defaults["patch_is_bug_introducing"] is True
     assert data_defaults["verifier_kind"] == "pytest"
+    difficulty_banding = data_defaults.get("difficulty_banding")
+    assert isinstance(difficulty_banding, Mapping)
+    assert difficulty_banding["strategy"] == "instance_id_family"
+    assert difficulty_banding["default_band"] == "near_impossible"
     columns = data_defaults.get("columns")
     assert isinstance(columns, Mapping)
     for key in ("image_name", "problem_statement", "fail_to_pass", "pass_to_pass"):
@@ -343,6 +358,9 @@ def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     assert settings.data.dataset_id == data_defaults["dataset_id"]
     assert settings.data.patch_is_bug_introducing is True
     assert settings.data.verifier_kind == "pytest"
+    assert settings.data.difficulty_banding.strategy == "instance_id_family"
+    assert ("func_basic", "learnable") in settings.data.difficulty_banding.family_band_exact
+    assert ("func_pm_", "near_impossible") in settings.data.difficulty_banding.family_band_prefix
     assert settings.runtime.task_batch_size == loop_defaults["task_batch_size"]
     assert settings.runtime.attempts_per_task == loop_defaults["samples_per_task"]
     assert settings.runtime.env_pool_size == settings.runtime.task_batch_size
@@ -350,6 +368,43 @@ def test_resolve_on_policy_settings_merges_data_and_runtime_sources() -> None:
     assert settings.runtime.max_in_flight_tasks == config.resolve_rft_collector_max_in_flight_default(
         task_batch_size=settings.runtime.task_batch_size
     )
+
+
+def test_resolve_on_policy_settings_parses_rollout_probe_banding_override() -> None:
+    settings = config.resolve_on_policy_settings(
+        data_overrides={
+            "difficulty_banding": {
+                "strategy": "rollout_probe",
+                "rollout_probe_cache_path": "data/on_policy_difficulty_band_cache/demo.json",
+                "rollout_probe_required": True,
+                "rollout_probe_accept_partial": True,
+            }
+        }
+    )
+
+    assert settings.data.difficulty_banding.strategy == "rollout_probe"
+    assert (
+        settings.data.difficulty_banding.rollout_probe_cache_path
+        == "data/on_policy_difficulty_band_cache/demo.json"
+    )
+    assert settings.data.difficulty_banding.rollout_probe_required is True
+    assert settings.data.difficulty_banding.rollout_probe_accept_partial is True
+
+
+def test_resolve_on_policy_settings_deep_merges_difficulty_banding_rule_overrides() -> None:
+    settings = config.resolve_on_policy_settings(
+        data_overrides={
+            "difficulty_banding": {
+                "family_band_exact": {
+                    "new_family": "easy",
+                }
+            }
+        }
+    )
+
+    exact_rules = dict(settings.data.difficulty_banding.family_band_exact)
+    assert exact_rules["func_basic"] == "learnable"
+    assert exact_rules["new_family"] == "easy"
 
 
 def test_resolve_on_policy_settings_aligns_in_flight_with_task_batch_override() -> None:

@@ -42,9 +42,25 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
         assert handoff_overrides == {"require_resolved": True}
         assert output_dir == str(tmp_path)
         return {
-            "rollout_rows": [{"task_id": "task-1"}, {"task_id": "task-2"}],
-            "selected_rows": [{"task_id": "task-1"}],
-            "rejected_rows": [{"task_id": "task-2", "rft_rejection_reason": "non_terminal,unresolved"}],
+            "rollout_rows": [
+                {"task_id": "task-1", "task_family": "func_basic", "difficulty_band": "learnable"},
+                {
+                    "task_id": "task-2",
+                    "task_family": "combine_file",
+                    "difficulty_band": "near_impossible",
+                },
+            ],
+            "selected_rows": [
+                {"task_id": "task-1", "task_family": "func_basic", "difficulty_band": "learnable"}
+            ],
+            "rejected_rows": [
+                {
+                    "task_id": "task-2",
+                    "task_family": "combine_file",
+                    "difficulty_band": "near_impossible",
+                    "rft_rejection_reason": "non_terminal,unresolved",
+                }
+            ],
             "sft_batch": {"meta_info": {"selected_count": 1}},
             "dataproto_payload": {"meta_info": {"max_turn_level_generated_tokens": 16}},
         }
@@ -113,6 +129,10 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
     assert manifest_payload["selected_count"] == 1
     assert manifest_payload["rejected_count"] == 1
     assert manifest_payload["rejection_reason_counts"] == {"non_terminal": 1, "unresolved": 1}
+    assert manifest_payload["selected_task_family_counts"] == {"func_basic": 1}
+    assert manifest_payload["selected_difficulty_band_counts"] == {"learnable": 1}
+    assert manifest_payload["rejected_task_family_counts"] == {"combine_file": 1}
+    assert manifest_payload["rejected_difficulty_band_counts"] == {"near_impossible": 1}
     assert manifest_payload["dataproto_meta_info"] == {"max_turn_level_generated_tokens": 16}
 
 

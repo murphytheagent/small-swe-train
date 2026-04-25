@@ -363,6 +363,91 @@ def _write_teacher_pilot_python_stub(tmp_path: Path) -> Path:
     return stub_path
 
 
+def _write_onpolicy_difficulty_probe_python_stub(tmp_path: Path) -> Path:
+    stub_path = tmp_path / "python-difficulty-probe-stub.sh"
+    stub_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"${1:-}\" == \"-m\" && \"${2:-}\" == \"trainer.vllm_api_server_entry\" ]]; then\n"
+        "  if [[ \"${STUB_VLLM_FAIL_FAST:-0}\" == \"1\" ]]; then\n"
+        "    echo 'stub vLLM startup failure' >&2\n"
+        "    exit 23\n"
+        "  fi\n"
+        "  exec python3 - \"$@\" <<'PY'\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "import json\n"
+        "import sys\n"
+        "\n"
+        "port = 8000\n"
+        "for index, token in enumerate(sys.argv):\n"
+        "    if token == '--port' and index + 1 < len(sys.argv):\n"
+        "        port = int(sys.argv[index + 1])\n"
+        "        break\n"
+        "\n"
+        "class Handler(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        if self.path != '/v1/models':\n"
+        "            self.send_error(404)\n"
+        "            return\n"
+        "        payload = json.dumps({'data': [{'id': 'stub-model'}]}).encode('utf-8')\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Type', 'application/json')\n"
+        "        self.send_header('Content-Length', str(len(payload)))\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(payload)\n"
+        "\n"
+        "    def log_message(self, format, *args):\n"
+        "        return\n"
+        "\n"
+        "HTTPServer(('127.0.0.1', port), Handler).serve_forever()\n"
+        "PY\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-m\" && \"${2:-}\" == \"env.preload_onpolicy_difficulty_bands\" ]]; then\n"
+        "  : \"${DIFFICULTY_PROBE_CAPTURE:?}\"\n"
+        "  printf '%s\\n' \"$@\" >\"${DIFFICULTY_PROBE_CAPTURE}\"\n"
+        "  cache_dir=''\n"
+        "  probe_label='positive_rft_probe'\n"
+        "  while [[ $# -gt 0 ]]; do\n"
+        "    case \"$1\" in\n"
+        "      --cache-dir)\n"
+        "        cache_dir=\"${2:-}\"\n"
+        "        shift 2\n"
+        "        ;;\n"
+        "      --probe-label)\n"
+        "        probe_label=\"${2:-}\"\n"
+        "        shift 2\n"
+        "        ;;\n"
+        "      *)\n"
+        "        shift\n"
+        "        ;;\n"
+        "    esac\n"
+        "  done\n"
+        "  mkdir -p \"${cache_dir}\"\n"
+        "  cache_path=\"${cache_dir}/difficulty_bands_SWE_bench_SWE_smith_py_train_${probe_label}.json\"\n"
+        "  cat >\"${cache_path}\" <<JSON\n"
+        "{\n"
+        "  \"task_count\": 1,\n"
+        "  \"records\": [\n"
+        "    {\n"
+        "      \"task_id\": \"task-1\",\n"
+        "      \"difficulty_band\": \"learnable\"\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "JSON\n"
+        "  printf '%s\\n' \"${cache_path}\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"${1:-}\" == \"-\" ]]; then\n"
+        f"  exec {shlex.quote(sys.executable)} \"$@\"\n"
+        "fi\n"
+        "exec python3 \"$@\"\n",
+        encoding="utf-8",
+    )
+    stub_path.chmod(0o755)
+    return stub_path
+
+
 def test_run_rft_script_dry_run_prints_verl_command() -> None:
     result = _run_script("run_rft.sh", "trainer.total_training_steps=1")
     assert "-m torch.distributed.run" in result.stdout
@@ -474,6 +559,216 @@ def test_run_rft_script_dry_run_direct_mode_propagates_task_holdout_settings() -
     )
     assert "+data.on_policy.task_eval_split_fraction=0.25" in result.stdout
     assert "+data.on_policy.task_eval_min_rows=2" in result.stdout
+
+
+def test_run_rft_script_dry_run_rejects_eval_split_for_all_partition_partial_rollout_probe_cache(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_incomplete.partial.json"
+    partial_records_path = tmp_path / "difficulty_bands_incomplete.partial.records.jsonl"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "probe_status": "incomplete",
+                "task_count_expected": 4,
+                "task_count_completed": 2,
+                "partial_records_path": partial_records_path.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    partial_records_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "task_id": "task-a",
+                        "task_family": "func_basic",
+                        "difficulty_band": "learnable",
+                        "difficulty_band_source": "rollout_probe:selected_2_of_4",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "task_id": "task-b",
+                        "task_family": "combine_file",
+                        "difficulty_band": "near_impossible",
+                        "difficulty_band_source": "rollout_probe:selected_0_of_4",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    script_path = _repo_root() / "scripts" / "run_rft.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=_repo_root(),
+        check=False,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "RFT_DATA_CONFIG_NAME": "on_policy_swe_smith_rollout_probe_partial",
+            "RFT_EVAL_SPLIT_FRACTION": "0.25",
+            "SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH": str(cache_path),
+        },
+    )
+
+    assert result.returncode == 1
+    assert "task_partition='all'" in result.stderr
+    assert "Set eval_split_fraction=0" in result.stderr
+
+
+def test_run_rft_script_dry_run_rejects_eval_scoped_partial_rollout_probe_cache_for_train_split(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_eval.complete.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "probe_status": "complete",
+                "task_partition": "eval",
+                "task_pool_size": 1,
+                "task_count_expected": 1,
+                "records": [
+                    {
+                        "task_id": "task-a",
+                        "task_family": "func_basic",
+                        "difficulty_band": "learnable",
+                        "difficulty_band_source": "rollout_probe:selected_2_of_4",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    script_path = _repo_root() / "scripts" / "run_rft.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=_repo_root(),
+        check=False,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "RFT_DATA_CONFIG_NAME": "on_policy_swe_smith_rollout_probe_partial",
+            "RFT_EVAL_SPLIT_FRACTION": "0.25",
+            "SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH": str(cache_path),
+        },
+    )
+
+    assert result.returncode == 1
+    assert "task_partition='eval'" in result.stderr
+    assert "task_partition='train'" in result.stderr
+
+
+def test_run_rft_script_dry_run_direct_mode_uses_cli_eval_split_override_for_partial_cache(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_incomplete.partial.json"
+    partial_records_path = tmp_path / "difficulty_bands_incomplete.partial.records.jsonl"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "probe_status": "incomplete",
+                "task_count_expected": 4,
+                "task_count_completed": 2,
+                "partial_records_path": partial_records_path.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    partial_records_path.write_text(
+        json.dumps(
+            {
+                "task_id": "task-a",
+                "task_family": "func_basic",
+                "difficulty_band": "learnable",
+                "difficulty_band_source": "rollout_probe:selected_2_of_4",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run_script(
+        "run_rft.sh",
+        "+data.on_policy.task_eval_split_fraction=0",
+        env_overrides={
+            "RFT_RUNTIME_MODE": "direct",
+            "RFT_DATA_CONFIG_NAME": "on_policy_swe_smith_rollout_probe_partial",
+            "RFT_EVAL_SPLIT_FRACTION": "0.25",
+            "SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH": str(cache_path),
+            "NPROC_PER_NODE": "1",
+        },
+    )
+
+    assert "+data.on_policy.task_eval_split_fraction=0" in result.stdout
+
+
+def test_run_rft_script_dry_run_direct_mode_rejects_cli_partial_cache_override_with_eval_split(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_incomplete.partial.json"
+    partial_records_path = tmp_path / "difficulty_bands_incomplete.partial.records.jsonl"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "probe_status": "incomplete",
+                "task_count_expected": 4,
+                "task_count_completed": 2,
+                "partial_records_path": partial_records_path.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    partial_records_path.write_text(
+        json.dumps(
+            {
+                "task_id": "task-a",
+                "task_family": "func_basic",
+                "difficulty_band": "learnable",
+                "difficulty_band_source": "rollout_probe:selected_2_of_4",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    script_path = _repo_root() / "scripts" / "run_rft.sh"
+    result = subprocess.run(
+        [
+            "bash",
+            str(script_path),
+            "--dry-run",
+            "+data.on_policy.data_config_name=on_policy_swe_smith_rollout_probe_partial",
+            "+data.on_policy.task_eval_split_fraction=0.25",
+        ],
+        cwd=_repo_root(),
+        check=False,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "RFT_RUNTIME_MODE": "direct",
+            "RFT_DATA_CONFIG_NAME": "on_policy_swe_smith",
+            "RFT_EVAL_SPLIT_FRACTION": "0",
+            "SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH": str(cache_path),
+            "NPROC_PER_NODE": "1",
+        },
+    )
+
+    assert result.returncode == 1
+    assert "task_partition='all'" in result.stderr
+    assert "Set eval_split_fraction=0" in result.stderr
 
 
 def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
@@ -969,6 +1264,376 @@ def test_teacher_reprompt_pilot_slurm_script_non_dry_run_rejects_hf_repo_id_via_
 
     assert result.returncode != 0
     assert "Checkpoint path does not exist" in result.stderr
+
+
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_visible_gpus_for_tp() -> None:
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "2",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+        },
+    )
+    assert "--tensor-parallel-size 2" in result.stdout
+    assert "--initial-model Qwen/Qwen3.5-9B" in result.stdout
+    assert "--attempts-per-task 4" in result.stdout
+    assert "--task-batch-size 1024" in result.stdout
+    assert "--env-pool-size 128" in result.stdout
+    assert "--max-in-flight-tasks 128" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("slurm_gpus_on_node", "expected_tp"),
+    [
+        ("a100:4", "4"),
+        ("gpu:h100:8", "8"),
+    ],
+)
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_trailing_typed_gres_count(
+    slurm_gpus_on_node: str,
+    expected_tp: str,
+) -> None:
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": slurm_gpus_on_node,
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+        },
+    )
+
+    assert f"--tensor-parallel-size {expected_tp}" in result.stdout
+    assert "--tensor-parallel-size 100" not in result.stdout
+
+
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_passes_parallel_probe_overrides() -> None:
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "8",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_VLLM_TP_SIZE": "2",
+            "PROBE_VLLM_DP_SIZE": "4",
+            "PROBE_TASK_BATCH_SIZE": "4",
+            "PROBE_ENV_POOL_SIZE": "4",
+            "PROBE_MAX_IN_FLIGHT_TASKS": "4",
+        },
+    )
+    assert "--tensor-parallel-size 2" in result.stdout
+    assert "--data-parallel-size 4" in result.stdout
+    assert "--task-batch-size 4" in result.stdout
+    assert "--env-pool-size 4" in result.stdout
+    assert "--max-in-flight-tasks 4" in result.stdout
+
+
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_derives_tp_from_dp() -> None:
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "8",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_VLLM_DP_SIZE": "4",
+        },
+    )
+    assert "--tensor-parallel-size 2" in result.stdout
+    assert "--data-parallel-size 4" in result.stdout
+
+
+def test_onpolicy_difficulty_probe_slurm_script_rejects_tp_larger_than_visible_gpus() -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "SLURM_GPUS_ON_NODE": "8",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_VLLM_TP_SIZE": "9",
+        },
+    )
+
+    assert result.returncode != 0
+    assert "Requested PROBE_VLLM_TP_SIZE=9 exceeds visible GPU count 8." in result.stderr
+
+
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_overridden_base_url_port() -> None:
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "SMALL_SWE_VLLM_BASE_URL": "http://127.0.0.1:19191",
+        },
+    )
+    assert "--port 19191" in result.stdout
+
+
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_ignores_coordination_repo_root(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    coordination_root = tmp_path / "coordination-root"
+    coordination_root.mkdir()
+
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROJECT_ROOT": str(repo_root),
+            "REPO_ROOT": str(coordination_root),
+        },
+    )
+
+    expected_cache_dir = repo_root / "data" / "on_policy_difficulty_band_cache"
+    assert f"--cache-dir {expected_cache_dir}" in result.stdout
+    assert str(coordination_root) not in result.stdout
+
+
+def test_onpolicy_difficulty_probe_slurm_script_non_dry_run_materializes_cache(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    python_stub = _write_onpolicy_difficulty_probe_python_stub(tmp_path)
+    capture_path = tmp_path / "difficulty-probe-args.txt"
+    cache_dir = tmp_path / "difficulty-cache"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "SLURM_JOB_ID": "24680",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_CACHE_DIR": str(cache_dir),
+            "DIFFICULTY_PROBE_CAPTURE": str(capture_path),
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+            "SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE": "0",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    captured_args = capture_path.read_text(encoding="utf-8").splitlines()
+    assert captured_args[:2] == ["-m", "env.preload_onpolicy_difficulty_bands"]
+    cache_path = Path(result.stdout.strip())
+    assert cache_path.is_file()
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert payload["task_count"] == 1
+    assert payload["records"][0]["task_id"] == "task-1"
+
+
+def test_onpolicy_difficulty_probe_slurm_script_non_dry_run_preflight_sweeps_stale_managed_containers(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    python_stub = _write_onpolicy_difficulty_probe_python_stub(tmp_path)
+    _write_pilot_docker_cleanup_probe_stub(tmp_path)
+    _write_squeue_probe_stub(tmp_path)
+    capture_path = tmp_path / "difficulty-probe-args.txt"
+    docker_log_path = tmp_path / "docker-invocations.log"
+    cache_dir = tmp_path / "difficulty-cache-preflight"
+    vllm_log = repo_root / "outputs" / "slurm" / "difficulty-probe-vllm-987654.log"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{tmp_path}{os.pathsep}{env.get('PATH', '')}",
+            "FAKE_DOCKER_LOG_FILE": str(docker_log_path),
+            "USER": "test-runner",
+            "LOGNAME": "test-runner",
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "SLURM_JOB_ID": "987654",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_CACHE_DIR": str(cache_dir),
+            "DIFFICULTY_PROBE_CAPTURE": str(capture_path),
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+        }
+    )
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script_path)],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=30,
+        )
+    finally:
+        if vllm_log.exists():
+            vllm_log.unlink()
+
+    assert result.returncode == 0, result.stderr
+    docker_invocations = docker_log_path.read_text(encoding="utf-8").splitlines()
+    assert any("label=small_swe.pool_name=onpolicy-task" in line for line in docker_invocations)
+    assert any("rm -f stale-container-1 stale-container-2" in line for line in docker_invocations)
+    assert not any("rm -f live-container" in line for line in docker_invocations)
+
+
+def test_onpolicy_difficulty_probe_slurm_script_accepts_models_endpoint_base_url(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    python_stub = _write_onpolicy_difficulty_probe_python_stub(tmp_path)
+    capture_path = tmp_path / "difficulty-probe-args-models-url.txt"
+    cache_dir = tmp_path / "difficulty-cache-models-url"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "SLURM_JOB_ID": "24681",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_CACHE_DIR": str(cache_dir),
+            "DIFFICULTY_PROBE_CAPTURE": str(capture_path),
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+            "SMALL_SWE_VLLM_BASE_URL": "http://127.0.0.1:19191/v1/models",
+            "SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE": "0",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    cache_path = Path(result.stdout.strip())
+    assert cache_path.is_file()
+
+
+def test_onpolicy_difficulty_probe_slurm_script_fails_fast_when_vllm_exits_early(
+    tmp_path: Path,
+) -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    python_stub = _write_onpolicy_difficulty_probe_python_stub(tmp_path)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(python_stub),
+            "SLURM_GPUS_ON_NODE": "2",
+            "SLURM_JOB_ID": "24682",
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "PROBE_CACHE_DIR": str(tmp_path / "difficulty-cache-fail-fast"),
+            "DIFFICULTY_PROBE_CAPTURE": str(tmp_path / "difficulty-probe-capture.txt"),
+            "HF_HOME": str(tmp_path / "hf_home"),
+            "HUGGINGFACE_HUB_CACHE": str(tmp_path / "hf_home" / "hub"),
+            "TRANSFORMERS_CACHE": str(tmp_path / "hf_home" / "transformers"),
+            "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+            "TORCH_HOME": str(tmp_path / "torch_home"),
+            "XDG_CACHE_HOME": str(tmp_path / "xdg_cache"),
+            "SMALL_SWE_PREFLIGHT_CONTAINER_SWEEP_ENABLE": "0",
+            "PROBE_VLLM_READY_TIMEOUT_SEC": "30",
+            "STUB_VLLM_FAIL_FAST": "1",
+        }
+    )
+
+    start = time.monotonic()
+    result = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=10,
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.returncode != 0
+    assert elapsed < 10
+    assert "vLLM process exited before readiness probe succeeded." in result.stderr
+    assert "stub vLLM startup failure" in result.stderr
+
+
+def test_onpolicy_difficulty_probe_slurm_script_rejects_non_local_base_url() -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "SMALL_SWE_VLLM_BASE_URL": "http://example.com:19191/v1/models",
+        },
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "must point at a local loopback host" in result.stderr
+
+
+def test_onpolicy_difficulty_probe_slurm_script_rejects_https_base_url() -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "SMALL_SWE_VLLM_BASE_URL": "https://127.0.0.1:19191/v1",
+        },
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "Invalid SMALL_SWE_VLLM_BASE_URL" in result.stderr
+
+
+def test_onpolicy_difficulty_probe_slurm_script_rejects_prefixed_local_base_url() -> None:
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+            "SMALL_SWE_VLLM_BASE_URL": "http://127.0.0.1:19191/foo/v1",
+        },
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "must be empty or point at the local /v1" in result.stderr
 
 
 def test_run_sdpo_script_dry_run_prints_sdpo_config() -> None:

@@ -37,6 +37,9 @@ def build_multiturn_dataset_records(
             row.get("verifier_kind", "pytest"),
             label=f"{row_label}.verifier_kind",
         )
+        task_family = _as_text(row.get("task_family")).strip()
+        difficulty_band = _as_text(row.get("difficulty_band")).strip() or "unbanded"
+        difficulty_band_source = _as_text(row.get("difficulty_band_source")).strip() or "none"
         fail_to_pass = _resolve_test_targets_from_row(row, key="fail_to_pass")
         pass_to_pass = _resolve_test_targets_from_row(row, key="pass_to_pass")
         messages = build_multiturn_messages(row, row_index=index)
@@ -52,6 +55,9 @@ def build_multiturn_dataset_records(
             "final_turn_has_submit": final_turn_has_submit,
             "final_submit_format_valid": final_submit_format_valid,
             "verifier_kind": verifier_kind,
+            "task_family": task_family,
+            "difficulty_band": difficulty_band,
+            "difficulty_band_source": difficulty_band_source,
             "fail_to_pass": fail_to_pass,
             "pass_to_pass": pass_to_pass,
         }
@@ -70,6 +76,9 @@ def build_multiturn_dataset_records(
                 "step_index": step_index,
                 "turn_index": turn_index,
                 "verifier_kind": verifier_kind,
+                "task_family": task_family,
+                "difficulty_band": difficulty_band,
+                "difficulty_band_source": difficulty_band_source,
                 "resolved": resolved,
                 "fail_to_pass": fail_to_pass,
                 "pass_to_pass": pass_to_pass,

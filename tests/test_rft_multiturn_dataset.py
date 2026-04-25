@@ -73,6 +73,9 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
             "final_turn_has_submit": True,
             "final_submit_format_valid": True,
             "verifier_kind": "go_test",
+            "task_family": "func_basic",
+            "difficulty_band": "learnable",
+            "difficulty_band_source": "instance_id_family:exact",
             "fail_to_pass": ["tests/test_bug.py::test_bugfix"],
             "pass_to_pass": ["tests/test_ok.py::test_regression"],
         }
@@ -89,6 +92,8 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
     assert records[0]["reward_model"]["ground_truth"]["task_id"] == "task-1"
     assert records[0]["reward_model"]["ground_truth"]["resolved"] is True
     assert records[0]["reward_model"]["ground_truth"]["verifier_kind"] == "go_test"
+    assert records[0]["reward_model"]["ground_truth"]["task_family"] == "func_basic"
+    assert records[0]["reward_model"]["ground_truth"]["difficulty_band"] == "learnable"
     assert records[0]["reward_model"]["ground_truth"]["fail_to_pass"] == [
         "tests/test_bug.py::test_bugfix"
     ]
@@ -98,6 +103,9 @@ def test_build_multiturn_dataset_records_keeps_metadata() -> None:
     assert records[0]["fail_to_pass"] == ["tests/test_bug.py::test_bugfix"]
     assert records[0]["pass_to_pass"] == ["tests/test_ok.py::test_regression"]
     assert records[0]["verifier_kind"] == "go_test"
+    assert records[0]["task_family"] == "func_basic"
+    assert records[0]["difficulty_band"] == "learnable"
+    assert records[0]["difficulty_band_source"] == "instance_id_family:exact"
     assert records[0]["messages"][0]["role"] == "user"
     assert records[0]["messages"][-1]["role"] == "assistant"
     prompt_block = records[0]["prompt"][0]

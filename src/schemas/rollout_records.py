@@ -22,6 +22,9 @@ class RolloutRow(RolloutRowRequired, total=False):
     stage: str
     fail_to_pass: Any
     pass_to_pass: Any
+    task_family: str
+    difficulty_band: str
+    difficulty_band_source: str
     fail_to_pass_results: Any
     pass_to_pass_results: Any
     fail_to_pass_failures: Any
