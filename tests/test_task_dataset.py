@@ -1270,19 +1270,66 @@ def test_load_task_samples_reuses_partition_scoped_partial_rollout_probe_cache_w
         eval_split_fraction=0.25,
         min_eval_rows=1,
     )
-    train_task_samples = load_task_samples(
-        config=_rollout_probe_config(
-            str(cache_path),
-            rollout_probe_accept_partial=True,
-        ),
-        dataset_loader=lambda _dataset_id, _split: rows,
-        task_partition="train",
-        eval_split_fraction=0.25,
-        min_eval_rows=1,
-    )
 
     assert [task.task_id for task in eval_task_samples] == ["task-a"]
-    assert train_task_samples == []
+    with pytest.raises(ValueError, match="task_partition='eval'.*task_partition='train'"):
+        load_task_samples(
+            config=_rollout_probe_config(
+                str(cache_path),
+                rollout_probe_accept_partial=True,
+            ),
+            dataset_loader=lambda _dataset_id, _split: rows,
+            task_partition="train",
+            eval_split_fraction=0.25,
+            min_eval_rows=1,
+        )
+
+
+def test_load_task_samples_rejects_eval_request_for_train_scoped_partial_rollout_probe_cache(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_train.complete.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": dataset_module.ON_POLICY_DIFFICULTY_BAND_CACHE_SCHEMA_VERSION,
+                "probe_status": "complete",
+                "task_partition": "train",
+                "task_pool_size": 1,
+                "task_count_expected": 1,
+                "records": [
+                    {
+                        "task_id": "task-a",
+                        "task_family": "func_basic",
+                        "difficulty_band": "learnable",
+                        "difficulty_band_source": "rollout_probe:selected_2_of_4",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "task_id": "task-a",
+            "image_name": "img:1",
+            "problem_statement": "p1",
+            "FAIL_TO_PASS": ["f1"],
+            "PASS_TO_PASS": ["p1"],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="task_partition='train'.*task_partition='eval'"):
+        load_task_samples(
+            config=_rollout_probe_config(
+                str(cache_path),
+                rollout_probe_accept_partial=True,
+            ),
+            dataset_loader=lambda _dataset_id, _split: rows,
+            task_partition="eval",
+            eval_split_fraction=0.25,
+            min_eval_rows=1,
+        )
 
 
 def test_load_task_samples_rejects_train_eval_split_on_all_partition_partial_rollout_probe_cache(

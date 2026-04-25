@@ -952,8 +952,19 @@ def validate_partial_rollout_probe_partition_request(
         return
 
     cached_partition = _resolve_partial_rollout_probe_cached_partition(config)
-    if cached_partition != _TASK_PARTITION_ALL:
+    if cached_partition is None:
         return
+    if cached_partition == normalized_requested_partition:
+        return
+    if cached_partition != _TASK_PARTITION_ALL:
+        raise ValueError(
+            "Partial rollout-probe cache metadata is "
+            f"task_partition={cached_partition!r}, so it cannot satisfy "
+            f"task_partition={normalized_requested_partition!r} requests deterministically. "
+            f"Use a rollout-probe cache built for task_partition={normalized_requested_partition!r}, "
+            f"request task_partition={cached_partition!r}, or set eval_split_fraction=0 to consume "
+            "the labeled partial subset as task_partition='all'."
+        )
 
     raise ValueError(
         "Partial rollout-probe cache metadata is task_partition='all', so it cannot satisfy "
@@ -1115,7 +1126,11 @@ def load_task_samples(
             partial_rollout_probe_cached_partition,
         }:
             return tasks
-        return []
+        raise ValueError(
+            "Partial rollout-probe cache metadata is "
+            f"task_partition={partial_rollout_probe_cached_partition!r}, so it cannot satisfy "
+            f"task_partition={normalized_partition!r} requests deterministically."
+        )
     if normalized_partition == _TASK_PARTITION_ALL:
         return tasks
 

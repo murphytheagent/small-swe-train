@@ -96,8 +96,11 @@ if [[ "${DRY_RUN}" -eq 0 ]]; then
 fi
 
 SLURM_GPU_COUNT_RAW="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-}}"
+SLURM_TYPED_GPU_COUNT_RE=':([0-9]+)(\([^)]*\))?$'
 if [[ "${SLURM_GPU_COUNT_RAW}" =~ ^[0-9]+$ ]]; then
   VISIBLE_GPU_COUNT="${SLURM_GPU_COUNT_RAW}"
+elif [[ "${SLURM_GPU_COUNT_RAW}" =~ ${SLURM_TYPED_GPU_COUNT_RE} ]]; then
+  VISIBLE_GPU_COUNT="${BASH_REMATCH[1]}"
 elif [[ "${SLURM_GPU_COUNT_RAW}" =~ ([0-9]+) ]]; then
   VISIBLE_GPU_COUNT="${BASH_REMATCH[1]}"
 else

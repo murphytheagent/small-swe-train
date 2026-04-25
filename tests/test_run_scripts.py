@@ -623,6 +623,51 @@ def test_run_rft_script_dry_run_rejects_eval_split_for_all_partition_partial_rol
     assert "Set eval_split_fraction=0" in result.stderr
 
 
+def test_run_rft_script_dry_run_rejects_eval_scoped_partial_rollout_probe_cache_for_train_split(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "difficulty_bands_eval.complete.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "probe_status": "complete",
+                "task_partition": "eval",
+                "task_pool_size": 1,
+                "task_count_expected": 1,
+                "records": [
+                    {
+                        "task_id": "task-a",
+                        "task_family": "func_basic",
+                        "difficulty_band": "learnable",
+                        "difficulty_band_source": "rollout_probe:selected_2_of_4",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    script_path = _repo_root() / "scripts" / "run_rft.sh"
+    result = subprocess.run(
+        ["bash", str(script_path), "--dry-run"],
+        cwd=_repo_root(),
+        check=False,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "RFT_DATA_CONFIG_NAME": "on_policy_swe_smith_rollout_probe_partial",
+            "RFT_EVAL_SPLIT_FRACTION": "0.25",
+            "SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH": str(cache_path),
+        },
+    )
+
+    assert result.returncode == 1
+    assert "task_partition='eval'" in result.stderr
+    assert "task_partition='train'" in result.stderr
+
+
 def test_run_rft_script_dry_run_direct_mode_uses_cli_eval_split_override_for_partial_cache(
     tmp_path: Path,
 ) -> None:
@@ -1235,6 +1280,29 @@ def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_visible_gpus_for_tp
     assert "--task-batch-size 1024" in result.stdout
     assert "--env-pool-size 128" in result.stdout
     assert "--max-in-flight-tasks 128" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("slurm_gpus_on_node", "expected_tp"),
+    [
+        ("a100:4", "4"),
+        ("gpu:h100:8", "8"),
+    ],
+)
+def test_onpolicy_difficulty_probe_slurm_script_dry_run_uses_trailing_typed_gres_count(
+    slurm_gpus_on_node: str,
+    expected_tp: str,
+) -> None:
+    result = _run_script(
+        "run_onpolicy_difficulty_probe_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": slurm_gpus_on_node,
+            "PROBE_INITIAL_MODEL": "Qwen/Qwen3.5-9B",
+        },
+    )
+
+    assert f"--tensor-parallel-size {expected_tp}" in result.stdout
+    assert "--tensor-parallel-size 100" not in result.stdout
 
 
 def test_onpolicy_difficulty_probe_slurm_script_dry_run_passes_parallel_probe_overrides() -> None:

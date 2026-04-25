@@ -138,8 +138,11 @@ Computed from canonical feedback fields (when `feedback_processing.extract_self_
 
 ```text
 small-swe-train/
-  IMPLEMENTATION_BLUEPRINT.md    # architecture, data flow, milestones
-  design.md
+  AGENTS.md
+  README.md
+  STATUS.md
+  docs/
+    design.md                    # architecture, data flow, milestones
   pyproject.toml
   configs/
     runtime/
@@ -368,11 +371,11 @@ have regression tests in `tests/`.
 - New package `src/verl_integration/` bridges our protocol modules with verl hooks.
 - SDPO entrypoint: `src/verl_integration/main_ppo_entry.py` (applies runtime patches + registers agent loop).
 - RFT SFT entrypoint: `src/verl_integration/fsdp_sft_trainer_entry.py` (FlashAttention compatibility guard).
-- Full architecture, data flow, and milestone plan in `IMPLEMENTATION_BLUEPRINT.md`.
+- Full architecture, data flow, and milestone plan live in this design packet.
 
 ## 14) Sources
 - Qwen3 tokenizer chat template: https://huggingface.co/Qwen/Qwen3-4B/blob/main/tokenizer_config.json
 - SDPO baseline: https://github.com/lasgroup/SDPO
 - verl framework: https://github.com/verl-project/verl
 - Thread review: https://github.com/murphytheagent/small-swe-train/pull/2#discussion_r2835868321
-- Implementation blueprint: `IMPLEMENTATION_BLUEPRINT.md` (this repo)
+- Implementation blueprint: `design.md` (this directory)

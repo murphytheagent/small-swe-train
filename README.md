@@ -2,14 +2,10 @@
 
 Repository for a chat-style SWE training stack with `format_rft`, optional `positive_rft`, and `turn_sdpo` stages.
 
-Latest doc update: 2026-04-05.
+Latest doc update: 2026-04-25.
 
 ## Current status
-- `main` carries the held-out / positive-RFT fixes from merged PR `#26` (`1281994`) plus the earlier docs-first planning stack from PRs `#14`-`#17`, `#23`, and `#27`.
-- Active follow-up work now lives on branch surfaces for rollout-backed difficulty banding, JS/TS verifier planning, turn-SDPO entropy gating, and the earlier vLLM readiness fix; use the project report or live GitHub surface for exact PR state rather than treating this README as the review ledger.
-- The real missing artifact is no longer just “another staged remote run.” `2040` already proved `format_rft -> positive_rft` end to end, but positive-stage train still selected `0` rows while eval reached `6/64`, so there is still no usable positive-RFT checkpoint.
-- The next executable object is the first real `SWE-smith-py` difficulty-probe cache against the `2040` format-stage checkpoint; the rollout-backed cache path and one-shot node launcher exist, but the first full cache has not been materialized from this workstation yet.
-- The latest validated E2E proof is still the held-out `2040` chain plus the published banding/launcher work on the active difficulty-banding branch; the current JS/TS scope note stays on repo-aware Node verifier adapters rather than a generic `node_test` toggle.
+See `STATUS.md` for the current tracker and open follow-ups.
 
 Canonical staged pipeline:
 - `format_rft`
@@ -138,5 +134,6 @@ For 8-GPU runs (`NPROC_PER_NODE=8`), the locked rollout defaults are:
 
 ## Notes
 - End-to-end RFT runtime orchestration lives in `src/trainer/rft_runtime_loop.py`.
-- Design and implementation history remains in `design.md` and `IMPLEMENTATION_BLUEPRINT.md`.
-- SWE-smith language-expansion plan lives in `swe_smith_language_expansion_plan.md`.
+- Design and implementation history lives in `docs/design.md`.
+- SWE-smith language-expansion planning lives in `docs/swe_smith_language_expansion_plan.md`.
+- Additional research and implementation plans live under `docs/`.

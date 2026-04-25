@@ -38,6 +38,14 @@ train = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+py-modules = [
+  "config",
+  "qwen_vl_utils",
+  "runtime_paths",
+  "sitecustomize",
+  "small_swe_runtime_patches",
+  "verifier_utils",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
