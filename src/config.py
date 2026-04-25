@@ -10,15 +10,17 @@ from __future__ import annotations
 
 import functools
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import yaml
 
 from runtime_paths import (
+    DEFAULT_ON_POLICY_DIFFICULTY_BAND_CACHE_RELATIVE_DIR,
     DEFAULT_ON_POLICY_BAD_TASK_CACHE_RELATIVE_DIR,
     DEFAULT_SDPO_TASK_CACHE_RELATIVE_DIR,
+    resolve_on_policy_difficulty_band_cache_dir,
     resolve_on_policy_bad_task_cache_dir,
     resolve_sdpo_task_cache_dir,
 )
@@ -46,12 +48,26 @@ class OnPolicyDatasetColumns:
 
 
 @dataclass(frozen=True)
+class OnPolicyDifficultyBandConfig:
+    strategy: str = "none"
+    default_band: str = "unbanded"
+    family_band_exact: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    family_band_prefix: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    rollout_probe_cache_path: str = ""
+    rollout_probe_required: bool = False
+    rollout_probe_accept_partial: bool = False
+
+
+@dataclass(frozen=True)
 class OnPolicyDataConfig:
     dataset_id: str
     dataset_split: str
     columns: OnPolicyDatasetColumns
     patch_is_bug_introducing: bool = True
     verifier_kind: str = "pytest"
+    difficulty_banding: OnPolicyDifficultyBandConfig = field(
+        default_factory=OnPolicyDifficultyBandConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -342,6 +358,14 @@ def _coerce_non_empty_str(value: Any, *, label: str) -> str:
     return value.strip()
 
 
+def _coerce_optional_str(value: Any) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("Optional string value must be either None or a string.")
+    return value
+
+
 def _coerce_positive_int(value: Any, *, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{label} must be an integer >= 1.")
@@ -360,6 +384,24 @@ def _coerce_non_negative_int(value: Any, *, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{label} must be an integer >= 0.")
     return value
+
+
+def _coerce_non_empty_string_pairs(
+    value: Any,
+    *,
+    label: str,
+) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a mapping of non-empty strings.")
+
+    items: list[tuple[str, str]] = []
+    for raw_key, raw_mapped_value in value.items():
+        key = _coerce_non_empty_str(raw_key, label=f"{label}.key")
+        mapped_value = _coerce_non_empty_str(raw_mapped_value, label=f"{label}.{key}")
+        items.append((key, mapped_value))
+    return tuple(items)
 
 
 def _parse_on_policy_data_config(payload: Mapping[str, Any]) -> OnPolicyDataConfig:
@@ -400,6 +442,9 @@ def _parse_on_policy_data_config(payload: Mapping[str, Any]) -> OnPolicyDataConf
         verifier_kind=normalize_verifier_kind(
             payload.get("verifier_kind", "pytest"),
             label="on_policy.data.verifier_kind",
+        ),
+        difficulty_banding=_parse_on_policy_difficulty_band_config(
+            payload.get("difficulty_banding")
         ),
     )
 
@@ -483,15 +528,85 @@ def _merge_on_policy_data_payload(
     base: Mapping[str, Any],
     overrides: Mapping[str, Any],
 ) -> dict[str, Any]:
+    def _merge_mapping_values(
+        existing: Mapping[str, Any],
+        incoming: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        merged_mapping = dict(existing)
+        for nested_key, nested_value in incoming.items():
+            current_value = merged_mapping.get(nested_key)
+            if isinstance(current_value, Mapping) and isinstance(nested_value, Mapping):
+                merged_child = dict(current_value)
+                merged_child.update(nested_value)
+                merged_mapping[nested_key] = merged_child
+            else:
+                merged_mapping[nested_key] = nested_value
+        return merged_mapping
+
     merged = dict(base)
     for key, value in overrides.items():
         if key == "columns" and isinstance(value, Mapping) and isinstance(merged.get("columns"), Mapping):
-            columns = dict(merged["columns"])
-            columns.update(value)
-            merged["columns"] = columns
+            merged["columns"] = _merge_mapping_values(merged["columns"], value)
+        elif (
+            key == "difficulty_banding"
+            and isinstance(value, Mapping)
+            and isinstance(merged.get("difficulty_banding"), Mapping)
+        ):
+            merged["difficulty_banding"] = _merge_mapping_values(
+                merged["difficulty_banding"],
+                value,
+            )
         else:
             merged[key] = value
     return merged
+
+
+def _parse_on_policy_difficulty_band_config(
+    payload: Any,
+) -> OnPolicyDifficultyBandConfig:
+    if payload is None:
+        return OnPolicyDifficultyBandConfig()
+
+    banding_payload = _require_mapping(
+        payload,
+        label="on_policy.data.difficulty_banding",
+    )
+    strategy = _coerce_non_empty_str(
+        banding_payload.get("strategy", "none"),
+        label="on_policy.data.difficulty_banding.strategy",
+    )
+    if strategy not in {"none", "instance_id_family", "rollout_probe"}:
+        raise ValueError(
+            "on_policy.data.difficulty_banding.strategy must be one of: "
+            "'none', 'instance_id_family', 'rollout_probe'."
+        )
+
+    return OnPolicyDifficultyBandConfig(
+        strategy=strategy,
+        default_band=_coerce_non_empty_str(
+            banding_payload.get("default_band", "unbanded"),
+            label="on_policy.data.difficulty_banding.default_band",
+        ),
+        family_band_exact=_coerce_non_empty_string_pairs(
+            banding_payload.get("family_band_exact", {}),
+            label="on_policy.data.difficulty_banding.family_band_exact",
+        ),
+        family_band_prefix=_coerce_non_empty_string_pairs(
+            banding_payload.get("family_band_prefix", {}),
+            label="on_policy.data.difficulty_banding.family_band_prefix",
+        ),
+        rollout_probe_cache_path=_coerce_optional_str(
+            banding_payload.get("rollout_probe_cache_path", "")
+        ).strip(),
+        rollout_probe_required=_coerce_bool(
+            banding_payload.get("rollout_probe_required", False),
+            label="on_policy.data.difficulty_banding.rollout_probe_required",
+        ),
+        rollout_probe_accept_partial=_coerce_bool(
+            banding_payload.get("rollout_probe_accept_partial", False),
+            label="on_policy.data.difficulty_banding.rollout_probe_accept_partial",
+        ),
+    )
 
 
 def _resolve_on_policy_runtime_scale_defaults() -> dict[str, int]:

@@ -2,15 +2,10 @@
 
 Repository for a chat-style SWE training stack with `format_rft`, optional `positive_rft`, and `turn_sdpo` stages.
 
-Latest doc update: 2026-04-01.
+Latest doc update: 2026-04-25.
 
 ## Current status
-- `main` now carries the held-out / positive-RFT fixes from merged PR `#26` (`1281994`) plus the docs-first planning stack from PRs `#14`-`#17`, `#23`, and `#27` (`c2831a6`, `d171bbf`, `940cc8e`, `be3f3d1`, `4c38d6a`, `ae492c6`). There is no open GitHub PR surface left on this repo.
-- The real missing artifact is still the staged remote `format_rft 3 -> positive_rft 3` run. The scratch checkout and launcher remain ready at `/data/scratch/murphy/projects/worktrees/small-swe-train-1773739092/tmp/run_format_positive_e2e.sh`.
-- The old queue note in earlier maintenance docs is stale: `wth-gpu-01` is now `mixed`, with only `zhijianliu`'s 1-GPU job `1942` scheduled through `2026-04-01 14:27 UTC`, so the next step is a readiness check plus requeue rather than waiting for a full-node blocker to disappear.
-- Wangzhi's latest instruction is to queue the job once readiness is confirmed and then let him monitor completion; there is no need to babysit the queue from here.
-- PR #18 (`plan/1772102085-current-turn-supervision`) merged into `main` on 2026-03-08 05:02 UTC, so current-turn supervision is now on the base branch.
-- The latest validated E2E execution remains the 8-GPU rerun chain `826` / `827` / `828`; detailed metrics and follow-up notes live in `IMPLEMENTATION_BLUEPRINT.md`.
+See `STATUS.md` for the current tracker and open follow-ups.
 
 Canonical staged pipeline:
 - `format_rft`
@@ -139,5 +134,6 @@ For 8-GPU runs (`NPROC_PER_NODE=8`), the locked rollout defaults are:
 
 ## Notes
 - End-to-end RFT runtime orchestration lives in `src/trainer/rft_runtime_loop.py`.
-- Design and implementation history remains in `design.md` and `IMPLEMENTATION_BLUEPRINT.md`.
-- SWE-smith language-expansion plan lives in `swe_smith_language_expansion_plan.md`.
+- Design and implementation history lives in `docs/design.md`.
+- SWE-smith language-expansion planning lives in `docs/swe_smith_language_expansion_plan.md`.
+- Additional research and implementation plans live under `docs/`.

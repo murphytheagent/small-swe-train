@@ -245,9 +245,14 @@ if [[ -n "${RESOLVED_RFT_CHECKPOINT}" ]]; then
   PILOT_CMD+=(--rft-checkpoint "${RESOLVED_RFT_CHECKPOINT}")
 fi
 
+FULL_PILOT_CMD=("${PILOT_CMD[@]}")
+if (( ${#PILOT_EXTRA_ARGS[@]} > 0 )); then
+  FULL_PILOT_CMD+=("${PILOT_EXTRA_ARGS[@]}")
+fi
+
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   printf '%q ' "${VLLM_CMD[@]}"; printf '\n'
-  printf '%q ' "${PILOT_CMD[@]}" "${PILOT_EXTRA_ARGS[@]}"; printf '\n'
+  printf '%q ' "${FULL_PILOT_CMD[@]}"; printf '\n'
   exit 0
 fi
 
@@ -287,4 +292,4 @@ if [[ "${READY}" -ne 1 ]]; then
   exit 1
 fi
 
-"${PILOT_CMD[@]}" "${PILOT_EXTRA_ARGS[@]}"
+"${FULL_PILOT_CMD[@]}"

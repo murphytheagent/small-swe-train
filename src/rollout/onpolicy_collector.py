@@ -222,6 +222,7 @@ class OnPolicyRolloutCollector:
             task_partition=self._task_partition,
             eval_split_fraction=self._task_eval_split_fraction,
             min_eval_rows=self._task_eval_min_rows,
+            stage_name=self._stage_name,
         )
 
         max_workers = max(1, min(runtime.max_in_flight_tasks, runtime.env_pool_size, len(tasks)))
@@ -502,6 +503,9 @@ class OnPolicyRolloutCollector:
             "step_index": row_step_index,
             "task_id": task.task_id,
             "image_name": task.image_name,
+            "task_family": task.task_family,
+            "difficulty_band": task.difficulty_band,
+            "difficulty_band_source": task.difficulty_band_source,
             "attempt_index": attempt_index,
             "turn_index": row_turn_index,
             "container_id": handle.container_id,

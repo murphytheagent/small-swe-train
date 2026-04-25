@@ -22,13 +22,10 @@ if [[ -z "${POOL_NAMES}" ]]; then
   exit 0
 fi
 
-declare -A active_job_ids=()
-while IFS= read -r job_id; do
-  [[ -n "${job_id}" ]] || continue
-  active_job_ids["${job_id}"]=1
-done < <(squeue -h -o "%i" 2>/dev/null || true)
-
-declare -A seen_container_ids=()
+ACTIVE_JOB_IDS="$(
+  squeue -h -o "%i" 2>/dev/null || true
+)"
+SEEN_CONTAINER_IDS=""
 stale_container_ids=()
 stale_job_ids=()
 stale_pool_names=()
@@ -38,13 +35,13 @@ for pool_name in ${POOL_NAMES}; do
   while IFS=' ' read -r container_id job_id; do
     [[ -n "${container_id}" ]] || continue
     [[ -n "${job_id}" ]] || continue
-    if [[ -n "${active_job_ids[${job_id}]:-}" ]]; then
+    if printf '%s\n' "${ACTIVE_JOB_IDS}" | grep -Fqx -- "${job_id}"; then
       continue
     fi
-    if [[ -n "${seen_container_ids[${container_id}]:-}" ]]; then
+    if printf '%s\n' "${SEEN_CONTAINER_IDS}" | grep -Fqx -- "${container_id}"; then
       continue
     fi
-    seen_container_ids["${container_id}"]=1
+    SEEN_CONTAINER_IDS="${SEEN_CONTAINER_IDS}"$'\n'"${container_id}"
     stale_container_ids+=("${container_id}")
     stale_job_ids+=("${job_id}")
     stale_pool_names+=("${pool_name}")

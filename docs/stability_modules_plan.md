@@ -49,7 +49,7 @@ Current `main` still reflects the old pipeline in multiple places:
 
 - `configs/runtime/training_policy_defaults.v1.json` still advertises `rft -> sdft_optional -> sdpo_main`
 - `scripts/run_sdft.sh` still exists as a first-class launcher
-- `README.md`, `IMPLEMENTATION_BLUEPRINT.md`, and launcher docs still contain `sdft`, `sdpo_main`, and `step_sdpo` naming
+- `../README.md`, `design.md`, and launcher docs still contain `sdft`, `sdpo_main`, and `step_sdpo` naming
 
 ### 3.2 Masking drift
 
@@ -127,7 +127,7 @@ Important distinction:
   - replace `sdft_optional` / `sdpo_main` naming
   - add `positive_rft` as the optional stage
 - remove `scripts/run_sdft.sh` from the active launcher set
-- update `README.md`, `IMPLEMENTATION_BLUEPRINT.md`, and Slurm docs
+- update `../README.md`, `design.md`, and Slurm docs
 - remove or archive SDFT-specific references that still imply it is part of the intended path
 
 #### B. Make the stage vocabulary consistent

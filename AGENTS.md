@@ -6,7 +6,8 @@
 - `configs/` stores runtime defaults and training configs; see `configs/README.md` and `configs/runtime/training_policy_defaults.v1.json`.
 - `scripts/` provides launch helpers for RFT/SDPO and utilities (e.g., `scripts/run_rft.sh`, `scripts/run_sdpo.sh`).
 - `data/`, `assets/`, `outputs/`, and `benchmarks/` contain fixtures, media, run artifacts, and benchmark assets.
-- Design history and implementation notes live in `design.md` and `IMPLEMENTATION_BLUEPRINT.md`.
+- Root docs are limited to `AGENTS.md`, `README.md`, and `STATUS.md`; keep all other Markdown documentation under `docs/`.
+- `STATUS.md` is the current status and todo tracker. Design history and implementation notes live under `docs/` (starting with `docs/design.md`).
 
 ## Build, Test, and Development Commands
 - `make build-train CORES=2` — syncs training deps with `uv` and verifies `flash-attn`.
@@ -33,3 +34,9 @@
 - Commit messages in this repo are short, imperative, sentence case (e.g., “Fix turn-span fallback”). Avoid noisy prefixes unless needed.
 - PRs should include a concise summary, testing notes (`uv run python -m pytest ...`), and links to related issues or plans when applicable.
 - For runtime changes, call out config keys touched and any new environment variables (for example, `SMALL_SWE_VLLM_*`).
+
+## Documentation Guidelines
+- Keep `README.md` focused on orientation, setup, and launch commands.
+- Keep `STATUS.md` focused on active status, next actions, and known blockers.
+- Put research notes, migration plans, evaluation plans, and implementation design packets in `docs/`.
+- When moving or adding docs, update relative links in `README.md`, `STATUS.md`, `AGENTS.md`, and neighboring docs.

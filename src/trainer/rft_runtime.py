@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME
 from data.tokenization import SupportsOffsetsTokenizer
+from env.task_dataset import DatasetLoader
 from rollout.vllm_turn_generator import build_vllm_turn_generator
 from trainer.rft_handoff import (
     build_onpolicy_collector,
@@ -31,6 +32,7 @@ class OnPolicyRFTRuntimeRequest:
     task_eval_min_rows: int = 0
     verify_submissions: bool = False
     stage_name: str = "format_rft"
+    dataset_loader: DatasetLoader | None = None
 
 
 def collect_onpolicy_rft_runtime_batch(
@@ -52,6 +54,7 @@ def collect_onpolicy_rft_runtime_batch(
         task_eval_split_fraction=request.task_eval_split_fraction,
         task_eval_min_rows=request.task_eval_min_rows,
         stage_name=request.stage_name,
+        dataset_loader=request.dataset_loader,
     )
 
     resolved_output_dir = _normalized_output_dir(request.output_dir)
@@ -140,6 +143,36 @@ def _build_runtime_manifest_payload(
         "selected_count": len(selected_rows),
         "rejected_count": len(rejected_rows),
         "rejection_reason_counts": dict(sorted(rejection_reason_counts.items())),
+        "rollout_task_family_counts": _count_rows_by_text_field(
+            rollout_rows,
+            field_name="task_family",
+            default_label="unknown",
+        ),
+        "rollout_difficulty_band_counts": _count_rows_by_text_field(
+            rollout_rows,
+            field_name="difficulty_band",
+            default_label="unbanded",
+        ),
+        "selected_task_family_counts": _count_rows_by_text_field(
+            selected_rows,
+            field_name="task_family",
+            default_label="unknown",
+        ),
+        "selected_difficulty_band_counts": _count_rows_by_text_field(
+            selected_rows,
+            field_name="difficulty_band",
+            default_label="unbanded",
+        ),
+        "rejected_task_family_counts": _count_rows_by_text_field(
+            rejected_rows,
+            field_name="task_family",
+            default_label="unknown",
+        ),
+        "rejected_difficulty_band_counts": _count_rows_by_text_field(
+            rejected_rows,
+            field_name="difficulty_band",
+            default_label="unbanded",
+        ),
         "dataproto_meta_info": dict(meta_info),
     }
 
@@ -158,6 +191,19 @@ def _coerce_rows(value: Any) -> list[dict[str, Any]]:
         if isinstance(item, Mapping):
             rows.append(dict(item))
     return rows
+
+
+def _count_rows_by_text_field(
+    rows: list[dict[str, Any]],
+    *,
+    field_name: str,
+    default_label: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        label = str(row.get(field_name, "")).strip() or default_label
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

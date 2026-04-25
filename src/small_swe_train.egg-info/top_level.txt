@@ -1,11 +1,17 @@
+config
 data
 env
 eval
 losses
 metrics
 prompts
+qwen_vl_utils
 rollout
+runtime_paths
 schemas
+sitecustomize
+small_swe_runtime_patches
 teacher
 trainer
+verifier_utils
 verl_integration
