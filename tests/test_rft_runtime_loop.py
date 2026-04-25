@@ -2709,6 +2709,18 @@ def test_http_readiness_requires_2xx(monkeypatch) -> None:
     assert _is_http_endpoint_ready("http://127.0.0.1:8000/v1/models") is False
 
 
+def test_build_models_url_normalizes_bare_host_and_existing_api_paths() -> None:
+    assert rft_runtime_loop._build_models_url("http://127.0.0.1:8000") == (
+        "http://127.0.0.1:8000/v1/models"
+    )
+    assert rft_runtime_loop._build_models_url("http://127.0.0.1:8000/v1") == (
+        "http://127.0.0.1:8000/v1/models"
+    )
+    assert rft_runtime_loop._build_models_url(
+        "http://127.0.0.1:8000/v1/chat/completions"
+    ) == "http://127.0.0.1:8000/v1/models"
+
+
 def test_http_readiness_rejects_http_error(monkeypatch) -> None:
     def _raise_http_error(request, timeout):
         raise HTTPError(
