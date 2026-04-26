@@ -63,7 +63,7 @@ validate_model_reference() {
 INITIAL_MODEL="${PROBE_INITIAL_MODEL:-}"
 if [[ -z "${INITIAL_MODEL}" ]]; then
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    INITIAL_MODEL="Qwen/Qwen3-4B-Instruct-2507"
+    INITIAL_MODEL="Qwen/Qwen3-8B"
   else
     echo "Set PROBE_INITIAL_MODEL to the format-stage checkpoint or model to probe." >&2
     exit 1

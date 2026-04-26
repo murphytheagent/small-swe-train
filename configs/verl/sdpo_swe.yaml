@@ -2,7 +2,7 @@
 # Extends lasgroup/SDPO's sdpo.yaml with SWE-bench-specific settings
 #
 # Hardware target: single node, 8× A100/H100 GPUs
-# Model: Qwen3-4B-Instruct-2507 with LoRA
+# Model: Qwen3-8B with LoRA; thinking is disabled by launcher/tokenizer defaults.
 # Sequence budget: up to ~19K tokens (prompt + trajectory + response)
 #
 # Usage:
@@ -103,8 +103,8 @@ actor_rollout_ref:
 
     # -- Mini-batch / micro-batch ----------------------------------------------
     ppo_mini_batch_size: 8
-    ppo_micro_batch_size_per_gpu: 2
-    ppo_max_token_len_per_gpu: 24576
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: 16384
     ppo_epochs: 1                             # on-policy: single pass
 
     # -- Entropy ---------------------------------------------------------------
@@ -148,11 +148,11 @@ actor_rollout_ref:
     n: 2                                     # rollouts per prompt
     temperature: 0.7
     top_p: 0.95
-    gpu_memory_utilization: 0.9
-    max_num_batched_tokens: 262144
-    max_num_seqs: 96
+    gpu_memory_utilization: 0.80
+    max_num_batched_tokens: 131072
+    max_num_seqs: 32
     load_format: dummy
-    log_prob_micro_batch_size_per_gpu: 4
+    log_prob_micro_batch_size_per_gpu: 1
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     calculate_log_probs: true

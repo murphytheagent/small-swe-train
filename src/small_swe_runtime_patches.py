@@ -104,6 +104,7 @@ _WANDB_ESSENTIAL_EXACT_KEYS = {
 }
 
 _WANDB_ESSENTIAL_PREFIXES = (
+    "profiler/",
     "val-aux/num_turns/",
 )
 _VERIFIER_FEEDBACK_NONE = "none"
@@ -832,6 +833,31 @@ def _install_tokenizer_pad_tensor_guard(tokenizer: Any) -> None:
     setattr(tokenizer, "_small_swe_pad_tensor_guard_installed", True)
 
 
+def _install_qwen_no_thinking_chat_template_default(tokenizer: Any) -> None:
+    if tokenizer is None:
+        return
+    if getattr(tokenizer, "_small_swe_no_thinking_chat_template_default", False):
+        return
+    original_apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(original_apply_chat_template):
+        return
+
+    def _small_swe_apply_chat_template(*args, **kwargs):
+        template_kwargs = dict(kwargs.get("chat_template_kwargs") or {})
+        caller_provided_enable_thinking = (
+            "enable_thinking" in kwargs or "enable_thinking" in template_kwargs
+        )
+        template_kwargs.setdefault("enable_thinking", False)
+        if not caller_provided_enable_thinking:
+            kwargs["enable_thinking"] = False
+        kwargs["chat_template_kwargs"] = template_kwargs
+        return original_apply_chat_template(*args, **kwargs)
+
+    _small_swe_apply_chat_template.__name__ = "_small_swe_apply_chat_template"
+    tokenizer.apply_chat_template = _small_swe_apply_chat_template
+    setattr(tokenizer, "_small_swe_no_thinking_chat_template_default", True)
+
+
 def _install_verl_tokenizer_compat_patches() -> None:
     try:
         from verl.utils import tokenizer as tokenizer_module
@@ -873,6 +899,7 @@ def _install_verl_tokenizer_compat_patches() -> None:
                 raise
         _suppress_fast_tokenizer_pad_warning(tokenizer)
         _install_tokenizer_pad_tensor_guard(tokenizer)
+        _install_qwen_no_thinking_chat_template_default(tokenizer)
         return tokenizer
 
     def _small_swe_hf_processor(name_or_path, *args, **kwargs):

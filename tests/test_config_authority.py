@@ -71,8 +71,68 @@ def test_xml_tool_schema_is_derived_from_tool_schemas() -> None:
 def test_default_training_model_name_is_loaded_from_shared_verl_config() -> None:
     defaults = config.verl_model_defaults()
     assert defaults["model_defaults"]["primary_name"] == config.DEFAULT_TRAINING_MODEL_NAME
+    assert config.DEFAULT_TRAINING_MODEL_NAME == "Qwen/Qwen3-8B"
     assert isinstance(config.DEFAULT_TRAINING_MODEL_NAME, str)
     assert config.DEFAULT_TRAINING_MODEL_NAME.strip()
+
+
+def test_default_model_metadata_fixture_is_text_only() -> None:
+    metadata = config.load_model_metadata_fixture(config.DEFAULT_TRAINING_MODEL_NAME)
+    config.validate_text_only_model_metadata(config.DEFAULT_TRAINING_MODEL_NAME, metadata)
+
+
+def test_multimodal_qwen_metadata_fixture_is_rejected() -> None:
+    model_id = "Qwen/Qwen3.5-9B"
+    metadata = config.load_model_metadata_fixture(model_id)
+    with pytest.raises(ValueError, match="not text-only|multimodal"):
+        config.validate_text_only_model_metadata(model_id, metadata)
+
+
+def test_live_training_defaults_have_no_stale_4b_model_references() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    checked_paths = [
+        repo_root / "configs" / "verl" / "model_defaults.yaml",
+        repo_root / "configs" / "verl" / "rft_swe.yaml",
+        repo_root / "configs" / "verl" / "sdpo_swe.yaml",
+        repo_root / "configs" / "runtime" / "training_policy_defaults.v1.json",
+        repo_root / "scripts" / "run_rft.sh",
+        repo_root / "scripts" / "run_sdpo.sh",
+        repo_root / "scripts" / "run_teacher_reprompt_pilot_slurm.sh",
+        repo_root / "scripts" / "run_onpolicy_difficulty_probe_slurm.sh",
+    ]
+
+    offenders = [
+        str(path.relative_to(repo_root))
+        for path in checked_paths
+        if "Qwen3-4B" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
+
+
+def test_8b_memory_defaults_are_configured() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    rft_payload = yaml.safe_load((repo_root / "configs/verl/rft_swe.yaml").read_text(encoding="utf-8"))
+    sdpo_payload = yaml.safe_load((repo_root / "configs/verl/sdpo_swe.yaml").read_text(encoding="utf-8"))
+    runtime_defaults = config.rft_runtime_defaults()
+
+    assert rft_payload["data"]["micro_batch_size_per_gpu"] == 1
+    rft_rollout = rft_payload["actor_rollout_ref"]["rollout"]
+    assert rft_rollout["gpu_memory_utilization"] == 0.75
+    assert rft_rollout["max_num_seqs"] == 32
+    assert rft_rollout["max_num_batched_tokens"] == 131072
+    assert runtime_defaults["loop"]["train_min_rows"] == runtime_defaults["loop"]["train_batch_size"]
+    assert runtime_defaults["vllm"]["model_name"] == "Qwen/Qwen3-8B"
+
+    actor_cfg = sdpo_payload["actor_rollout_ref"]["actor"]
+    rollout_cfg = sdpo_payload["actor_rollout_ref"]["rollout"]
+    ref_cfg = sdpo_payload["actor_rollout_ref"]["ref"]
+    assert actor_cfg["ppo_micro_batch_size_per_gpu"] == 1
+    assert actor_cfg["ppo_max_token_len_per_gpu"] == 16384
+    assert rollout_cfg["log_prob_micro_batch_size_per_gpu"] == 1
+    assert ref_cfg["log_prob_micro_batch_size_per_gpu"] == 1
+    assert rollout_cfg["gpu_memory_utilization"] == 0.80
+    assert rollout_cfg["max_num_batched_tokens"] == 131072
+    assert rollout_cfg["max_num_seqs"] == 32
 
 
 def test_sdpo_task_cache_default_is_centralized() -> None:

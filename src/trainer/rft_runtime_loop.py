@@ -21,10 +21,18 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+import yaml
+
 from config import resolve_rft_collector_max_in_flight_default, resolve_rft_handoff_settings
+from metrics.profiler import append_profiler_jsonl, nvidia_smi_utilization, token_profile_metrics
 from trainer.rft_multiturn_dataset import (
     build_multiturn_messages,
-    write_selected_rows_to_multiturn_parquet,
+)
+from trainer.rft_token_cache import (
+    RFT_TOKEN_CACHE_SCHEMA_VERSION,
+    build_rft_token_cache_fingerprint,
+    build_token_cache_records,
+    write_selected_rows_to_token_cache_parquet as write_selected_rows_to_multiturn_parquet,
 )
 from trainer.rft_runtime import OnPolicyRFTRuntimeRequest, collect_onpolicy_rft_runtime_batch
 
@@ -41,6 +49,7 @@ _VLLM_OPENAI_SERVER_SOURCE = (
 )
 _MICRO_BATCH_SIZE_KEY = "data.micro_batch_size_per_gpu"
 _DATA_MAX_LENGTH_KEY = "data.max_length"
+_APPLY_CHAT_TEMPLATE_KWARGS_KEY = "data.apply_chat_template_kwargs"
 # Keep periodic saves effectively disabled for inner SFT loops while still
 # allowing the trainer's end-of-run checkpoint export to materialize.
 _INNER_SFT_CHECKPOINT_DISABLED_SAVE_FREQ = 2_147_483_647
@@ -107,6 +116,7 @@ class RFTLoopConfig:
     collector_max_turns_per_attempt: int | None = None
     eval_split_fraction: float = 0.1
     eval_min_rows: int = 1
+    train_min_rows: int | None = None
     stage_name: str = _FORMAT_RFT_STAGE_NAME
 
 
@@ -683,6 +693,14 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         config_name=config.config_name,
         trainer_overrides=config.trainer_overrides,
     )
+    chat_template_kwargs = resolve_apply_chat_template_kwargs(
+        config_dir=config.config_dir,
+        config_name=config.config_name,
+        trainer_overrides=config.trainer_overrides,
+    )
+    effective_train_min_rows = (
+        config.train_min_rows if config.train_min_rows is not None else config.train_batch_size
+    )
     default_manifest_config = {
         "rft_steps": config.rft_steps,
         "samples_per_task": config.samples_per_task,
@@ -696,8 +714,10 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         "sft_num_epoch_per_batch": config.sft_num_epoch_per_batch,
         "checkpoint_keep_last": config.checkpoint_keep_last,
         "train_batch_size": config.train_batch_size,
+        "train_min_rows": effective_train_min_rows,
         "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
         "trainer_data_max_length": trainer_data_max_length,
+        "apply_chat_template_kwargs": dict(chat_template_kwargs),
         "data_config_name": config.data_config_name,
         "turn_generator_mode": config.turn_generator_mode,
         "initial_model": config.initial_model,
@@ -748,6 +768,18 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         return
 
     tokenizer = _load_tokenizer(config.initial_model)
+    token_cache_fingerprint = build_rft_token_cache_fingerprint(
+        tokenizer=tokenizer,
+        max_model_len=trainer_data_max_length,
+        data_max_length=trainer_data_max_length,
+        chat_template_kwargs=chat_template_kwargs,
+        project_root=config.project_root,
+    )
+    runtime_manifest["rft_token_cache"] = {
+        "schema_version": RFT_TOKEN_CACHE_SCHEMA_VERSION,
+        "fingerprint": token_cache_fingerprint,
+        "chat_template_kwargs": dict(chat_template_kwargs),
+    }
     current_model_path = (
         str(latest_committed_checkpoint.resume_model_path)
         if latest_committed_checkpoint is not None
@@ -772,7 +804,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
 
     try:
         if config.manage_vllm:
+            initial_vllm_start = time.monotonic()
             vllm_controller.start(model_path=current_model_path)
+            runtime_manifest["initial_vllm_start_sec"] = time.monotonic() - initial_vllm_start
 
         for step_index in range(start_step_index, config.rft_steps):
             step_start = time.monotonic()
@@ -834,6 +868,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 selected_rows=train_selected_rows,
                 tokenizer=tokenizer,
                 max_sequence_length=effective_keep_budget,
+                chat_template_kwargs=chat_template_kwargs,
             )
             selected_count_after_max_length_filter = len(train_selected_rows)
             avg_generation_length = compute_average_generation_length(
@@ -858,6 +893,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             latest_vllm_checkpoint: Path | None = None
             pruned_global_step_checkpoints: list[Path] = []
             trainer_duration_sec: float | None = None
+            token_cache_write_duration_sec = 0.0
+            vllm_restart_duration_sec: float | None = None
             trainer_metrics: dict[str, float | int] = {}
             trainer_skipped = False
             skip_reason: str | None = None
@@ -870,6 +907,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             eval_collect_duration_sec = 0.0
             eval_selected_rows: list[dict[str, Any]] = []
             eval_rejected_rows: list[dict[str, Any]] = []
+            profiler_attention_masks: list[list[int]] = []
+            profiler_loss_masks: list[list[int]] = []
 
             if config.eval_split_fraction > 0.0:
                 eval_request = OnPolicyRFTRuntimeRequest(
@@ -902,6 +941,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                     selected_rows=eval_selected_rows,
                     tokenizer=tokenizer,
                     max_sequence_length=effective_keep_budget,
+                    chat_template_kwargs=chat_template_kwargs,
                 )
                 eval_selected_count_after_length_filter = len(eval_selected_rows)
 
@@ -917,14 +957,27 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 if selected_count_for_train_raw < 1:
                     trainer_skipped = True
                     skip_reason = "empty_train_split"
+                elif selected_count_for_train_raw < effective_train_min_rows:
+                    raise RuntimeError(
+                        "RFT selected train rows are below the required minimum before "
+                        "inner SFT launch: "
+                        f"{selected_count_for_train_raw} < {effective_train_min_rows}. "
+                        "Increase collection volume or lower --train-min-rows explicitly."
+                    )
 
                 world_size = config.nnodes * config.nproc_per_node
                 if not trainer_skipped:
                     effective_eval_batch_size = world_size * micro_batch_size_per_gpu
+                    token_cache_write_start = time.monotonic()
                     selected_count_for_train = write_selected_rows_to_multiturn_parquet(
                         selected_rows_for_train,
                         train_parquet_path,
+                        tokenizer=tokenizer,
+                        max_sequence_length=effective_keep_budget,
+                        cache_fingerprint=token_cache_fingerprint,
+                        chat_template_kwargs=chat_template_kwargs,
                     )
+                    token_cache_write_duration_sec = time.monotonic() - token_cache_write_start
                     if selected_rows_for_eval:
                         selected_rows_for_eval, selected_rows_eval_upsampled = (
                             upsample_selected_rows_to_batch_multiple(
@@ -935,6 +988,10 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                         selected_count_for_eval = write_selected_rows_to_multiturn_parquet(
                             selected_rows_for_eval,
                             eval_parquet_path,
+                            tokenizer=tokenizer,
+                            max_sequence_length=effective_keep_budget,
+                            cache_fingerprint=token_cache_fingerprint,
+                            chat_template_kwargs=chat_template_kwargs,
                         )
                         resolved_val_parquet_path = eval_parquet_path
                     else:
@@ -958,10 +1015,27 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                             )
                         )
                         if selected_rows_upsampled > 0:
+                            token_cache_rewrite_start = time.monotonic()
                             selected_count_for_train = write_selected_rows_to_multiturn_parquet(
                                 selected_rows_for_train,
                                 train_parquet_path,
+                                tokenizer=tokenizer,
+                                max_sequence_length=effective_keep_budget,
+                                cache_fingerprint=token_cache_fingerprint,
+                                chat_template_kwargs=chat_template_kwargs,
                             )
+                            token_cache_write_duration_sec += (
+                                time.monotonic() - token_cache_rewrite_start
+                            )
+                        profiler_attention_masks, profiler_loss_masks = (
+                            _selected_rows_masks_for_profiler(
+                                selected_rows_for_train,
+                                tokenizer=tokenizer,
+                                max_sequence_length=effective_keep_budget,
+                                cache_fingerprint=token_cache_fingerprint,
+                                chat_template_kwargs=chat_template_kwargs,
+                            )
+                        )
                         trainer_command = build_trainer_step_command(
                             python_bin=config.python_bin,
                             nnodes=config.nnodes,
@@ -974,7 +1048,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                             val_parquet_path=resolved_val_parquet_path,
                             trainer_output_dir=trainer_checkpoint_root,
                             train_batch_size=effective_train_batch_size,
+                            train_min_rows=effective_train_min_rows,
                             sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
+                            token_cache_fingerprint=token_cache_fingerprint,
                             trainer_overrides=config.trainer_overrides,
                         )
 
@@ -1029,7 +1105,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                         # Restarting after the final step adds unnecessary startup cost
                         # and can surface avoidable restart-path failures.
                         if config.manage_vllm and step_index + 1 < config.rft_steps:
+                            vllm_restart_start = time.monotonic()
                             vllm_controller.start(model_path=current_model_path)
+                            vllm_restart_duration_sec = time.monotonic() - vllm_restart_start
 
             pruned_checkpoint_roots: list[Path] = []
             if latest_hf_checkpoint is not None:
@@ -1051,6 +1129,26 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                     else ()
                 ),
             )
+            step_duration_sec = time.monotonic() - step_start
+            profiler_metrics: dict[str, float] = {
+                "profiler/rft_outer_rollout_collect_sec": (
+                    train_collect_duration_sec + eval_collect_duration_sec
+                ),
+                "profiler/rft_outer_eval_collect_sec": eval_collect_duration_sec,
+                "profiler/rft_token_cache_write_sec": token_cache_write_duration_sec,
+                "profiler/rft_trainer_wall_sec": float(trainer_duration_sec or 0.0),
+                "profiler/rft_vllm_restart_sec": float(vllm_restart_duration_sec or 0.0),
+                "profiler/rft_outer_step_sec": step_duration_sec,
+            }
+            profiler_metrics.update(
+                token_profile_metrics(
+                    attention_mask=profiler_attention_masks,
+                    loss_mask=profiler_loss_masks,
+                    elapsed_sec=trainer_duration_sec,
+                    num_gpus=config.nnodes * config.nproc_per_node,
+                )
+            )
+            profiler_metrics.update(nvidia_smi_utilization())
             step_summary = {
                 "step_index": step_index,
                 "stage": resolved_stage_name,
@@ -1105,6 +1203,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "collector_train_duration_sec": train_collect_duration_sec,
                 "collector_eval_duration_sec": eval_collect_duration_sec,
                 "trainer_duration_sec": trainer_duration_sec,
+                "token_cache_write_duration_sec": token_cache_write_duration_sec,
+                "vllm_restart_duration_sec": vllm_restart_duration_sec,
                 "inner_train_step_first": trainer_metrics.get("train_step_first"),
                 "inner_train_loss_first": trainer_metrics.get("train_loss_first"),
                 "inner_train_step_last": trainer_metrics.get("train_step_last"),
@@ -1119,7 +1219,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "inner_val_loss_min": trainer_metrics.get("val_loss_min"),
                 "inner_val_loss_min_step": trainer_metrics.get("val_loss_min_step"),
                 "inner_val_loss_delta": trainer_metrics.get("val_loss_delta"),
-                "step_duration_sec": time.monotonic() - step_start,
+                "step_duration_sec": step_duration_sec,
                 "train_parquet": str(train_parquet_path),
                 "eval_parquet": str(resolved_val_parquet_path),
                 "trainer_checkpoint_root": str(trainer_checkpoint_root),
@@ -1139,9 +1239,18 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "latest_committed_step_index": (
                     pending_latest_committed_step_index
                 ),
+                **profiler_metrics,
             }
             runtime_manifest["steps"].append(step_summary)
             _write_json(step_dir / "rft_step_summary.json", step_summary)
+            append_profiler_jsonl(
+                config.output_dir / "profiler.jsonl",
+                {
+                    "stage": resolved_stage_name,
+                    "step_index": step_index,
+                    **profiler_metrics,
+                },
+            )
             _write_json(_runtime_loop_manifest_path(config.output_dir), runtime_manifest)
             if pending_latest_committed_checkpoint_payload is not None:
                 _write_json(
@@ -1182,7 +1291,9 @@ def build_trainer_step_command(
     val_parquet_path: Path,
     trainer_output_dir: Path,
     train_batch_size: int,
+    train_min_rows: int,
     sft_num_epoch_per_batch: int,
+    token_cache_fingerprint: str,
     trainer_overrides: Sequence[str],
 ) -> list[str]:
     """Build the documented verl SFT trainer launch command.
@@ -1202,18 +1313,21 @@ def build_trainer_step_command(
         f"trainer.logger={inner_trainer_logger}",
         f"trainer.default_local_dir={trainer_output_dir}",
         f"trainer.save_freq={_INNER_SFT_CHECKPOINT_DISABLED_SAVE_FREQ}",
+        "trainer.test_freq=0",
         # Runtime loop only consumes HuggingFace exports for vLLM restarts; keeping
         # checkpoint payloads hf_model-only avoids redundant dense/FSDP artifacts.
         "trainer.checkpoint.save_contents=[hf_model]",
         "trainer.checkpoint.load_contents=[hf_model]",
         f"data.train_batch_size={train_batch_size}",
+        f"data.train_min_rows={train_min_rows}",
         "data.on_policy.enabled=false",
-        "data.multiturn.enable=true",
-        "data.multiturn.messages_key=messages",
-        "data.custom_cls.path=null",
-        "data.custom_cls.name=null",
+        "data.multiturn.enable=false",
+        "data.custom_cls.path=pkg://trainer.rft_token_cache",
+        "data.custom_cls.name=CachedRFTSFTDataset",
+        f"data.token_cache.schema_version={RFT_TOKEN_CACHE_SCHEMA_VERSION}",
+        f"data.token_cache.expected_fingerprint={token_cache_fingerprint}",
         f"data.train_files={train_parquet_path}",
-        f"data.val_files={val_parquet_path}",
+        "data.val_files=[]",
         f"model.partial_pretrain={model_path}",
     ]
 
@@ -1765,6 +1879,7 @@ def _print_dry_run_plan(
         f"task_batch_size={config.task_batch_size}",
         f"eval_split_fraction={config.eval_split_fraction}",
         f"eval_min_rows={config.eval_min_rows}",
+        f"train_min_rows={config.train_min_rows or config.train_batch_size}",
         f"collector_max_in_flight_tasks={collector_max_in_flight_tasks}",
         "collector_max_turns_per_attempt="
         f"{config.collector_max_turns_per_attempt or 'default'}",
@@ -1803,7 +1918,9 @@ def _print_dry_run_plan(
             val_parquet_path=eval_parquet_path,
             trainer_output_dir=checkpoint_root,
             train_batch_size=config.train_batch_size,
+            train_min_rows=config.train_min_rows or config.train_batch_size,
             sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
+            token_cache_fingerprint="0" * 64,
             trainer_overrides=config.trainer_overrides,
         )
         print(shlex.join(trainer_command))
@@ -1932,10 +2049,10 @@ def _run_command(command: Sequence[str], *, cwd: Path) -> dict[str, float | int]
 
 def _load_tokenizer(model_path: str):
     try:
-        from transformers import AutoTokenizer
+        from verl.utils import hf_tokenizer
     except ModuleNotFoundError as exc:  # pragma: no cover - train-only dependency
         raise RuntimeError(
-            "RFT runtime loop requires transformers. Install training extras (`pip install -e \".[train]\"`)."
+            "RFT runtime loop requires verl tokenizer utilities. Install training extras (`pip install -e \".[train]\"`)."
         ) from exc
 
     kwargs = {
@@ -1943,12 +2060,12 @@ def _load_tokenizer(model_path: str):
         "fix_mistral_regex": True,
     }
     try:
-        return AutoTokenizer.from_pretrained(model_path, **kwargs)
+        return hf_tokenizer(model_path, **kwargs)
     except TypeError as exc:
         if "fix_mistral_regex" not in str(exc):
             raise
         kwargs.pop("fix_mistral_regex", None)
-        return AutoTokenizer.from_pretrained(model_path, **kwargs)
+        return hf_tokenizer(model_path, **kwargs)
 
 
 def _build_models_url(base_url: str) -> str:
@@ -2064,6 +2181,48 @@ def compute_average_generation_length(
     if not lengths:
         return None
     return float(sum(lengths) / len(lengths))
+
+
+def _selected_rows_masks_for_profiler(
+    selected_rows: Sequence[Mapping[str, Any]],
+    *,
+    tokenizer: Any,
+    max_sequence_length: int,
+    cache_fingerprint: str,
+    chat_template_kwargs: Mapping[str, Any],
+) -> tuple[list[list[int]], list[list[int]]]:
+    attention_masks: list[list[int]] = []
+    loss_masks: list[list[int]] = []
+    records = build_token_cache_records(
+        selected_rows,
+        tokenizer=tokenizer,
+        max_sequence_length=max_sequence_length,
+        cache_fingerprint=cache_fingerprint,
+        chat_template_kwargs=chat_template_kwargs,
+    )
+    for record in records:
+        attention_mask = record.get("attention_mask")
+        loss_mask = record.get("loss_mask")
+        if (
+            not isinstance(attention_mask, Sequence)
+            or isinstance(attention_mask, (str, bytes))
+            or not isinstance(loss_mask, Sequence)
+            or isinstance(loss_mask, (str, bytes))
+        ):
+            continue
+        attention_masks.append([1 if _coerce_bool_value(item) else 0 for item in attention_mask])
+        loss_masks.append([1 if _coerce_bool_value(item) else 0 for item in loss_mask])
+    return attention_masks, loss_masks
+
+
+def _coerce_bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    return False
 
 
 def _generation_length_from_selected_row(*, row: Mapping[str, Any], tokenizer: Any) -> float | None:
@@ -2479,6 +2638,7 @@ def filter_selected_rows_by_token_length(
     selected_rows: Sequence[Mapping[str, Any]],
     tokenizer: Any,
     max_sequence_length: int,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Drop selected rows whose multiturn transcript exceeds trainer max token length."""
     if max_sequence_length < 1:
@@ -2500,7 +2660,11 @@ def filter_selected_rows_by_token_length(
     for row_index, row in enumerate(rows):
         messages = build_multiturn_messages(row, row_index=row_index)
         try:
-            token_count = _multiturn_token_count(messages=messages, tokenizer=tokenizer)
+            token_count = _multiturn_token_count(
+                messages=messages,
+                tokenizer=tokenizer,
+                chat_template_kwargs=chat_template_kwargs,
+            )
         except Exception as exc:
             task_id = str(row.get("task_id", "")).strip() or "<unknown>"
             raise RuntimeError(
@@ -2519,7 +2683,12 @@ def filter_selected_rows_by_token_length(
     return kept_rows, dropped_count
 
 
-def _multiturn_token_count(*, messages: Sequence[Mapping[str, Any]], tokenizer: Any) -> int:
+def _multiturn_token_count(
+    *,
+    messages: Sequence[Mapping[str, Any]],
+    tokenizer: Any,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+) -> int:
     apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
     if not callable(apply_chat_template):
         raise ValueError("tokenizer must define callable apply_chat_template for multiturn token counting.")
@@ -2530,12 +2699,14 @@ def _multiturn_token_count(*, messages: Sequence[Mapping[str, Any]], tokenizer: 
             add_generation_prompt=False,
             tokenize=True,
             return_dict=True,
+            **dict(chat_template_kwargs or {}),
         )
     except TypeError:
         payload = apply_chat_template(
             list(messages),
             add_generation_prompt=False,
             tokenize=True,
+            **dict(chat_template_kwargs or {}),
         )
 
     input_ids = _extract_chat_template_input_ids(payload)
@@ -2617,6 +2788,38 @@ def resolve_data_max_length(
     return resolved
 
 
+def resolve_apply_chat_template_kwargs(
+    *,
+    config_dir: Path,
+    config_name: str,
+    trainer_overrides: Sequence[str],
+) -> dict[str, Any]:
+    """Resolve data.apply_chat_template_kwargs with Hydra dot-key override precedence."""
+    resolved = _load_default_apply_chat_template_kwargs(
+        config_dir=config_dir,
+        config_name=config_name,
+    )
+    prefix = f"{_APPLY_CHAT_TEMPLATE_KWARGS_KEY}."
+    for override in trainer_overrides:
+        normalized = _normalize_hydra_override(override)
+        if normalized.startswith(f"~{prefix}"):
+            key = normalized[len(f"~{prefix}") :].strip()
+            if key:
+                resolved.pop(key, None)
+            continue
+        if not normalized.startswith(prefix):
+            continue
+        key_value = normalized[len(prefix) :]
+        if "=" not in key_value:
+            continue
+        key, value_raw = key_value.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        resolved[key] = _parse_hydra_scalar(value_raw.strip())
+    return resolved
+
+
 def _load_default_micro_batch_size_per_gpu(*, config_dir: Path, config_name: str) -> int:
     config_path = config_dir / f"{config_name}.yaml"
     if not config_path.is_file():
@@ -2663,10 +2866,31 @@ def _load_default_data_max_length(*, config_dir: Path, config_name: str) -> int:
     return 1024
 
 
+def _load_default_apply_chat_template_kwargs(
+    *,
+    config_dir: Path,
+    config_name: str,
+) -> dict[str, Any]:
+    config_path = config_dir / f"{config_name}.yaml"
+    if not config_path.is_file():
+        return {}
+    try:
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    data_config = payload.get("data")
+    if not isinstance(data_config, Mapping):
+        return {}
+    raw_kwargs = data_config.get("apply_chat_template_kwargs")
+    if not isinstance(raw_kwargs, Mapping):
+        return {}
+    return {str(key): value for key, value in raw_kwargs.items() if str(key).strip()}
+
+
 def _parse_positive_int_override(override: str, *, key: str) -> int | None:
-    normalized = override.strip()
-    while normalized.startswith("+"):
-        normalized = normalized[1:]
+    normalized = _normalize_hydra_override(override)
     prefix = f"{key}="
     if not normalized.startswith(prefix):
         return None
@@ -2679,6 +2903,22 @@ def _parse_positive_int_override(override: str, *, key: str) -> int | None:
     if value < 1:
         raise ValueError(f"{key} override must be >= 1 (got {value}).")
     return value
+
+
+def _normalize_hydra_override(override: str) -> str:
+    normalized = override.strip()
+    while normalized.startswith("+"):
+        normalized = normalized[1:]
+    return normalized
+
+
+def _parse_hydra_scalar(value_raw: str) -> Any:
+    if not value_raw:
+        return ""
+    try:
+        return yaml.safe_load(value_raw)
+    except Exception:
+        return value_raw
 
 
 def _utc_now() -> str:
@@ -2727,6 +2967,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
     parser.add_argument("--sft-num-epoch-per-batch", type=int, required=True)
     parser.add_argument("--checkpoint-keep-last", type=int, default=1)
     parser.add_argument("--train-batch-size", type=int, required=True)
+    parser.add_argument(
+        "--train-min-rows",
+        type=int,
+        default=None,
+        help=(
+            "minimum selected train rows required before an inner SFT launch; "
+            "defaults to --train-batch-size."
+        ),
+    )
     parser.add_argument(
         "--eval-split-fraction",
         type=float,
@@ -2788,6 +3037,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         raise ValueError("--checkpoint-keep-last must be >= 1.")
     if args.train_batch_size < 1:
         raise ValueError("--train-batch-size must be >= 1.")
+    if args.train_min_rows is not None and args.train_min_rows < 1:
+        raise ValueError("--train-min-rows must be >= 1 when provided.")
     if args.eval_split_fraction < 0.0 or args.eval_split_fraction >= 1.0:
         raise ValueError("--eval-split-fraction must satisfy 0.0 <= value < 1.0.")
     if args.eval_min_rows < 0:
@@ -2837,6 +3088,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         ),
         eval_split_fraction=float(args.eval_split_fraction),
         eval_min_rows=int(args.eval_min_rows),
+        train_min_rows=(
+            int(args.train_min_rows) if args.train_min_rows is not None else None
+        ),
         stage_name=resolved_stage_name,
     )
 

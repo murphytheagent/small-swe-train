@@ -326,7 +326,7 @@ applied everywhere in the launcher (`--model`, `--served-model-name`, and pilot
 - `--rft-manifest <path>` uses an explicit manifest.
 - `--rft-checkpoint <path>` directly overrides the RFT checkpoint/export path.
 - If none of those flags are passed, the launcher falls back to
-  `PILOT_MODEL_PATH` (default `/data/scratch/$USER/models/Qwen3-4B-Instruct-2507`).
+  `PILOT_MODEL_PATH` (default `Qwen/Qwen3-8B`).
 
 Arbitrary HF model selection is controlled separately from RFT checkpoint flags:
 - Set `PILOT_MODEL_PATH=<repo-id-or-local-path>` for the model passed to vLLM
@@ -337,14 +337,12 @@ Arbitrary HF model selection is controlled separately from RFT checkpoint flags:
   for actual RFT artifacts only.
 
 HF model id behavior:
-- `PILOT_MODEL_PATH` may be a Hugging Face repo id such as `Qwen/Qwen3.5-9B`.
+- `PILOT_MODEL_PATH` may be a Hugging Face repo id such as `Qwen/Qwen3-8B`.
 - For repo ids, vLLM downloads the model into the standard Hugging Face/vLLM
   caches exported by the launcher (`HF_HOME`, `HUGGINGFACE_HUB_CACHE`,
   `TRANSFORMERS_CACHE`, `VLLM_CACHE_ROOT`).
 - First launch is slower because weights must be fetched. For private repos,
   export `HF_TOKEN` before launch.
-- `Qwen/Qwen3.5-9B` currently requires a nightly `vllm` build in this repo
-  environment: `uv pip install --python "$PWD/.venv/bin/python" --upgrade vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly`
 - Qwen instruct/chat models are the most drop-in-friendly case in the current
   call chain. The pilot uses standard OpenAI-compatible chat completions and
   accepts either assistant text or OpenAI `tool_calls`, but the model still
@@ -442,14 +440,14 @@ sbatch \
   --cpus-per-task="${CPUS}" \
   --mem="${MEM}" \
   --time=24:00:00 \
-  --job-name=teacher-reprompt-qwen35 \
+  --job-name=teacher-reprompt-qwen3-8b \
   --output="$PWD/outputs/slurm/%x-%j.out" \
   --error="$PWD/outputs/slurm/%x-%j.err" \
   --wrap "cd $PWD \
     && export PYTHON_BIN=$PWD/.venv/bin/python \
     && export PILOT_VLLM_TP_SIZE=${GPUS} \
-    && export PILOT_MODEL_PATH=Qwen/Qwen3.5-9B \
-    && export PILOT_SERVED_MODEL=Qwen/Qwen3.5-9B \
+    && export PILOT_MODEL_PATH=Qwen/Qwen3-8B \
+    && export PILOT_SERVED_MODEL=Qwen/Qwen3-8B \
     && export PILOT_STUDENT_TEMPERATURE=0.6 \
     && export PILOT_TEACHER_TEMPERATURE=0.6 \
     && export HF_TOKEN=\${HF_TOKEN:-} \

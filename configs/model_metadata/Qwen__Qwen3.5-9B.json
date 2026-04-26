@@ -1,0 +1,13 @@
+{
+  "architectures": [
+    "Qwen3_5ForConditionalGeneration"
+  ],
+  "files": [
+    "config.json",
+    "preprocessor_config.json",
+    "tokenizer_config.json",
+    "video_preprocessor_config.json"
+  ],
+  "model_id": "Qwen/Qwen3.5-9B",
+  "pipeline_tag": "image-text-to-text"
+}

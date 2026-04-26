@@ -80,7 +80,7 @@ The adapter must prevent accidental application of the dataset gold patch before
   "schema_version": "swebench_verified.v1",
   "run_id": "20260226T103100Z_verified_eval_qwen4b",
   "instance_id": "pallets__flask-12345",
-  "model_name_or_path": "Qwen/Qwen3-4B-Instruct-2507",
+  "model_name_or_path": "Qwen/Qwen3-8B",
   "attempt_index": 0,
   "completed": true,
   "stop_reason": "submitted_valid",

@@ -8,8 +8,10 @@ import importlib
 import logging
 import numbers
 import os
+import time
 from typing import Any, Mapping, Sequence
 
+from metrics.profiler import cuda_memory_metrics, reset_cuda_peak_memory_stats, token_profile_metrics
 from verl_integration.reprompt_adapter import (
     DEFAULT_MAX_REPROMPT_LEN,
     build_self_distillation_batch,
@@ -1326,7 +1328,8 @@ def _coerce_role(value: Any) -> str:
 def _apply_turn_level_actor_update_patch() -> bool:
     try:
         dp_actor_module = importlib.import_module("verl.workers.actor.dp_actor")
-    except ModuleNotFoundError:
+    except (ImportError, ModuleNotFoundError) as exc:
+        LOGGER.warning("Skipping turn-level actor patch: failed to import dp_actor: %s", exc)
         return False
 
     actor_cls = getattr(dp_actor_module, "DataParallelPPOActor", None)
@@ -1344,12 +1347,19 @@ def _apply_turn_level_actor_update_patch() -> bool:
 
     def _patched_update_policy(self: Any, data: Any) -> Any:
         original = getattr(type(self), _ORIGINAL_ACTOR_UPDATE_ATTR)
+        update_start = time.monotonic()
+        reset_cuda_peak_memory_stats()
         if _has_turn_level_distillation_tensors(getattr(data, "batch", None)):
             try:
-                return _run_turn_level_sequential_update_policy(
+                result = _run_turn_level_sequential_update_policy(
                     self,
                     data,
                     dp_actor_module=dp_actor_module,
+                )
+                return _attach_sdpo_actor_profiler_metrics(
+                    result,
+                    data=data,
+                    elapsed_sec=time.monotonic() - update_start,
                 )
             except Exception as exc:  # pragma: no cover - fallback path
                 LOGGER.warning(
@@ -1357,10 +1367,20 @@ def _apply_turn_level_actor_update_patch() -> bool:
                     exc,
                     exc_info=True,
                 )
-                return original(self, data)
+                result = original(self, data)
+                return _attach_sdpo_actor_profiler_metrics(
+                    result,
+                    data=data,
+                    elapsed_sec=time.monotonic() - update_start,
+                )
 
         if _should_skip_turn_level_expansion_for_distributed():
-            return original(self, data)
+            result = original(self, data)
+            return _attach_sdpo_actor_profiler_metrics(
+                result,
+                data=data,
+                elapsed_sec=time.monotonic() - update_start,
+            )
         try:
             expanded = _maybe_expand_turn_level_distillation_data(data)
         except Exception as exc:  # pragma: no cover - fallback path
@@ -1372,11 +1392,43 @@ def _apply_turn_level_actor_update_patch() -> bool:
             expanded = None
         if expanded is not None:
             data = expanded
-        return original(self, data)
+        result = original(self, data)
+        return _attach_sdpo_actor_profiler_metrics(
+            result,
+            data=data,
+            elapsed_sec=time.monotonic() - update_start,
+        )
 
     setattr(actor_cls, "update_policy", _patched_update_policy)
     setattr(actor_cls, _ACTOR_PATCH_MARKER_ATTR, True)
     return True
+
+
+def _attach_sdpo_actor_profiler_metrics(
+    result: Any,
+    *,
+    data: Any,
+    elapsed_sec: float,
+) -> Any:
+    if not isinstance(result, dict):
+        return result
+    batch = getattr(data, "batch", None)
+    if batch is None or not hasattr(batch, "get"):
+        return result
+    profiler_metrics = {
+        "profiler/sdpo_actor_update_sec": float(elapsed_sec),
+    }
+    profiler_metrics.update(
+        token_profile_metrics(
+            attention_mask=batch.get("response_mask"),
+            loss_mask=batch.get("response_mask"),
+            elapsed_sec=elapsed_sec,
+            prefix="profiler",
+        )
+    )
+    profiler_metrics.update(cuda_memory_metrics())
+    result.update(profiler_metrics)
+    return result
 
 
 def _has_turn_level_distillation_tensors(batch: Any) -> bool:

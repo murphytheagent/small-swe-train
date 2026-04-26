@@ -13,7 +13,7 @@ import json
 
 from prompts.model_delimiters import ModelDelimiters, default_delimiters
 from config import MAX_TOOL_CALLS_PER_TURN
-from schemas import ActionEnvelope, ToolCall, make_tool_call
+from schemas import ActionEnvelope, TERMINAL_TOOL_NAME, ToolCall, make_tool_call
 
 
 class TurnParseError(ValueError):
@@ -120,6 +120,11 @@ class TurnParser:
                 tool_calls.append(make_tool_call(payload_obj))
             except ValueError as exc:
                 raise TurnParseError(str(exc)) from exc
+            if (
+                any(call.tool == TERMINAL_TOOL_NAME for call in tool_calls)
+                and len(tool_calls) != 1
+            ):
+                raise TurnParseError("'submit' must be the only tool call in the final turn.")
             if len(tool_calls) > max_tool_calls:
                 raise TurnParseError(
                     f"Too many tool calls: got {len(tool_calls)}, max is {max_tool_calls}."

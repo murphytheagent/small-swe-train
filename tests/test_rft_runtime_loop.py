@@ -22,6 +22,7 @@ from trainer.rft_runtime_loop import (
     prune_old_global_step_checkpoints,
     prune_old_step_checkpoints,
     prune_old_step_payloads,
+    resolve_apply_chat_template_kwargs,
     reset_step_artifacts,
     resolve_data_max_length,
     resolve_effective_train_batch_size,
@@ -33,6 +34,10 @@ from trainer.rft_runtime_loop import (
 
 
 class _StubTokenizer:
+    def encode(self, text: str, *, add_special_tokens: bool = False):
+        del add_special_tokens
+        return list(range(len(text)))
+
     def apply_chat_template(
         self,
         messages,
@@ -40,13 +45,40 @@ class _StubTokenizer:
         add_generation_prompt: bool = False,
         tokenize: bool = True,
         return_dict: bool = True,
+        **_kwargs,
     ):
-        del add_generation_prompt, tokenize
-        token_count = sum(len(str(message.get("content", ""))) for message in messages)
-        input_ids = list(range(token_count))
+        text = self._render(messages, add_generation_prompt=add_generation_prompt)
+        if not tokenize:
+            return text
+        input_ids = [ord(char) for char in text]
         if return_dict:
-            return {"input_ids": input_ids}
+            return {"input_ids": input_ids, "attention_mask": [1] * len(input_ids)}
         return input_ids
+
+    def __call__(
+        self,
+        text: str,
+        *,
+        add_special_tokens: bool = False,
+        return_offsets_mapping: bool = False,
+        **_kwargs,
+    ):
+        del add_special_tokens
+        input_ids = [ord(char) for char in text]
+        payload = {"input_ids": input_ids, "attention_mask": [1] * len(input_ids)}
+        if return_offsets_mapping:
+            payload["offset_mapping"] = [(index, index + 1) for index in range(len(text))]
+        return payload
+
+    def _render(self, messages, *, add_generation_prompt: bool) -> str:
+        chunks = ["SYS"]
+        for message in messages:
+            role = str(message.get("role", ""))
+            content = str(message.get("content", ""))
+            chunks.append(f"<{role}>{content}</{role}>")
+        if add_generation_prompt:
+            chunks.append("<assistant>")
+        return "".join(chunks)
 
 
 def test_load_tokenizer_sets_fix_mistral_regex_by_default(
@@ -54,15 +86,16 @@ def test_load_tokenizer_sets_fix_mistral_regex_by_default(
 ) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
-    class _FakeAutoTokenizer:
-        @staticmethod
-        def from_pretrained(model_path: str, **kwargs):
-            calls.append((model_path, dict(kwargs)))
-            return {"tokenizer": "ok"}
+    def _fake_hf_tokenizer(model_path: str, **kwargs):
+        calls.append((model_path, dict(kwargs)))
+        return {"tokenizer": "ok"}
 
-    fake_transformers = types.ModuleType("transformers")
-    fake_transformers.AutoTokenizer = _FakeAutoTokenizer
-    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    fake_verl = types.ModuleType("verl")
+    fake_verl_utils = types.ModuleType("verl.utils")
+    fake_verl_utils.hf_tokenizer = _fake_hf_tokenizer
+    fake_verl.utils = fake_verl_utils
+    monkeypatch.setitem(sys.modules, "verl", fake_verl)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_verl_utils)
 
     tokenizer = rft_runtime_loop._load_tokenizer("/tmp/model")
     assert tokenizer == {"tokenizer": "ok"}
@@ -82,18 +115,19 @@ def test_load_tokenizer_retries_without_fix_mistral_regex_when_unsupported(
 ) -> None:
     calls: list[dict[str, object]] = []
 
-    class _FakeAutoTokenizer:
-        @staticmethod
-        def from_pretrained(model_path: str, **kwargs):
-            _ = model_path
-            calls.append(dict(kwargs))
-            if "fix_mistral_regex" in kwargs:
-                raise TypeError("__init__() got an unexpected keyword argument 'fix_mistral_regex'")
-            return {"tokenizer": "fallback"}
+    def _fake_hf_tokenizer(model_path: str, **kwargs):
+        _ = model_path
+        calls.append(dict(kwargs))
+        if "fix_mistral_regex" in kwargs:
+            raise TypeError("__init__() got an unexpected keyword argument 'fix_mistral_regex'")
+        return {"tokenizer": "fallback"}
 
-    fake_transformers = types.ModuleType("transformers")
-    fake_transformers.AutoTokenizer = _FakeAutoTokenizer
-    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    fake_verl = types.ModuleType("verl")
+    fake_verl_utils = types.ModuleType("verl.utils")
+    fake_verl_utils.hf_tokenizer = _fake_hf_tokenizer
+    fake_verl.utils = fake_verl_utils
+    monkeypatch.setitem(sys.modules, "verl", fake_verl)
+    monkeypatch.setitem(sys.modules, "verl.utils", fake_verl_utils)
 
     tokenizer = rft_runtime_loop._load_tokenizer("/tmp/model")
     assert tokenizer == {"tokenizer": "fallback"}
@@ -118,7 +152,9 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
         val_parquet_path=tmp_path / "accepted_eval.parquet",
         trainer_output_dir=tmp_path / "checkpoints",
         train_batch_size=32,
+        train_min_rows=32,
         sft_num_epoch_per_batch=1,
+        token_cache_fingerprint="abc123",
         trainer_overrides=("trainer.total_training_steps=1",),
     )
 
@@ -130,10 +166,15 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
     assert "trainer.logger=[console]" in command_text
     assert "trainer.checkpoint.save_contents=[hf_model]" in command_text
     assert "trainer.checkpoint.load_contents=[hf_model]" in command_text
-    assert "data.multiturn.enable=true" in command_text
-    assert "data.custom_cls.path=null" in command_text
+    assert "trainer.test_freq=0" in command_text
+    assert "data.train_min_rows=32" in command_text
+    assert "data.multiturn.enable=false" in command_text
+    assert "data.custom_cls.path=pkg://trainer.rft_token_cache" in command_text
+    assert "data.custom_cls.name=CachedRFTSFTDataset" in command_text
+    assert "data.token_cache.schema_version=1" in command_text
+    assert "data.token_cache.expected_fingerprint=abc123" in command_text
     assert f"data.train_files={tmp_path / 'accepted.parquet'}" in command_text
-    assert f"data.val_files={tmp_path / 'accepted_eval.parquet'}" in command_text
+    assert "data.val_files=[]" in command_text
     assert f"model.partial_pretrain={config.DEFAULT_TRAINING_MODEL_NAME}" in command_text
 
 
@@ -155,7 +196,9 @@ def test_build_trainer_step_command_allows_inner_wandb_when_enabled(
         val_parquet_path=tmp_path / "accepted_eval.parquet",
         trainer_output_dir=tmp_path / "checkpoints",
         train_batch_size=32,
+        train_min_rows=32,
         sft_num_epoch_per_batch=1,
+        token_cache_fingerprint="abc123",
         trainer_overrides=(),
     )
 
@@ -306,7 +349,7 @@ def test_run_loop_requires_checkpoint_when_trainer_runs(
             "rejected_rows": [],
         }
 
-    def _fake_write_selected_rows(_rows, parquet_path: Path):
+    def _fake_write_selected_rows(_rows, parquet_path: Path, **_kwargs):
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
         return 1
@@ -407,7 +450,7 @@ def test_run_loop_skips_checkpoint_root_prune_when_trainer_is_skipped(
             "rejected_rows": [{"task_id": "task-2", "rft_rejection_reason": "non_terminal"}],
         }
 
-    def _fake_write_selected_rows(_rows, parquet_path: Path):
+    def _fake_write_selected_rows(_rows, parquet_path: Path, **_kwargs):
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
         return 1
@@ -552,7 +595,7 @@ def test_run_loop_checkpoint_pruning_tracks_only_checkpoint_steps(
             "rejected_rows": [{"task_id": "task-skip", "rft_rejection_reason": "non_terminal"}],
         }
 
-    def _fake_write_selected_rows(_rows, parquet_path: Path):
+    def _fake_write_selected_rows(_rows, parquet_path: Path, **_kwargs):
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
         return 1
@@ -715,7 +758,7 @@ def test_run_loop_resumes_from_latest_committed_checkpoint(
             "rejected_rows": [],
         }
 
-    def _fake_write_selected_rows(_rows, parquet_path: Path):
+    def _fake_write_selected_rows(_rows, parquet_path: Path, **_kwargs):
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
         return 1
@@ -1032,7 +1075,7 @@ def test_run_loop_does_not_restart_vllm_after_final_step(
             "rejected_rows": [],
         }
 
-    def _fake_write_selected_rows(_rows, parquet_path: Path):
+    def _fake_write_selected_rows(_rows, parquet_path: Path, **_kwargs):
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
         return 1
@@ -1183,7 +1226,7 @@ def test_run_loop_uses_vllm_compatible_checkpoint_for_followup_steps(
         assert request.start_step_index == step
         return {"selected_rows": [_selected_row(step)], "rejected_rows": []}
 
-    def _fake_write_selected_rows(_rows, parquet_path: Path):
+    def _fake_write_selected_rows(_rows, parquet_path: Path, **_kwargs):
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
         return 1
@@ -1335,7 +1378,7 @@ def test_run_loop_upsamples_selected_rows_to_effective_batch_multiple(
             "rejected_rows": [],
         }
 
-    def _fake_write_selected_rows(rows, parquet_path: Path):
+    def _fake_write_selected_rows(rows, parquet_path: Path, **_kwargs):
         write_counts.append(len(rows))
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
@@ -1438,6 +1481,7 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     write_calls: list[tuple[str, int]] = []
+    filter_kwargs_calls: list[dict[str, object]] = []
     request_partitions: list[str] = []
     request_partitions: list[str] = []
 
@@ -1482,7 +1526,7 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
             "rejected_rows": [],
         }
 
-    def _fake_write_selected_rows(rows, parquet_path: Path):
+    def _fake_write_selected_rows(rows, parquet_path: Path, **_kwargs):
         write_calls.append((parquet_path.name, len(rows)))
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
@@ -1537,6 +1581,14 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
         "prune_old_step_payloads",
         lambda **_kwargs: [],
     )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "filter_selected_rows_by_token_length",
+        lambda *, selected_rows, tokenizer, max_sequence_length, **kwargs: (
+            filter_kwargs_calls.append(dict(kwargs)) or list(selected_rows),
+            0,
+        ),
+    )
 
     config = RFTLoopConfig(
         project_root=tmp_path,
@@ -1563,7 +1615,7 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
         vllm_ready_timeout_sec=1,
         vllm_stop_timeout_sec=1,
         vllm_extra_args=(),
-        trainer_overrides=(),
+        trainer_overrides=("++data.apply_chat_template_kwargs.enable_thinking=false",),
         dry_run=False,
         eval_split_fraction=0.25,
         eval_min_rows=1,
@@ -1585,6 +1637,10 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
     assert summary["eval_selected_count_raw"] == 1
     assert summary["eval_split_fallback_to_train"] is False
     assert summary["eval_parquet"].endswith("accepted_trajectories_eval.parquet")
+    assert filter_kwargs_calls == [
+        {"chat_template_kwargs": {"enable_thinking": False}},
+        {"chat_template_kwargs": {"enable_thinking": False}},
+    ]
 
 
 def test_run_loop_upsamples_eval_rows_to_effective_batch_multiple(
@@ -1636,7 +1692,7 @@ def test_run_loop_upsamples_eval_rows_to_effective_batch_multiple(
             "rejected_rows": [],
         }
 
-    def _fake_write_selected_rows(rows, parquet_path: Path):
+    def _fake_write_selected_rows(rows, parquet_path: Path, **_kwargs):
         write_calls.append((parquet_path.name, len(rows)))
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
@@ -1790,7 +1846,7 @@ def test_run_loop_reuses_train_parquet_when_eval_selection_is_empty(
             "rejected_rows": [],
         }
 
-    def _fake_write_selected_rows(rows, parquet_path: Path):
+    def _fake_write_selected_rows(rows, parquet_path: Path, **_kwargs):
         write_calls.append((parquet_path.name, len(rows)))
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
@@ -1843,7 +1899,10 @@ def test_run_loop_reuses_train_parquet_when_eval_selection_is_empty(
     monkeypatch.setattr(
         rft_runtime_loop,
         "filter_selected_rows_by_token_length",
-        lambda *, selected_rows, tokenizer, max_sequence_length: (list(selected_rows), 0),
+        lambda *, selected_rows, tokenizer, max_sequence_length, **_kwargs: (
+            list(selected_rows),
+            0,
+        ),
     )
     monkeypatch.setattr(
         rft_runtime_loop,
@@ -1942,7 +2001,7 @@ def test_run_loop_positive_stage_requests_resolved_only_selection(
             "rejected_rows": [],
         }
 
-    def _fake_write_selected_rows(rows, parquet_path: Path):
+    def _fake_write_selected_rows(rows, parquet_path: Path, **_kwargs):
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
         return len(rows)
@@ -2343,6 +2402,33 @@ def test_resolve_data_max_length_prefers_override(tmp_path: Path) -> None:
     assert resolved_override == 128
 
 
+def test_resolve_apply_chat_template_kwargs_prefers_override(tmp_path: Path) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir(parents=True)
+    (config_dir / "rft_swe.yaml").write_text(
+        "data:\n"
+        "  apply_chat_template_kwargs:\n"
+        "    enable_thinking: true\n"
+        "    custom_flag: keep\n",
+        encoding="utf-8",
+    )
+
+    resolved = resolve_apply_chat_template_kwargs(
+        config_dir=config_dir,
+        config_name="rft_swe",
+        trainer_overrides=(
+            "++data.apply_chat_template_kwargs.enable_thinking=false",
+            "+data.apply_chat_template_kwargs.extra=7",
+        ),
+    )
+
+    assert resolved == {
+        "enable_thinking": False,
+        "custom_flag": "keep",
+        "extra": 7,
+    }
+
+
 def test_filter_selected_rows_by_token_length_drops_overlength_rows() -> None:
     class _FakeTokenizer:
         def apply_chat_template(
@@ -2399,6 +2485,45 @@ def test_filter_selected_rows_by_token_length_requires_chat_template_tokenizer()
             tokenizer=object(),
             max_sequence_length=128,
         )
+
+
+def test_filter_selected_rows_by_token_length_uses_chat_template_kwargs() -> None:
+    captured_kwargs: list[dict[str, object]] = []
+
+    class _FakeTokenizer:
+        def apply_chat_template(
+            self,
+            messages,
+            *,
+            add_generation_prompt: bool = False,
+            tokenize: bool = True,
+            return_dict: bool = True,
+            **kwargs,
+        ):
+            del add_generation_prompt, tokenize
+            captured_kwargs.append(dict(kwargs))
+            token_count = sum(len(str(message.get("content", ""))) for message in messages)
+            input_ids = list(range(token_count))
+            if return_dict:
+                return {"input_ids": input_ids}
+            return input_ids
+
+    kept_rows, dropped_count = filter_selected_rows_by_token_length(
+        selected_rows=[
+            {
+                "task_id": "task-1",
+                "prompt": "Fix bug",
+                "assistant_response": '<tool_call>{"tool":"submit","args":{"final_response":"ok"}}</tool_call>',
+            }
+        ],
+        tokenizer=_FakeTokenizer(),
+        max_sequence_length=512,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    assert len(kept_rows) == 1
+    assert dropped_count == 0
+    assert captured_kwargs == [{"enable_thinking": False}]
 
 
 def test_compute_average_generation_length_prefers_action_mask() -> None:
@@ -2520,7 +2645,7 @@ def test_run_loop_writes_inner_loss_delta_metrics_to_summary(
             "rejected_rows": [],
         }
 
-    def _fake_write_selected_rows(_rows, parquet_path: Path):
+    def _fake_write_selected_rows(_rows, parquet_path: Path, **_kwargs):
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
         return 1
