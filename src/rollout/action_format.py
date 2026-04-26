@@ -853,13 +853,21 @@ def _render_xml_arg(tool_name: str, field_name: str, value: Any) -> str:
         raise ValueError(f"Invalid XML arg field name: {field_name!r}")
     arg_schema = get_xml_arg_schema(tool_name, field_name)
     if isinstance(value, list):
+        if arg_schema is None or arg_schema.kind != "list[string]":
+            raise ValueError(
+                f"XML arg <{field_name}> for tool {tool_name!r} must be scalar; got list."
+            )
+        if not all(isinstance(item, str) for item in value):
+            raise ValueError(
+                f"XML list arg <{field_name}> for tool {tool_name!r} must contain only strings."
+            )
         item_tag = (
             arg_schema.list_item_tag
             if arg_schema is not None and arg_schema.list_item_tag is not None
             else get_xml_list_item_tag(field_name)
         )
         items = "".join(
-            f"<{item_tag}>{_render_xml_string_value(str(item))}</{item_tag}>"
+            f"<{item_tag}>{_render_xml_string_value(item)}</{item_tag}>"
             for item in value
         )
         return f"<{field_name}>{items}</{field_name}>"

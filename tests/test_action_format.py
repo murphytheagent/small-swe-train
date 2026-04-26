@@ -270,6 +270,31 @@ def test_render_tool_call_block_xml_falls_back_to_json_for_non_scalar_arg_types(
     assert rendered == '<tool_call>{"args":{"command":{"cmd":"pytest -q"}},"tool":"bash"}</tool_call>'
 
 
+def test_render_tool_call_block_xml_falls_back_to_json_for_scalar_list_arg() -> None:
+    rendered = render_tool_call_block(
+        {"tool": "bash", "args": {"command": ["pytest -q"]}},
+        payload_format="xml",
+        fallback_payload_format="json",
+        compact=True,
+    )
+
+    assert rendered == '<tool_call>{"args":{"command":["pytest -q"]},"tool":"bash"}</tool_call>'
+
+
+def test_render_tool_call_block_xml_accepts_schema_list_args() -> None:
+    rendered = render_tool_call_block(
+        {"tool": "submit", "args": {"final_response": "done", "changed_paths": ["src/app.py"]}},
+        payload_format="xml",
+    )
+
+    assert rendered == (
+        '<tool_call name="submit">'
+        "<final_response><![CDATA[done]]></final_response>"
+        "<changed_paths><path><![CDATA[src/app.py]]></path></changed_paths>"
+        "</tool_call>"
+    )
+
+
 def test_parse_assistant_text_dual_mode_rejects_xml_tool_call_before_later_xml_think_after_json_call() -> None:
     payload = (
         '<tool_call>{"tool":"bash","args":{"command":"echo hi"}}</tool_call>'

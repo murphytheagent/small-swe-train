@@ -108,6 +108,29 @@ def test_extract_assistant_content_preserves_nested_invalid_arg_types_as_json() 
     )
 
 
+def test_extract_assistant_content_preserves_scalar_list_arg_as_json() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "bash",
+                                "arguments": '{"command":["pytest -q"]}',
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    assert _extract_assistant_content(payload) == (
+        '<tool_call>{"args":{"command":["pytest -q"]},"tool":"bash"}</tool_call>'
+    )
+
+
 def test_extract_assistant_content_uses_structured_tool_calls_when_content_is_blank() -> None:
     payload = {
         "choices": [

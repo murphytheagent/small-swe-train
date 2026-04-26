@@ -10,6 +10,7 @@ Last updated: 2026-04-26.
 - JS/TS work should stay focused on repo-aware Node verifier adapters, not a generic `node_test` command toggle.
 - Root documentation policy is now: keep only `AGENTS.md`, `README.md`, and `STATUS.md` at repo root; keep research, design, migration, and evaluation plans under `docs/`.
 - XML action format now has a reusable schema view derived from `TOOL_SCHEMAS`, default tool-call parallelism is `1`, and vLLM structured-tool-call fallback honors configured XML rendering with JSON fallback for non-XML-representable calls.
+- PR #34 Codex P1 is addressed: XML rendering now rejects list values for scalar schema args so structured vLLM fallback preserves malformed scalar-list payloads as JSON for downstream validation.
 
 ## Active TODO
 - Materialize the `SWE-smith-py` difficulty-probe cache against the `2040` format-stage checkpoint.
