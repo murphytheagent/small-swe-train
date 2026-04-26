@@ -293,44 +293,46 @@ def _patched_run_sft(config: Any) -> None:
     device_name = _verl_sft_trainer.get_device_name()
     _local_rank, _rank, world_size = _verl_sft_trainer.initialize_global_process_group()
 
-    device_mesh = _verl_sft_trainer.init_device_mesh(
-        device_type=device_name,
-        mesh_shape=(world_size,),
-        mesh_dim_names=("fsdp",),
-    )
-    dp_size = world_size // config.ulysses_sequence_parallel_size
-    ulysses_device_mesh = _verl_sft_trainer.init_device_mesh(
-        device_type=device_name,
-        mesh_shape=(dp_size, config.ulysses_sequence_parallel_size),
-        mesh_dim_names=("dp", "sp"),
-    )
+    try:
+        device_mesh = _verl_sft_trainer.init_device_mesh(
+            device_type=device_name,
+            mesh_shape=(world_size,),
+            mesh_dim_names=("fsdp",),
+        )
+        dp_size = world_size // config.ulysses_sequence_parallel_size
+        ulysses_device_mesh = _verl_sft_trainer.init_device_mesh(
+            device_type=device_name,
+            mesh_shape=(dp_size, config.ulysses_sequence_parallel_size),
+            mesh_dim_names=("dp", "sp"),
+        )
 
-    local_model_path = _verl_sft_trainer.copy_to_local(
-        src=config.model.partial_pretrain,
-        verbose=True,
-    )
-    tokenizer = _load_hf_tokenizer(
-        local_model_path,
-        trust_remote_code=config.model.trust_remote_code,
-    )
-    train_dataset = _verl_sft_trainer.create_sft_dataset(
-        config.data.train_files,
-        config.data,
-        tokenizer,
-        max_samples=config.data.get("train_max_samples", -1),
-    )
+        local_model_path = _verl_sft_trainer.copy_to_local(
+            src=config.model.partial_pretrain,
+            verbose=True,
+        )
+        tokenizer = _load_hf_tokenizer(
+            local_model_path,
+            trust_remote_code=config.model.trust_remote_code,
+        )
+        train_dataset = _verl_sft_trainer.create_sft_dataset(
+            config.data.train_files,
+            config.data,
+            tokenizer,
+            max_samples=config.data.get("train_max_samples", -1),
+        )
 
-    trainer = _SmallSWEFSDPSFTTrainer(
-        config=config,
-        device_mesh=device_mesh,
-        ulysses_device_mesh=ulysses_device_mesh,
-        tokenizer=tokenizer,
-        train_dataset=train_dataset,
-        val_dataset=_EmptyValidationDataset(),
-    )
+        trainer = _SmallSWEFSDPSFTTrainer(
+            config=config,
+            device_mesh=device_mesh,
+            ulysses_device_mesh=ulysses_device_mesh,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            val_dataset=_EmptyValidationDataset(),
+        )
 
-    trainer.fit()
-    _verl_sft_trainer.destroy_global_process_group()
+        trainer.fit()
+    finally:
+        _verl_sft_trainer.destroy_global_process_group()
 
 
 _verl_sft_trainer.FSDPSFTTrainer = _SmallSWEFSDPSFTTrainer

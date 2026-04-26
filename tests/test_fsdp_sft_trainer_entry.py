@@ -246,6 +246,72 @@ def test_patched_run_sft_uses_empty_validation_dataset_when_disabled(monkeypatch
     assert captured["fit_called"] is True
 
 
+@pytest.mark.parametrize("failure_stage", ["dataset", "fit"])
+def test_patched_run_sft_destroys_process_group_on_disabled_path_error(
+    monkeypatch,
+    failure_stage: str,
+) -> None:
+    entry = _load_entry_module()
+    omegaconf = pytest.importorskip("omegaconf")
+
+    config_payload = {
+        "ulysses_sequence_parallel_size": 1,
+        "model": {
+            "partial_pretrain": "/tmp/model",
+            "trust_remote_code": False,
+        },
+        "data": {
+            "train_files": "/tmp/train.parquet",
+            "val_files": [],
+            "train_max_samples": -1,
+        },
+        "trainer": {
+            "test_freq": 0,
+        },
+    }
+    trainer_config = omegaconf.OmegaConf.create(config_payload)
+
+    class _Mesh:
+        pass
+
+    class _Trainer:
+        def __init__(self, **_kwargs):
+            pass
+
+        def fit(self) -> None:
+            if failure_stage == "fit":
+                raise RuntimeError("fit failed")
+
+    destroyed: list[bool] = []
+
+    def _create_sft_dataset(*_args, **_kwargs):
+        if failure_stage == "dataset":
+            raise RuntimeError("dataset failed")
+        return ["train"]
+
+    monkeypatch.setattr(entry._verl_sft_trainer, "get_device_name", lambda: "cpu")
+    monkeypatch.setattr(
+        entry._verl_sft_trainer,
+        "initialize_global_process_group",
+        lambda: (0, 0, 1),
+    )
+    monkeypatch.setattr(entry._verl_sft_trainer, "init_device_mesh", lambda **_kwargs: _Mesh())
+    monkeypatch.setattr(entry._verl_sft_trainer, "copy_to_local", lambda **_kwargs: "/tmp/model")
+    monkeypatch.setattr(entry, "_load_hf_tokenizer", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(entry._verl_sft_trainer, "create_sft_dataset", _create_sft_dataset)
+    monkeypatch.setattr(entry, "_SmallSWEFSDPSFTTrainer", _Trainer)
+    monkeypatch.setattr(
+        entry._verl_sft_trainer,
+        "destroy_global_process_group",
+        lambda: destroyed.append(True),
+    )
+
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        entry._patched_run_sft(trainer_config)
+
+    assert destroyed == [True]
+
+
 def test_fit_without_validation_never_calls_validation_with_zero_test_freq(monkeypatch) -> None:
     entry = _load_entry_module()
     omegaconf = pytest.importorskip("omegaconf")
