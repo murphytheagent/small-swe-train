@@ -203,8 +203,6 @@ small-swe-train/
       action_masking.py
     metrics/
       contracts.py             # FormatMetrics, rate()
-    eval/
-      swebench_lite.py         # EpisodeResult, summarize, compare
     verl_integration/            # adapter layer: our modules ↔ verl
       main_ppo_entry.py
       ppo_runtime_patch.py
@@ -229,8 +227,6 @@ small-swe-train/
     run_sdpo.sh
     run_step_sdpo_scaffold.py
     run_rft_onpolicy_rollout_proof.sh
-    eval_swebench_lite.sh
-    eval_swebench_lite.py
     check_sdpo_turn_integrity.py
     run_flash_attn_rebuild.sh
     SLURM_GPU_LAUNCH.md
@@ -301,14 +297,13 @@ for Ray/tmpdir and cleanup guidance. The launcher defaults
 | `verl_integration/ppo_runtime_patch.py` | RayPPOTrainer hook patching | `test_ppo_runtime_patch.py` |
 | `verl_integration/swe_bridge_agent_loop.py` | SDPO agent loop + Docker tools | `test_swe_bridge_agent_loop.py` |
 | `trainer/sdpo_trainer.py` | `SDPOTrainerScaffold` | `test_sdpo_trainer.py` |
-| `eval/swebench_lite.py` | SWE-bench Lite metrics | `test_swebench_lite.py` |
 
 ### Remaining gaps / TODO
 | Component | Description | Notes |
 |-----------|-------------|-------|
 | **Teacher memory compression** | Implement real compression/critical-fact extraction in `teacher/memory_builder.py`. | Currently returns empty blocks. |
 | **Live GPU validation** | Run `scripts/run_rft.sh` + `scripts/run_sdpo.sh` on Slurm with vLLM/Ray to validate full loops. | Requires external infra. |
-| **End-to-end evaluation harness** | Produce prediction JSONs from live agent runs and score via `eval/swebench_lite.py`. | Partial offline evaluator exists. |
+| **Benchmark stage** | Choose a current benchmark target, define prediction artifacts, and implement a scoring runner. | No active benchmarking stage exists; SDPO currently has only in-loop verifier-backed validation. |
 
 ## 11) Bug-fix log (v1.9, 2026-03-05)
 
@@ -346,7 +341,7 @@ have regression tests in `tests/`.
 
 3. **Implement teacher memory compression** — Replace the placeholder logic in `teacher/memory_builder.py` with real summarization / critical-facts extraction.
 
-4. **Automate evaluation pipeline** — Produce prediction JSONs from live agent runs and score via `scripts/eval_swebench_lite.py` (or integrate into SDPO/RFT post-run steps).
+4. **Define the benchmark stage** — Choose the benchmark target and artifact/scoring contract before implementing post-training evaluation.
 
 ## 13) Training infrastructure decision
 
