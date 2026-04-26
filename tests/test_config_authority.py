@@ -481,6 +481,7 @@ def test_rft_runtime_defaults_load_loop_and_vllm_config() -> None:
     assert runtime_defaults["loop"]["train_batch_size"] >= 1
     assert 0.0 <= float(runtime_defaults["loop"]["eval_split_fraction"]) < 1.0
     assert runtime_defaults["loop"]["eval_min_rows"] >= 1
+    assert runtime_defaults["loop"]["eval_task_count"] >= 1
     assert runtime_defaults["loop"]["checkpoint_keep_last"] >= 1
     assert runtime_defaults["vllm"]["base_url"].startswith("http://")
     assert runtime_defaults["vllm_parallelism"]["default_tensor_parallel_size"] >= 1

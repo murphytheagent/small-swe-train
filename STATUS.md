@@ -8,6 +8,7 @@ Last updated: 2026-04-26.
 - `2040` proved `format_rft -> positive_rft` end to end, but positive-stage training still selected `0` rows while eval reached `6/64`; there is not yet a usable positive-RFT checkpoint.
 - The next executable artifact is the first full `SWE-smith-py` difficulty-probe cache against the `2040` format-stage checkpoint.
 - There is no active benchmark stage yet. `turn_sdpo` has in-loop verifier-backed validation only; the stale SWE-bench Lite evaluator path has been removed.
+- RFT convergence telemetry now uses a fixed valid-task holdout count (`rft_runtime.loop.eval_task_count`, default `50`) collected once per outer step. Step 0 evaluates the initial model, both format and positive RFT use the path, and the local SFT trainer entrypoint disables verl's inner validation path for this signal.
 - JS/TS work should stay focused on repo-aware Node verifier adapters, not a generic `node_test` command toggle.
 - Root documentation policy is now: keep only `AGENTS.md`, `README.md`, and `STATUS.md` at repo root; keep research, design, migration, and evaluation plans under `docs/`.
 - JSON remains the default assistant payload format; XML action format is implemented as an opt-in path with reusable schema derivation, dual parsing, prompt/render support, and JSON fallback for non-XML-representable structured tool calls.
@@ -16,7 +17,7 @@ Last updated: 2026-04-26.
 ## Active TODO
 - Materialize the `SWE-smith-py` difficulty-probe cache against the `2040` format-stage checkpoint.
 - Run a real E2E JSON-vs-XML rollout comparison before deciding whether XML is effective enough to become the default assistant payload surface.
-- Diagnose why positive-stage training selected `0` rows despite nonzero held-out eval resolution.
+- Use the fixed outer-step RFT eval telemetry to diagnose positive-stage convergence and row-selection behavior.
 - Continue JS/TS verifier planning around repo-aware selector normalization, runner detection, and bounded target reporting.
 - Run the first `turn_sdpo` teacher-entropy pilot before adding an entropy-gated objective.
 - Define a fresh benchmark target, artifact contract, and scoring runner before adding any post-training benchmarking stage.

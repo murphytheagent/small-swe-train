@@ -184,6 +184,7 @@ class OnPolicyRolloutCollector:
         task_partition: str = "all",
         task_eval_split_fraction: float = 0.0,
         task_eval_min_rows: int = 0,
+        task_eval_task_count: int | None = None,
         stage_name: str = "format_rft",
     ) -> None:
         self._settings = settings
@@ -196,6 +197,7 @@ class OnPolicyRolloutCollector:
         self._task_partition = task_partition
         self._task_eval_split_fraction = task_eval_split_fraction
         self._task_eval_min_rows = task_eval_min_rows
+        self._task_eval_task_count = task_eval_task_count
         normalized_stage_name = str(stage_name).strip()
         self._stage_name = normalized_stage_name or "format_rft"
 
@@ -221,6 +223,7 @@ class OnPolicyRolloutCollector:
             task_partition=self._task_partition,
             eval_split_fraction=self._task_eval_split_fraction,
             min_eval_rows=self._task_eval_min_rows,
+            eval_task_count=self._task_eval_task_count,
             stage_name=self._stage_name,
         )
 

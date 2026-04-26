@@ -152,7 +152,190 @@ def _call_from_pretrained_with_dtype_fallback(*args: Any, **kwargs: Any):
 _ensure_flash_attn_runtime_compatibility()
 AutoModelForCausalLM.from_pretrained = _patched_from_pretrained
 
-from verl.trainer.fsdp_sft_trainer import main  # noqa: E402
+import verl.trainer.fsdp_sft_trainer as _verl_sft_trainer  # noqa: E402
+
+
+_ORIGINAL_RUN_SFT = _verl_sft_trainer.run_sft
+_ORIGINAL_FSDP_SFT_TRAINER = _verl_sft_trainer.FSDPSFTTrainer
+
+
+class _EmptyValidationDataset:
+    def __len__(self) -> int:
+        return 0
+
+    def __getitem__(self, index: int) -> Any:
+        raise IndexError(index)
+
+
+def _config_get(config: Any, key: str, default: Any = None) -> Any:
+    if hasattr(config, "get"):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def _has_validation_files(config: Any) -> bool:
+    data_config = _config_get(config, "data")
+    val_files = _config_get(data_config, "val_files")
+    if val_files is None:
+        return False
+    if isinstance(val_files, str):
+        return bool(val_files.strip())
+    try:
+        return any(bool(str(item).strip()) for item in val_files)
+    except TypeError:
+        return bool(val_files)
+
+
+def _trainer_test_freq(config: Any) -> int:
+    trainer_config = _config_get(config, "trainer")
+    raw_value = _config_get(trainer_config, "test_freq", 0)
+    return int(raw_value)
+
+
+def _inner_validation_disabled(config: Any) -> bool:
+    return _trainer_test_freq(config) <= 0 or not _has_validation_files(config)
+
+
+def _load_hf_tokenizer(model_path: str, *, trust_remote_code: bool) -> Any:
+    from verl.utils import hf_tokenizer
+
+    return hf_tokenizer(model_path, trust_remote_code=trust_remote_code)
+
+
+def _fit_without_validation(trainer: Any) -> None:
+    rank = trainer.device_mesh.get_rank()
+
+    if rank == 0:
+        tracking = _verl_sft_trainer.Tracking(
+            project_name=trainer.config.trainer.project_name,
+            experiment_name=trainer.config.trainer.experiment_name,
+            default_backend=trainer.config.trainer.logger,
+            config=_verl_sft_trainer.OmegaConf.to_container(
+                trainer.config,
+                resolve=True,
+            ),
+            group_name=trainer.config.trainer.get("group_name", None),
+        )
+
+    global_step = trainer.resume_global_step
+    total_training_steps = len(trainer.train_dataloader) * trainer.config.trainer.total_epochs
+    if trainer.config.trainer.total_training_steps is not None:
+        total_training_steps = trainer.config.trainer.total_training_steps
+
+    trainer.total_training_steps = total_training_steps
+    _verl_sft_trainer.log_with_rank(
+        f"Total training steps: {trainer.total_training_steps},",
+        logger=_verl_sft_trainer.logger,
+        rank=trainer.device_mesh.get_rank(),
+        log_only_rank_0=True,
+    )
+
+    if global_step > 0:
+        _verl_sft_trainer.log_with_rank(
+            f"StatefulDataLoader will automatically resume from global step: {global_step}",
+            logger=_verl_sft_trainer.logger,
+            rank=trainer.device_mesh.get_rank(),
+            log_only_rank_0=True,
+        )
+
+    start_epoch = global_step // trainer.steps_per_epoch
+
+    train_time = 0
+    for epoch in range(start_epoch, trainer.config.trainer.total_epochs):
+        trainer.train_sampler.set_epoch(epoch=epoch)
+
+        for _step_in_epoch, data in enumerate(
+            _verl_sft_trainer.tqdm(
+                trainer.train_dataloader,
+                initial=global_step % trainer.steps_per_epoch if epoch == start_epoch else 0,
+                total=trainer.steps_per_epoch,
+                desc=f"Epoch {epoch + 1}/{trainer.config.trainer.total_epochs}",
+                disable=rank != 0,
+            )
+        ):
+            global_step += 1
+            data = _verl_sft_trainer.TensorDict(
+                data,
+                batch_size=trainer.config.data.train_batch_size,
+            ).to(trainer.device_name)
+            metric = trainer.training_step(data)
+            train_time += metric["train/time(s)"]
+            if rank == 0:
+                tracking.log(data=metric, step=global_step)
+
+            is_last_step = global_step >= trainer.total_training_steps
+            save_freq = int(trainer.config.trainer.save_freq)
+            is_save_step = save_freq > 0 and global_step % save_freq == 0
+
+            if is_last_step or is_save_step:
+                trainer.save_checkpoint(step=global_step)
+
+            if is_last_step:
+                if rank == 0:
+                    print(f"Total time for train steps: {train_time:.2f}s")
+                    print("Final validation metrics: None")
+                return
+
+
+class _SmallSWEFSDPSFTTrainer(_ORIGINAL_FSDP_SFT_TRAINER):
+    def fit(self) -> None:
+        if _inner_validation_disabled(self.config):
+            _fit_without_validation(self)
+            return
+        super().fit()
+
+
+def _patched_run_sft(config: Any) -> None:
+    if not _inner_validation_disabled(config):
+        _ORIGINAL_RUN_SFT(config)
+        return
+
+    device_name = _verl_sft_trainer.get_device_name()
+    _local_rank, _rank, world_size = _verl_sft_trainer.initialize_global_process_group()
+
+    device_mesh = _verl_sft_trainer.init_device_mesh(
+        device_type=device_name,
+        mesh_shape=(world_size,),
+        mesh_dim_names=("fsdp",),
+    )
+    dp_size = world_size // config.ulysses_sequence_parallel_size
+    ulysses_device_mesh = _verl_sft_trainer.init_device_mesh(
+        device_type=device_name,
+        mesh_shape=(dp_size, config.ulysses_sequence_parallel_size),
+        mesh_dim_names=("dp", "sp"),
+    )
+
+    local_model_path = _verl_sft_trainer.copy_to_local(
+        src=config.model.partial_pretrain,
+        verbose=True,
+    )
+    tokenizer = _load_hf_tokenizer(
+        local_model_path,
+        trust_remote_code=config.model.trust_remote_code,
+    )
+    train_dataset = _verl_sft_trainer.create_sft_dataset(
+        config.data.train_files,
+        config.data,
+        tokenizer,
+        max_samples=config.data.get("train_max_samples", -1),
+    )
+
+    trainer = _SmallSWEFSDPSFTTrainer(
+        config=config,
+        device_mesh=device_mesh,
+        ulysses_device_mesh=ulysses_device_mesh,
+        tokenizer=tokenizer,
+        train_dataset=train_dataset,
+        val_dataset=_EmptyValidationDataset(),
+    )
+
+    trainer.fit()
+    _verl_sft_trainer.destroy_global_process_group()
+
+
+_verl_sft_trainer.FSDPSFTTrainer = _SmallSWEFSDPSFTTrainer
+_verl_sft_trainer.run_sft = _patched_run_sft
+main = _verl_sft_trainer.main
 
 
 if __name__ == "__main__":

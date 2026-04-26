@@ -110,12 +110,11 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
         python_bin="python3",
         nnodes=1,
         nproc_per_node=8,
-        trainer_module="verl.trainer.fsdp_sft_trainer",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
         config_name="rft_swe",
         config_dir=tmp_path / "configs",
         model_path=config.DEFAULT_TRAINING_MODEL_NAME,
         train_parquet_path=tmp_path / "accepted.parquet",
-        val_parquet_path=tmp_path / "accepted_eval.parquet",
         trainer_output_dir=tmp_path / "checkpoints",
         train_batch_size=32,
         sft_num_epoch_per_batch=1,
@@ -124,16 +123,18 @@ def test_build_trainer_step_command_includes_required_dataset_and_checkpoint_ove
 
     command_text = " ".join(command)
     assert "python3 -m torch.distributed.run" in command_text
-    assert "-m verl.trainer.fsdp_sft_trainer" in command_text
+    assert "-m verl_integration.fsdp_sft_trainer_entry" in command_text
     assert "trainer.total_training_steps=1" in command_text
     assert "trainer.save_freq=2147483647" in command_text
+    assert "trainer.test_freq=0" in command_text
     assert "trainer.logger=[console]" in command_text
     assert "trainer.checkpoint.save_contents=[hf_model]" in command_text
     assert "trainer.checkpoint.load_contents=[hf_model]" in command_text
     assert "data.multiturn.enable=true" in command_text
     assert "data.custom_cls.path=null" in command_text
     assert f"data.train_files={tmp_path / 'accepted.parquet'}" in command_text
-    assert f"data.val_files={tmp_path / 'accepted_eval.parquet'}" in command_text
+    assert "data.val_files=[]" in command_text
+    assert "accepted_eval.parquet" not in command_text
     assert f"model.partial_pretrain={config.DEFAULT_TRAINING_MODEL_NAME}" in command_text
 
 
@@ -147,12 +148,11 @@ def test_build_trainer_step_command_allows_inner_wandb_when_enabled(
         python_bin="python3",
         nnodes=1,
         nproc_per_node=8,
-        trainer_module="verl.trainer.fsdp_sft_trainer",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
         config_name="rft_swe",
         config_dir=tmp_path / "configs",
         model_path=config.DEFAULT_TRAINING_MODEL_NAME,
         train_parquet_path=tmp_path / "accepted.parquet",
-        val_parquet_path=tmp_path / "accepted_eval.parquet",
         trainer_output_dir=tmp_path / "checkpoints",
         train_batch_size=32,
         sft_num_epoch_per_batch=1,
@@ -161,6 +161,57 @@ def test_build_trainer_step_command_allows_inner_wandb_when_enabled(
 
     command_text = " ".join(command)
     assert "trainer.logger=[console,wandb]" in command_text
+
+
+def test_build_trainer_step_command_rejects_unpatched_trainer_module(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="local entrypoint skips verl validation"):
+        build_trainer_step_command(
+            python_bin="python3",
+            nnodes=1,
+            nproc_per_node=8,
+            trainer_module="verl.trainer.fsdp_sft_trainer",
+            config_name="rft_swe",
+            config_dir=tmp_path / "configs",
+            model_path=config.DEFAULT_TRAINING_MODEL_NAME,
+            train_parquet_path=tmp_path / "accepted.parquet",
+            trainer_output_dir=tmp_path / "checkpoints",
+            train_batch_size=32,
+            sft_num_epoch_per_batch=1,
+            trainer_overrides=(),
+        )
+
+
+def test_parse_args_defaults_to_fixed_eval_task_count(tmp_path: Path) -> None:
+    parsed = rft_runtime_loop._parse_args(
+        [
+            "--project-root",
+            str(tmp_path),
+            "--config-dir",
+            str(tmp_path / "configs"),
+            "--rft-steps",
+            "1",
+            "--samples-per-task",
+            "1",
+            "--task-batch-size",
+            "1",
+            "--sft-num-epoch-per-batch",
+            "1",
+            "--train-batch-size",
+            "1",
+            "--output-dir",
+            str(tmp_path / "runtime"),
+            "--initial-model",
+            "Qwen/Qwen3-0.6B",
+            "--vllm-base-url",
+            "http://127.0.0.1:8000/v1",
+            "--vllm-served-model",
+            "Qwen/Qwen3-0.6B",
+        ]
+    )
+
+    assert parsed.eval_task_count == 50
 
 
 def test_build_vllm_server_command_uses_host_and_port_from_base_url() -> None:
@@ -361,6 +412,7 @@ def test_run_loop_requires_checkpoint_when_trainer_runs(
         trainer_overrides=(),
         dry_run=False,
         eval_split_fraction=0.0,
+        eval_task_count=0,
     )
 
     with pytest.raises(RuntimeError, match="produced no checkpoint"):
@@ -503,6 +555,7 @@ def test_run_loop_skips_checkpoint_root_prune_when_trainer_is_skipped(
         trainer_overrides=(),
         dry_run=False,
         eval_split_fraction=0.0,
+        eval_task_count=0,
     )
 
     rft_runtime_loop.run_rft_runtime_loop(config)
@@ -638,6 +691,7 @@ def test_run_loop_checkpoint_pruning_tracks_only_checkpoint_steps(
         trainer_overrides=(),
         dry_run=False,
         eval_split_fraction=0.0,
+        eval_task_count=0,
     )
 
     rft_runtime_loop.run_rft_runtime_loop(config)
@@ -810,6 +864,7 @@ def test_run_loop_resumes_from_latest_committed_checkpoint(
         trainer_overrides=(),
         dry_run=False,
         eval_split_fraction=0.0,
+        eval_task_count=0,
     )
 
     rft_runtime_loop.run_rft_runtime_loop(config)
@@ -832,6 +887,89 @@ def test_run_loop_resumes_from_latest_committed_checkpoint(
         )
     )
     assert [step["step_index"] for step in manifest["steps"]] == [0, 1]
+
+
+def test_run_loop_resume_rejects_changed_fixed_eval_task_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "runtime"
+    previous_step_dir = output_dir / "rft_step_00000"
+    previous_hf = previous_step_dir / "trainer_checkpoints" / "global_step_1" / "huggingface"
+    previous_vllm = previous_step_dir / "trainer_checkpoints" / "global_step_1" / "huggingface_vllm_merged"
+    previous_hf.mkdir(parents=True)
+    previous_vllm.mkdir(parents=True)
+    (output_dir / rft_runtime_loop._RFT_RUNTIME_LOOP_MANIFEST_FILE_NAME).write_text(
+        json.dumps(
+            {
+                "generated_utc": "2026-03-16 00:00 UTC",
+                "config": {},
+                "fixed_eval_task_ids": ["task-old"],
+                "steps": [{"step_index": 0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / rft_runtime_loop._RFT_LATEST_COMMITTED_CHECKPOINT_FILE_NAME).write_text(
+        json.dumps(
+            {
+                "stage": "format_rft",
+                "committed_step_index": 0,
+                "latest_hf_checkpoint": str(previous_hf),
+                "latest_vllm_checkpoint": str(previous_vllm),
+                "resume_model_path": str(previous_vllm),
+                "selection_contract": {"mode": "format_first_rft"},
+                "correctness_contract": "heuristic",
+                "committed_utc": "2026-03-16 00:00 UTC",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "validate_fixed_eval_task_pool",
+        lambda **_kwargs: ("task-new",),
+    )
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "_load_tokenizer",
+        lambda _model_path: pytest.fail("tokenizer should not load after eval-pool mismatch"),
+    )
+
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=2,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=1,
+        train_batch_size=1,
+        output_dir=output_dir,
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=False,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+        eval_split_fraction=0.0,
+        eval_task_count=50,
+    )
+
+    with pytest.raises(RuntimeError, match="eval task pool changed across resume"):
+        rft_runtime_loop.run_rft_runtime_loop(config)
 
 
 def test_run_loop_rejects_stage_switch_when_resuming_latest_committed_checkpoint(
@@ -887,6 +1025,7 @@ def test_run_loop_rejects_stage_switch_when_resuming_latest_committed_checkpoint
         trainer_overrides=(),
         dry_run=False,
         eval_split_fraction=0.0,
+        eval_task_count=0,
         stage_name="positive_rft",
     )
 
@@ -942,6 +1081,7 @@ def test_run_loop_resume_fails_closed_when_latest_commit_is_incomplete(tmp_path:
         trainer_overrides=(),
         dry_run=False,
         eval_split_fraction=0.0,
+        eval_task_count=0,
     )
 
     with pytest.raises(RuntimeError, match="Latest committed checkpoint is incomplete"):
@@ -1114,6 +1254,7 @@ def test_run_loop_does_not_restart_vllm_after_final_step(
         trainer_overrides=(),
         dry_run=False,
         eval_split_fraction=0.0,
+        eval_task_count=0,
     )
 
     rft_runtime_loop.run_rft_runtime_loop(config)
@@ -1279,6 +1420,7 @@ def test_run_loop_uses_vllm_compatible_checkpoint_for_followup_steps(
         trainer_overrides=(),
         dry_run=False,
         eval_split_fraction=0.0,
+        eval_task_count=0,
     )
 
     rft_runtime_loop.run_rft_runtime_loop(config)
@@ -1418,6 +1560,7 @@ def test_run_loop_upsamples_selected_rows_to_effective_batch_multiple(
         trainer_overrides=(),
         dry_run=False,
         eval_split_fraction=0.0,
+        eval_task_count=0,
     )
 
     rft_runtime_loop.run_rft_runtime_loop(config)
@@ -1433,12 +1576,11 @@ def test_run_loop_upsamples_selected_rows_to_effective_batch_multiple(
     assert summary["avg_generation_length"] > 0.0
 
 
-def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
+def test_run_loop_collects_outer_eval_without_inner_sft_val_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     write_calls: list[tuple[str, int]] = []
-    request_partitions: list[str] = []
     request_partitions: list[str] = []
 
     def _selected_row(task_id: str) -> dict[str, object]:
@@ -1467,6 +1609,7 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
         request_partitions.append(request.task_partition)
         assert request.task_eval_split_fraction == 0.25
         assert request.task_eval_min_rows == 1
+        assert request.task_eval_task_count == 1
         if request.task_partition == "train":
             return {
                 "selected_rows": [
@@ -1477,6 +1620,8 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
                 "rejected_rows": [],
             }
         assert request.task_partition == "eval"
+        assert request.runtime_overrides["task_batch_size"] == 1
+        assert request.runtime_overrides["attempts_per_task"] == 1
         return {
             "selected_rows": [_selected_row("task-4")],
             "rejected_rows": [],
@@ -1490,7 +1635,7 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
 
     def _fake_build_trainer_step_command(**kwargs):
         assert Path(kwargs["train_parquet_path"]).name == "accepted_trajectories.parquet"
-        assert Path(kwargs["val_parquet_path"]).name == "accepted_trajectories_eval.parquet"
+        assert "val_parquet_path" not in kwargs
         trainer_output_dir = Path(kwargs["trainer_output_dir"])
         return ["fake-trainer", str(trainer_output_dir)]
 
@@ -1505,6 +1650,11 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
         return target
 
     monkeypatch.setattr(rft_runtime_loop, "_load_tokenizer", _fake_load_tokenizer)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "validate_fixed_eval_task_pool",
+        lambda **_kwargs: ("task-4",),
+    )
     monkeypatch.setattr(rft_runtime_loop, "collect_onpolicy_rft_runtime_batch", _fake_collect)
     monkeypatch.setattr(
         rft_runtime_loop,
@@ -1567,15 +1717,13 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
         dry_run=False,
         eval_split_fraction=0.25,
         eval_min_rows=1,
+        eval_task_count=1,
     )
 
     rft_runtime_loop.run_rft_runtime_loop(config)
 
     assert request_partitions == ["train", "eval"]
-    assert write_calls == [
-        ("accepted_trajectories.parquet", 3),
-        ("accepted_trajectories_eval.parquet", 1),
-    ]
+    assert write_calls == [("accepted_trajectories.parquet", 3)]
     summary_path = config.output_dir / "rft_step_00000" / "rft_step_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["selected_count_raw"] == 3
@@ -1583,11 +1731,74 @@ def test_run_loop_writes_eval_parquet_and_uses_eval_val_path(
     assert summary["selected_count_for_train"] == 3
     assert summary["selected_count_for_eval"] == 1
     assert summary["eval_selected_count_raw"] == 1
+    assert summary["eval_task_count"] == 1
     assert summary["eval_split_fallback_to_train"] is False
-    assert summary["eval_parquet"].endswith("accepted_trajectories_eval.parquet")
+    assert summary["eval_parquet"] is None
+    assert summary["outer_eval_artifact_dir"].endswith("collector_artifacts/eval")
 
 
-def test_run_loop_upsamples_eval_rows_to_effective_batch_multiple(
+def test_run_loop_validates_fixed_eval_task_pool_before_tokenizer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    def _fake_validate_fixed_eval_task_pool(**kwargs):
+        events.append("validate")
+        assert kwargs["data_config_name"] == "on_policy_swe_smith"
+        assert kwargs["eval_task_count"] == 50
+        return tuple(f"task-{index}" for index in range(50))
+
+    def _fake_load_tokenizer(_model_path: str):
+        events.append("tokenizer")
+        raise RuntimeError("stop after validation")
+
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "validate_fixed_eval_task_pool",
+        _fake_validate_fixed_eval_task_pool,
+    )
+    monkeypatch.setattr(rft_runtime_loop, "_load_tokenizer", _fake_load_tokenizer)
+
+    config = RFTLoopConfig(
+        project_root=tmp_path,
+        config_dir=tmp_path / "configs",
+        config_name="rft_swe",
+        trainer_module="verl_integration.fsdp_sft_trainer_entry",
+        python_bin="python3",
+        nnodes=1,
+        nproc_per_node=1,
+        rft_steps=1,
+        samples_per_task=1,
+        task_batch_size=1,
+        sft_num_epoch_per_batch=1,
+        checkpoint_keep_last=1,
+        train_batch_size=1,
+        output_dir=tmp_path / "runtime",
+        data_config_name="on_policy_swe_smith",
+        turn_generator_mode="default",
+        initial_model="Qwen/Qwen3-0.6B",
+        vllm_base_url="http://127.0.0.1:8000/v1",
+        vllm_served_model="Qwen/Qwen3-0.6B",
+        manage_vllm=False,
+        vllm_launch_module="trainer.vllm_api_server_entry",
+        vllm_ready_timeout_sec=1,
+        vllm_stop_timeout_sec=1,
+        vllm_extra_args=(),
+        trainer_overrides=(),
+        dry_run=False,
+        eval_split_fraction=0.0,
+        eval_min_rows=0,
+        eval_task_count=50,
+    )
+
+    with pytest.raises(RuntimeError, match="stop after validation"):
+        rft_runtime_loop.run_rft_runtime_loop(config)
+
+    assert events == ["validate", "tokenizer"]
+
+
+def test_run_loop_keeps_outer_eval_out_of_inner_sft_batching(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1645,7 +1856,7 @@ def test_run_loop_upsamples_eval_rows_to_effective_batch_multiple(
     def _fake_build_trainer_step_command(**kwargs):
         assert kwargs["train_batch_size"] == 2
         assert Path(kwargs["train_parquet_path"]).name == "accepted_trajectories.parquet"
-        assert Path(kwargs["val_parquet_path"]).name == "accepted_trajectories_eval.parquet"
+        assert "val_parquet_path" not in kwargs
         trainer_output_dir = Path(kwargs["trainer_output_dir"])
         return ["fake-trainer", str(trainer_output_dir)]
 
@@ -1728,10 +1939,7 @@ def test_run_loop_upsamples_eval_rows_to_effective_batch_multiple(
     rft_runtime_loop.run_rft_runtime_loop(config)
 
     assert request_partitions == ["train", "eval"]
-    assert write_calls == [
-        ("accepted_trajectories.parquet", 4),
-        ("accepted_trajectories_eval.parquet", 2),
-    ]
+    assert write_calls == [("accepted_trajectories.parquet", 4)]
     summary_path = config.output_dir / "rft_step_00000" / "rft_step_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["selected_count_raw"] == 4
@@ -1739,14 +1947,14 @@ def test_run_loop_upsamples_eval_rows_to_effective_batch_multiple(
     assert summary["selected_count_for_train"] == 4
     assert summary["selected_rows_upsampled"] == 0
     assert summary["selected_count_for_eval_raw"] == 1
-    assert summary["selected_count_for_eval"] == 2
+    assert summary["selected_count_for_eval"] == 1
     assert summary["eval_selected_count_raw"] == 1
-    assert summary["selected_rows_eval_upsampled"] == 1
-    assert summary["effective_eval_batch_size"] == 2
+    assert summary["selected_rows_eval_upsampled"] == 0
+    assert summary["effective_eval_batch_size"] is None
     assert summary["eval_split_fallback_to_train"] is False
 
 
-def test_run_loop_reuses_train_parquet_when_eval_selection_is_empty(
+def test_run_loop_rejects_empty_eval_selection_without_train_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1797,10 +2005,7 @@ def test_run_loop_reuses_train_parquet_when_eval_selection_is_empty(
         return len(rows)
 
     def _fake_build_trainer_step_command(**kwargs):
-        assert Path(kwargs["train_parquet_path"]).name == "accepted_trajectories.parquet"
-        assert Path(kwargs["val_parquet_path"]).name == "accepted_trajectories.parquet"
-        trainer_output_dir = Path(kwargs["trainer_output_dir"])
-        return ["fake-trainer", str(trainer_output_dir)]
+        raise AssertionError("trainer command should not be built when held-out eval is empty")
 
     def _fake_run_command(command, *, cwd: Path):
         del cwd
@@ -1892,16 +2097,11 @@ def test_run_loop_reuses_train_parquet_when_eval_selection_is_empty(
         eval_min_rows=1,
     )
 
-    rft_runtime_loop.run_rft_runtime_loop(config)
+    with pytest.raises(RuntimeError, match="outer-step eval telemetry"):
+        rft_runtime_loop.run_rft_runtime_loop(config)
 
     assert request_partitions == ["train", "eval"]
     assert write_calls == [("accepted_trajectories.parquet", 2)]
-    summary_path = config.output_dir / "rft_step_00000" / "rft_step_summary.json"
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    assert summary["selected_count_for_eval_raw"] == 0
-    assert summary["selected_count_for_eval"] == 0
-    assert summary["eval_split_fallback_to_train"] is True
-    assert summary["eval_parquet"].endswith("accepted_trajectories.parquet")
 
 
 def test_run_loop_positive_stage_requests_resolved_only_selection(
@@ -1934,6 +2134,10 @@ def test_run_loop_positive_stage_requests_resolved_only_selection(
         del tokenizer
         handoff = request.handoff_overrides
         assert isinstance(handoff, dict)
+        assert request.task_eval_task_count == 1
+        if request.task_partition == "eval":
+            assert request.runtime_overrides["task_batch_size"] == 1
+            assert request.runtime_overrides["attempts_per_task"] == 1
         captured_requests.append(
             (request.task_partition, request.verify_submissions, request.stage_name, handoff)
         )
@@ -1962,6 +2166,11 @@ def test_run_loop_positive_stage_requests_resolved_only_selection(
         return target
 
     monkeypatch.setattr(rft_runtime_loop, "_load_tokenizer", _fake_load_tokenizer)
+    monkeypatch.setattr(
+        rft_runtime_loop,
+        "validate_fixed_eval_task_pool",
+        lambda **_kwargs: ("eval-task",),
+    )
     monkeypatch.setattr(rft_runtime_loop, "collect_onpolicy_rft_runtime_batch", _fake_collect)
     monkeypatch.setattr(
         rft_runtime_loop,
@@ -2024,6 +2233,7 @@ def test_run_loop_positive_stage_requests_resolved_only_selection(
         dry_run=False,
         eval_split_fraction=0.25,
         eval_min_rows=1,
+        eval_task_count=1,
         stage_name="positive_rft",
     )
 
@@ -2617,6 +2827,7 @@ def test_run_loop_writes_inner_loss_delta_metrics_to_summary(
         trainer_overrides=(),
         dry_run=False,
         eval_split_fraction=0.0,
+        eval_task_count=0,
     )
 
     rft_runtime_loop.run_rft_runtime_loop(config)

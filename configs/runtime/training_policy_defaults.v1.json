@@ -129,6 +129,7 @@
       "train_batch_size": 32,
       "eval_split_fraction": 0.1,
       "eval_min_rows": 1,
+      "eval_task_count": 50,
       "checkpoint_keep_last": 1
     },
     "vllm": {

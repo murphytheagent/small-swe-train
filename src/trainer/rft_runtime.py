@@ -31,6 +31,7 @@ class OnPolicyRFTRuntimeRequest:
     task_partition: str = "all"
     task_eval_split_fraction: float = 0.0
     task_eval_min_rows: int = 0
+    task_eval_task_count: int | None = None
     verify_submissions: bool = False
     stage_name: str = "format_rft"
     dataset_loader: DatasetLoader | None = None
@@ -54,6 +55,7 @@ def collect_onpolicy_rft_runtime_batch(
         task_partition=request.task_partition,
         task_eval_split_fraction=request.task_eval_split_fraction,
         task_eval_min_rows=request.task_eval_min_rows,
+        task_eval_task_count=request.task_eval_task_count,
         stage_name=request.stage_name,
         dataset_loader=request.dataset_loader,
     )
@@ -138,6 +140,11 @@ def _build_runtime_manifest_payload(
         "task_partition": str(request.task_partition),
         "task_eval_split_fraction": float(request.task_eval_split_fraction),
         "task_eval_min_rows": int(request.task_eval_min_rows),
+        "task_eval_task_count": (
+            int(request.task_eval_task_count)
+            if request.task_eval_task_count is not None
+            else None
+        ),
         "verify_submissions": bool(request.verify_submissions),
         "stage_name": str(request.stage_name),
         "rollout_count": len(rollout_rows),

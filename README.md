@@ -27,7 +27,8 @@ Canonical staged pipeline:
 - `scripts/run_rft.sh` now defaults to a real RFT runtime loop:
   - collect live rollouts from vLLM + Docker envs,
   - write selected trajectories to `MultiTurnSFTDataset`-compatible parquet shards,
-  - train `verl.trainer.fsdp_sft_trainer` with per-step `data.train_files=<accepted_step.parquet>`,
+  - collect fixed held-out eval telemetry once per outer step (`rft_runtime.loop.eval_task_count`, default `50`),
+  - train through `verl_integration.fsdp_sft_trainer_entry` with per-step `data.train_files=<accepted_step.parquet>` and inner verl validation disabled,
   - detect the latest trainer checkpoint and restart vLLM on that snapshot for the next RFT step.
 - vLLM launch defaults to `trainer.vllm_api_server_entry`, which delegates to the documented OpenAI server entrypoint and guards against broken external `flash_attn` wheels.
 - `scripts/run_rft.sh` preserves a `RFT_RUNTIME_MODE=direct` path for proof/legacy one-shot launcher behavior.
