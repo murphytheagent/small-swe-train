@@ -12,7 +12,13 @@ from config import (
     SUPPORTED_ACTION_PAYLOAD_FORMATS,
     TERMINAL_TOOL_NAME,
 )
-from schemas import ALLOWED_TOOLS, TOOL_SCHEMAS
+from schemas import (
+    ALLOWED_TOOLS,
+    TOOL_SCHEMAS,
+    iter_xml_tool_schemas,
+    render_xml_contract_signature,
+    render_xml_tool_schema_line,
+)
 
 from .model_delimiters import ModelDelimiters, default_delimiters
 
@@ -137,6 +143,14 @@ def _build_tool_schema_prompt() -> str:
     return "\n".join(lines)
 
 
+def _build_tool_schema_prompt_for_format(*, action_payload_format: str) -> str:
+    if action_payload_format == "json":
+        return _build_tool_schema_prompt()
+    lines = ["Tool arg schema:"]
+    lines.extend(render_xml_tool_schema_line(schema) for schema in iter_xml_tool_schemas())
+    return "\n".join(lines)
+
+
 def _build_required_args_prompt() -> str:
     required_fields: list[str] = []
     for tool_name in ALLOWED_TOOLS:
@@ -164,7 +178,7 @@ def _normalize_action_payload_format(value: str | None) -> str:
 def _render_contract_signature(*, delimiters: ModelDelimiters, action_payload_format: str) -> str:
     if action_payload_format == "json":
         return f'{delimiters.tool_call_start}{{"tool":"...","args":{{...}}}}{delimiters.tool_call_end}'
-    return '<tool_call name="tool_name"><arg_name><![CDATA[value]]></arg_name></tool_call>'
+    return render_xml_contract_signature()
 
 
 def _build_tool_examples_prompt(*, action_payload_format: str) -> str:
@@ -220,7 +234,11 @@ def build_assistant_contract_prompt(
     d = delimiters or default_delimiters()
     resolved_payload_format = _normalize_action_payload_format(action_payload_format)
     allowed_tools_text = ", ".join(ALLOWED_TOOLS)
-    tool_schema_block = _build_tool_schema_prompt() if include_tool_schema else ""
+    tool_schema_block = (
+        _build_tool_schema_prompt_for_format(action_payload_format=resolved_payload_format)
+        if include_tool_schema
+        else ""
+    )
     tool_examples_block = (
         _build_tool_examples_prompt(action_payload_format=resolved_payload_format)
         if include_examples
@@ -230,10 +248,16 @@ def build_assistant_contract_prompt(
 
     lines: list[str] = []
     lines.append("Surround each tool action with a tool-call delimiter block.")
-    lines.append(
-        f"Emit ordered tool calls (max {max_tool_calls}): "
-        f"{_render_contract_signature(delimiters=d, action_payload_format=resolved_payload_format)}"
-    )
+    if max_tool_calls == 1:
+        lines.append(
+            "Emit exactly one tool call: "
+            f"{_render_contract_signature(delimiters=d, action_payload_format=resolved_payload_format)}"
+        )
+    else:
+        lines.append(
+            f"Emit ordered tool calls (max {max_tool_calls}): "
+            f"{_render_contract_signature(delimiters=d, action_payload_format=resolved_payload_format)}"
+        )
     if resolved_payload_format == "json":
         lines.append(
             "Every tool-call JSON object MUST include both keys: 'tool' and 'args'. "
@@ -245,7 +269,11 @@ def build_assistant_contract_prompt(
             "Do not add an <args> wrapper."
         )
         lines.append(
-            "Use CDATA for string-valued args so multiline command, patch, and final_response round-trip cleanly. "
+            "Use CDATA for string-valued args so multiline command, patch, description, and final_response round-trip cleanly. "
+            "If a string contains ']]>', use escaped XML text instead."
+        )
+        lines.append(
+            "Escaped XML text may use built-in escapes: &lt;, &gt;, &amp;, &quot;, and &apos;. "
             "XML still normalizes line endings to LF."
         )
         lines.append(
@@ -253,7 +281,7 @@ def build_assistant_contract_prompt(
             "<changed_paths><path><![CDATA[src/app.py]]></path></changed_paths>."
         )
         lines.append(
-            "Do not emit comments, namespaces, DTDs, processing instructions, extra attributes, or mixed JSON/XML payloads."
+            "Do not emit comments, namespaces, DTDs, external entities, custom entities, processing instructions, extra attributes, or mixed JSON/XML payloads."
         )
     lines.append("Begin with a tool-call block. Do not emit prose before the first tool call.")
     lines.append(f"Allowed tools: {allowed_tools_text}.")

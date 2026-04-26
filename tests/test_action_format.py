@@ -57,7 +57,7 @@ def test_parse_assistant_text_result_reports_xml_payload_format() -> None:
     assert parsed.envelope.tool_calls[0].tool == "bash"
 
 
-def test_render_tool_call_block_preserves_legacy_json_contract() -> None:
+def test_render_tool_call_block_preserves_json_contract() -> None:
     rendered = render_tool_call_block(
         ToolCall(tool="bash", args={"command": "pytest -q", "cwd": "."}),
         payload_format="json",
@@ -90,13 +90,14 @@ def test_render_tool_call_block_supports_xml_payload_format() -> None:
     )
 
 
-def test_render_tool_call_block_xml_splits_cdata_end_marker() -> None:
+def test_render_tool_call_block_xml_uses_escaped_text_for_cdata_end_marker() -> None:
     rendered = render_tool_call_block(
         ToolCall(tool="submit", args={"final_response": "done ]]> now"}),
         payload_format="xml",
     )
 
-    assert "]]]]><![CDATA[>" in rendered
+    assert "<![CDATA[" not in rendered
+    assert "]]&gt;" in rendered
     parsed = parse_assistant_text(rendered, parse_mode="xml_only")
     assert parsed.tool_calls[0].args["final_response"] == "done ]]> now"
 
@@ -388,6 +389,24 @@ def test_parse_assistant_text_xml_rejects_comments() -> None:
 
     with pytest.raises(TurnParseError, match="do not allow comments"):
         parse_assistant_text(payload, parse_mode="xml_only")
+
+
+def test_parse_assistant_text_xml_allows_builtin_escapes_and_rejects_custom_entities() -> None:
+    payload = (
+        '<tool_call name="submit">'
+        "<final_response>done &lt;ok&gt; &amp; &quot;q&quot; &apos;a&apos;</final_response>"
+        "</tool_call>"
+    )
+
+    envelope = parse_assistant_text(payload, parse_mode="xml_only")
+
+    assert envelope.tool_calls[0].args["final_response"] == 'done <ok> & "q" \'a\''
+
+    with pytest.raises(TurnParseError, match="built-in XML escapes"):
+        parse_assistant_text(
+            '<tool_call name="submit"><final_response>&custom;</final_response></tool_call>',
+            parse_mode="xml_only",
+        )
 
 
 def test_parse_assistant_text_dual_mode_parses_xml_think_cdata_before_real_xml_tool_call() -> None:

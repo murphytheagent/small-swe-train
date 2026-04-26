@@ -57,7 +57,9 @@ def test_extract_assistant_content_supports_tool_calls_payload() -> None:
         ]
     }
     content = _extract_assistant_content(payload)
-    assert content == '<tool_call>{"args":{"final_response":"done"},"tool":"submit"}</tool_call>'
+    assert content == (
+        '<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+    )
 
 
 def test_extract_assistant_content_preserves_invalid_tool_call_args() -> None:
@@ -126,7 +128,7 @@ def test_extract_assistant_content_uses_structured_tool_calls_when_content_is_bl
     }
 
     assert _extract_assistant_content(payload) == (
-        '<tool_call>{"args":{"command":"pytest -q"},"tool":"bash"}</tool_call>'
+        '<tool_call name="bash"><command><![CDATA[pytest -q]]></command></tool_call>'
     )
 
 

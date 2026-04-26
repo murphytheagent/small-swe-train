@@ -7,13 +7,11 @@ independently.
 
 from __future__ import annotations
 
-import functools
 import json
 import re
-import types
 from dataclasses import dataclass
 from html import escape
-from typing import Any, Literal, Mapping, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Mapping
 from xml.etree import ElementTree as ET
 
 from config import (
@@ -24,7 +22,19 @@ from config import (
     SUPPORTED_ACTION_PAYLOAD_FORMATS,
 )
 from prompts.model_delimiters import ModelDelimiters, default_delimiters
-from schemas import ActionEnvelope, TOOL_SCHEMAS, ToolCall, canonical_tool_name, make_tool_call
+from schemas import (
+    XML_CDATA_END,
+    XML_THINK_ELEMENT,
+    XML_TOOL_CALL_ELEMENT,
+    XML_TOOL_NAME_ATTRIBUTE,
+    ActionEnvelope,
+    ToolCall,
+    canonical_tool_name,
+    get_xml_arg_order,
+    get_xml_arg_schema,
+    get_xml_list_item_tag,
+    make_tool_call,
+)
 
 from .turn_parser import (
     TurnParseError,
@@ -35,9 +45,11 @@ from .turn_parser import (
 ActionPayloadFormat = Literal["json", "xml"]
 ActionParseMode = Literal["json_only", "dual", "xml_only"]
 
-_XML_TOOL_CALL_RE = re.compile(r"<tool_call\b[^>]*\bname\s*=")
-_XML_THINK_RE = re.compile(r"<think\b")
+_XML_TOOL_CALL_RE = re.compile(rf"<{XML_TOOL_CALL_ELEMENT}\b[^>]*\b{XML_TOOL_NAME_ATTRIBUTE}\s*=")
+_XML_THINK_RE = re.compile(rf"<{XML_THINK_ELEMENT}\b")
 _DISALLOWED_XML_SNIPPETS = ("<!doctype", "<!entity", "<?", "<!--")
+_XML_NAMED_ENTITY_RE = re.compile(r"&([A-Za-z_][A-Za-z0-9_.:-]*);")
+_XML_ALLOWED_NAMED_ENTITIES = {"lt", "gt", "amp", "quot", "apos"}
 _VALID_XML_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 _JSON_DECODER = json.JSONDecoder()
 
@@ -560,7 +572,7 @@ def render_think_block(
     d = delimiters or default_delimiters()
     resolved_payload_format = _normalize_action_payload_format(payload_format)
     if resolved_payload_format == "xml":
-        return f"{d.think_start}{_wrap_cdata(thinking)}{d.think_end}"
+        return f"{d.think_start}{_render_xml_string_value(thinking)}{d.think_end}"
     return f"{d.think_start}{thinking}{d.think_end}"
 
 
@@ -588,7 +600,7 @@ def parse_xml_assistant_turn_payload(
 
     for child in root:
         tag = _local_xml_name(child.tag)
-        if tag == "think":
+        if tag == XML_THINK_ELEMENT:
             if think_seen:
                 raise TurnParseError("At most one <think> block is allowed per assistant turn.")
             if child.attrib:
@@ -602,7 +614,7 @@ def parse_xml_assistant_turn_payload(
             if child.tail and child.tail.strip():
                 raise TurnParseError("Unexpected raw text outside XML assistant blocks.")
             continue
-        if tag != "tool_call":
+        if tag != XML_TOOL_CALL_ELEMENT:
             raise TurnParseError(f"Unsupported XML assistant payload tag <{tag}>.")
 
         tool_calls.append(_parse_xml_tool_call(child))
@@ -640,7 +652,13 @@ def _reject_disallowed_xml_constructs(payload: str) -> None:
         for snippet in _DISALLOWED_XML_SNIPPETS:
             if snippet in lowered:
                 raise TurnParseError(
-                    "XML assistant payloads do not allow comments, DTDs, entities, processing instructions, or namespaces."
+                    "XML assistant payloads do not allow comments, DTDs, external entities, custom entities, processing instructions, or namespaces."
+                )
+        for match in _XML_NAMED_ENTITY_RE.finditer(segment):
+            if match.group(1) not in _XML_ALLOWED_NAMED_ENTITIES:
+                raise TurnParseError(
+                    "XML assistant payloads only allow built-in XML escapes: "
+                    "&lt;, &gt;, &amp;, &quot;, and &apos;."
                 )
 
 
@@ -654,13 +672,15 @@ def _parse_xml_tool_call(element: ET.Element) -> ToolCall:
     for attribute_name in element.attrib:
         _local_xml_name(attribute_name)
 
-    name = str(element.attrib.get("name", "")).strip()
+    name = str(element.attrib.get(XML_TOOL_NAME_ATTRIBUTE, "")).strip()
     if not name:
-        raise TurnParseError("Each XML <tool_call> requires a non-empty name attribute.")
-    if set(element.attrib) != {"name"}:
-        extras = sorted(name for name in element.attrib if name != "name")
         raise TurnParseError(
-            f"Unsupported attributes on XML <tool_call>: {', '.join(extras)}."
+            f"Each XML <{XML_TOOL_CALL_ELEMENT}> requires a non-empty {XML_TOOL_NAME_ATTRIBUTE} attribute."
+        )
+    if set(element.attrib) != {XML_TOOL_NAME_ATTRIBUTE}:
+        extras = sorted(name for name in element.attrib if name != XML_TOOL_NAME_ATTRIBUTE)
+        raise TurnParseError(
+            f"Unsupported attributes on XML <{XML_TOOL_CALL_ELEMENT}>: {', '.join(extras)}."
         )
 
     try:
@@ -670,12 +690,11 @@ def _parse_xml_tool_call(element: ET.Element) -> ToolCall:
 
     if element.text and element.text.strip():
         raise TurnParseError(
-            f'XML <tool_call name="{canonical_name}"> may not contain raw text; use arg child elements.'
+            f'XML <{XML_TOOL_CALL_ELEMENT} {XML_TOOL_NAME_ATTRIBUTE}="{canonical_name}"> may not contain raw text; use arg child elements.'
         )
 
     seen_fields: set[str] = set()
     args: dict[str, Any] = {}
-    annotations = _tool_arg_annotations(canonical_name)
     for child in element:
         field_name = _local_xml_name(child.tag)
         for attribute_name in child.attrib:
@@ -686,16 +705,16 @@ def _parse_xml_tool_call(element: ET.Element) -> ToolCall:
         if field_name in seen_fields:
             raise TurnParseError(f"Duplicate XML arg field <{field_name}> in <tool_call name=\"{canonical_name}\">.")
         seen_fields.add(field_name)
-        annotation = annotations.get(field_name)
+        arg_schema = get_xml_arg_schema(canonical_name, field_name)
         args[field_name] = _coerce_xml_arg_value(
             tool_name=canonical_name,
             field_name=field_name,
-            annotation=annotation,
+            arg_schema=arg_schema,
             element=child,
         )
         if child.tail and child.tail.strip():
             raise TurnParseError(
-                f'Unexpected raw text inside <tool_call name="{canonical_name}"> after <{field_name}>.'
+                f'Unexpected raw text inside <{XML_TOOL_CALL_ELEMENT} {XML_TOOL_NAME_ATTRIBUTE}="{canonical_name}"> after <{field_name}>.'
             )
 
     try:
@@ -704,36 +723,15 @@ def _parse_xml_tool_call(element: ET.Element) -> ToolCall:
         raise TurnParseError(str(exc)) from exc
 
 
-@functools.lru_cache(maxsize=None)
-def _tool_arg_annotations(tool_name: str) -> dict[str, Any]:
-    schema = TOOL_SCHEMAS.get(tool_name)
-    source = schema.get("source") if isinstance(schema, Mapping) else None
-    if not isinstance(source, type):
-        return {}
-    return dict(get_type_hints(source))
-
-
-@functools.lru_cache(maxsize=None)
-def _tool_arg_order(tool_name: str) -> tuple[str, ...]:
-    schema = TOOL_SCHEMAS.get(tool_name)
-    source = schema.get("source") if isinstance(schema, Mapping) else None
-    annotations = getattr(source, "__annotations__", {})
-    if isinstance(annotations, Mapping):
-        return tuple(str(name) for name in annotations)
-    return ()
-
-
 def _coerce_xml_arg_value(
     *,
     tool_name: str,
     field_name: str,
-    annotation: Any,
+    arg_schema: Any,
     element: ET.Element,
 ) -> Any:
-    normalized_annotation = _unwrap_scalar_annotation(annotation)
-    origin = get_origin(normalized_annotation)
-    if origin in (list, tuple, set):
-        item_tag = _xml_list_item_tag(field_name)
+    if arg_schema is not None and arg_schema.kind == "list[string]":
+        item_tag = arg_schema.list_item_tag or get_xml_list_item_tag(field_name)
         values: list[str] = []
         if element.text and element.text.strip():
             raise TurnParseError(f"XML list arg <{field_name}> may not contain raw text before child elements.")
@@ -764,65 +762,51 @@ def _coerce_xml_arg_value(
         )
 
     raw_text = element.text or ""
-    if normalized_annotation is int:
+    if arg_schema is not None and arg_schema.kind == "int":
         stripped = raw_text.strip()
         if not stripped:
             raise TurnParseError(
-                f"XML integer arg <{field_name}> in <tool_call name=\"{tool_name}\"> may not be empty."
+                f"XML integer arg <{field_name}> in <{XML_TOOL_CALL_ELEMENT} {XML_TOOL_NAME_ATTRIBUTE}=\"{tool_name}\"> may not be empty."
             )
         try:
             return int(stripped)
         except ValueError as exc:
             raise TurnParseError(
-                f"XML integer arg <{field_name}> in <tool_call name=\"{tool_name}\"> must be an integer."
+                f"XML integer arg <{field_name}> in <{XML_TOOL_CALL_ELEMENT} {XML_TOOL_NAME_ATTRIBUTE}=\"{tool_name}\"> must be an integer."
             ) from exc
-    if normalized_annotation is float:
+    if arg_schema is not None and arg_schema.kind == "float":
         stripped = raw_text.strip()
         if not stripped:
             raise TurnParseError(
-                f"XML numeric arg <{field_name}> in <tool_call name=\"{tool_name}\"> may not be empty."
+                f"XML numeric arg <{field_name}> in <{XML_TOOL_CALL_ELEMENT} {XML_TOOL_NAME_ATTRIBUTE}=\"{tool_name}\"> may not be empty."
             )
         try:
             return float(stripped)
         except ValueError as exc:
             raise TurnParseError(
-                f"XML numeric arg <{field_name}> in <tool_call name=\"{tool_name}\"> must be numeric."
+                f"XML numeric arg <{field_name}> in <{XML_TOOL_CALL_ELEMENT} {XML_TOOL_NAME_ATTRIBUTE}=\"{tool_name}\"> must be numeric."
             ) from exc
-    if normalized_annotation is bool:
+    if arg_schema is not None and arg_schema.kind == "bool":
         stripped = raw_text.strip().lower()
         if stripped in {"true", "1"}:
             return True
         if stripped in {"false", "0"}:
             return False
         raise TurnParseError(
-            f"XML boolean arg <{field_name}> in <tool_call name=\"{tool_name}\"> must be true/false."
+            f"XML boolean arg <{field_name}> in <{XML_TOOL_CALL_ELEMENT} {XML_TOOL_NAME_ATTRIBUTE}=\"{tool_name}\"> must be true/false."
         )
     return raw_text
-
-
-def _xml_list_item_tag(field_name: str) -> str:
-    if field_name == "changed_paths":
-        return "path"
-    return "item"
-
-
-def _unwrap_scalar_annotation(annotation: Any) -> Any:
-    origin = get_origin(annotation)
-    union_type = getattr(types, "UnionType", None)
-    if origin in tuple(item for item in (union_type, Union) if item is not None):
-        args = tuple(arg for arg in get_args(annotation) if arg is not type(None))
-        if len(args) == 1:
-            return args[0]
-    return annotation
 
 
 def _render_xml_tool_call_block(call: ToolCall | Mapping[str, Any]) -> str:
     tool_name, args = _tool_name_and_args(call)
     ordered_items = _ordered_arg_items(tool_name, args)
-    parts = [f'<tool_call name="{escape(tool_name, quote=True)}">']
+    parts = [
+        f'<{XML_TOOL_CALL_ELEMENT} {XML_TOOL_NAME_ATTRIBUTE}="{escape(tool_name, quote=True)}">'
+    ]
     for field_name, value in ordered_items:
-        parts.append(_render_xml_arg(field_name, value))
-    parts.append("</tool_call>")
+        parts.append(_render_xml_arg(tool_name, field_name, value))
+    parts.append(f"</{XML_TOOL_CALL_ELEMENT}>")
     return "".join(parts)
 
 
@@ -844,15 +828,14 @@ def _ordered_arg_items(tool_name: str, args: Mapping[str, Any]) -> list[tuple[st
     except ValueError:
         canonical_name = tool_name
 
-    annotations = _tool_arg_annotations(canonical_name)
-    if annotations:
-        unknown_fields = sorted(field_name for field_name in args if field_name not in annotations)
+    ordered_names = get_xml_arg_order(canonical_name)
+    if ordered_names:
+        unknown_fields = sorted(field_name for field_name in args if field_name not in ordered_names)
         if unknown_fields:
             raise ValueError(
                 f"Unknown XML args for tool {canonical_name!r}: {', '.join(unknown_fields)}"
             )
 
-    ordered_names = _tool_arg_order(canonical_name)
     ordered: list[tuple[str, Any]] = []
     seen: set[str] = set()
     for field_name in ordered_names:
@@ -865,13 +848,18 @@ def _ordered_arg_items(tool_name: str, args: Mapping[str, Any]) -> list[tuple[st
     return ordered
 
 
-def _render_xml_arg(field_name: str, value: Any) -> str:
+def _render_xml_arg(tool_name: str, field_name: str, value: Any) -> str:
     if not _VALID_XML_NAME_RE.fullmatch(field_name):
         raise ValueError(f"Invalid XML arg field name: {field_name!r}")
+    arg_schema = get_xml_arg_schema(tool_name, field_name)
     if isinstance(value, list):
-        item_tag = _xml_list_item_tag(field_name)
+        item_tag = (
+            arg_schema.list_item_tag
+            if arg_schema is not None and arg_schema.list_item_tag is not None
+            else get_xml_list_item_tag(field_name)
+        )
         items = "".join(
-            f"<{item_tag}>{_wrap_cdata(str(item))}</{item_tag}>"
+            f"<{item_tag}>{_render_xml_string_value(str(item))}</{item_tag}>"
             for item in value
         )
         return f"<{field_name}>{items}</{field_name}>"
@@ -881,11 +869,17 @@ def _render_xml_arg(field_name: str, value: Any) -> str:
     if isinstance(value, (int, float)):
         return f"<{field_name}>{value}</{field_name}>"
     if isinstance(value, str):
-        return f"<{field_name}>{_wrap_cdata(value)}</{field_name}>"
+        return f"<{field_name}>{_render_xml_string_value(value)}</{field_name}>"
     raise ValueError(
         f"XML arg <{field_name}> must be a string, number, boolean, or list; got {type(value).__name__}."
     )
 
 
+def _render_xml_string_value(text: str) -> str:
+    if XML_CDATA_END in text:
+        return escape(text, quote=False)
+    return _wrap_cdata(text)
+
+
 def _wrap_cdata(text: str) -> str:
-    return f"<![CDATA[{text.replace(']]>', ']]]]><![CDATA[>')}]]>"
+    return f"<![CDATA[{text}]]>"

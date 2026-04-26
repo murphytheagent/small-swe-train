@@ -283,7 +283,7 @@ def _extract_assistant_content(payload: Mapping[str, Any]) -> str:
             if tool_name:
                 return render_tool_call_block(
                     {"tool": tool_name, "args": dict(args_dict)},
-                    payload_format="json",
+                    fallback_payload_format="json",
                     compact=True,
                 )
 

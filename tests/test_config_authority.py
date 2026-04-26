@@ -22,6 +22,7 @@ from schemas import (
     TEXT_SEARCH_TOOL_NAME,
     TOOL_SCHEMAS,
     ToolCall,
+    get_xml_tool_schema,
     validate_tool_call,
 )
 
@@ -38,11 +39,33 @@ def test_output_contract_exports_match_runtime_defaults() -> None:
 
     assert config.MIN_TOOL_CALLS_PER_TURN == int(output_contract["min_tool_calls_per_turn"])
     assert config.MAX_TOOL_CALLS_PER_TURN == int(output_contract["max_tool_calls_per_turn"])
+    assert config.MAX_TOOL_CALLS_PER_TURN == 1
     assert config.TERMINAL_TOOL_NAME == str(output_contract["terminal_tool"]).strip().lower()
     assert config.SUBMIT_MUST_BE_ONLY_TOOL_CALL is bool(output_contract["submit_must_be_only_tool_call"])
     assert config.TERMINAL_VALIDITY_PENALTY == float(output_contract.get("terminal_validity_penalty", 0.2))
     assert config.ACTION_PAYLOAD_FORMAT == str(output_contract.get("action_payload_format", "json")).strip().lower()
     assert config.ACTION_PARSE_MODE == str(output_contract.get("action_parse_mode", "json_only")).strip().lower()
+
+
+def test_xml_tool_schema_is_derived_from_tool_schemas() -> None:
+    schema = get_xml_tool_schema("bash")
+    args = {arg.name: arg for arg in schema.args}
+
+    assert schema.tool == "bash"
+    assert schema.element == "tool_call"
+    assert schema.name_attribute == "name"
+    assert args["command"].kind == "string"
+    assert args["command"].required is True
+    assert args["command"].string_encoding == "cdata"
+    assert args["command"].constraints["min_length"] == 1
+    assert args["timeout_sec"].kind == "int"
+    assert args["timeout_sec"].constraints["minimum"] == 1
+    assert args["timeout_sec"].constraints["maximum"] == 7200
+
+    submit_schema = get_xml_tool_schema("submit")
+    submit_args = {arg.name: arg for arg in submit_schema.args}
+    assert submit_args["changed_paths"].kind == "list[string]"
+    assert submit_args["changed_paths"].list_item_tag == "path"
 
 
 def test_default_training_model_name_is_loaded_from_shared_verl_config() -> None:
@@ -117,9 +140,9 @@ def test_prompt_contract_includes_read_and_direct_tool_call_rule() -> None:
     prompt = build_assistant_contract_prompt()
 
     assert "Begin with a tool-call block. Do not emit prose before the first tool call." in prompt
-    assert "read args: required {path:str" in prompt
-    assert "file_search args: required {query:str" in prompt
-    assert "text_search args: required {query:str" in prompt
+    assert "read XML args: required {path:string" in prompt
+    assert "file_search XML args: required {query:string" in prompt
+    assert "text_search XML args: required {query:string" in prompt
     assert "start_line:int" in prompt
     assert "end_line:int" in prompt
     assert "read.path" in prompt
@@ -197,7 +220,7 @@ def test_prompt_contract_schema_text_is_rendered_from_tool_schemas(monkeypatch: 
     monkeypatch.setitem(TOOL_SCHEMAS, "file_search", search_schema)
 
     prompt = build_assistant_contract_prompt()
-    assert "file_search args: required {query:str(min_len=7)}" in prompt
+    assert "file_search XML args: required {query:string(min_len=7, cdata_or_escaped_text)}" in prompt
 
 
 def test_prompt_contract_supports_xml_payload_mode() -> None:
@@ -207,9 +230,11 @@ def test_prompt_contract_supports_xml_payload_mode() -> None:
     assert "Every XML tool call MUST use a 'name' attribute for the tool and direct child elements for args." in prompt
     assert "Do not add an <args> wrapper." in prompt
     assert "Use CDATA for string-valued args" in prompt
+    assert "If a string contains ']]>', use escaped XML text instead." in prompt
+    assert "built-in escapes: &lt;, &gt;, &amp;, &quot;, and &apos;" in prompt
     assert "<changed_paths><path><![CDATA[src/app.py]]></path></changed_paths>" in prompt
     assert (
-        "Do not emit comments, namespaces, DTDs, processing instructions, extra attributes, or mixed JSON/XML payloads."
+        "Do not emit comments, namespaces, DTDs, external entities, custom entities, processing instructions, extra attributes, or mixed JSON/XML payloads."
         in prompt
     )
     assert '   - bash: <tool_call name="bash"><command><![CDATA[make test-target]]></command><cwd><![CDATA[.]]></cwd><timeout_sec>120</timeout_sec></tool_call>' in prompt
