@@ -1,7 +1,7 @@
 # Research: Migration from JSON Tool-Call Payloads to XML Field Payloads
 
 Generated: 2026-04-19 20:00 UTC
-Status: implemented in this branch; XML is the default assistant payload surface with dual parse for historical JSON compatibility
+Status: implemented as an opt-in path; JSON remains the default assistant payload surface until XML proves effective in a real E2E JSON-vs-XML rollout comparison
 Related thread: 1776538929.912089
 
 ## 1) Executive Summary
@@ -77,7 +77,7 @@ Conservative rollout default if a downstream consumer is not ready yet:
 
 Current branch default:
 
-- `action_payload_format = xml`
+- `action_payload_format = json`
 - `action_parse_mode = dual`
 
 Those knobs govern prompt wording, assistant-action rendering, and parse behavior. They do not affect tool backend semantics.
@@ -219,7 +219,7 @@ Important config caveat: the current config model assumes a literal `tool_call_s
 - Update `runtime_messages.py` and `teacher_messages.py`.
 - Keep runtime parser in dual mode so JSON traces and partial rollouts still work.
 
-### P4: Switch defaults only after A/B is clean
+### P4: Await real E2E JSON-vs-XML effectiveness run before switching defaults
 
 Required checks before making XML the default:
 
@@ -227,6 +227,7 @@ Required checks before making XML the default:
 - terminal-submit rate
 - no executor-regression in bridge/runtime behavior
 - no evidence of degraded rollout quality relative to current JSON prompting
+- real on-policy E2E result showing XML is at least competitive with JSON on the target rollout/eval workflow
 
 ## 10) What This Branch Implements
 
@@ -238,7 +239,7 @@ This branch now implements P0 through P3:
 - dual parse so historical JSON assistant traces still work
 - XML-aware prompt contracts for runtime and teacher prompting
 - XML-aware assistant-action rendering in tokenization, preprocessing, collector/runtime helpers, and vLLM structured-tool fallback
-- centralized defaults flipped to `action_payload_format = xml` and `action_parse_mode = dual`
+- centralized defaults keep `action_payload_format = json` while `action_parse_mode = dual` preserves XML opt-in and historical JSON compatibility
 
 What is still intentionally unchanged:
 
@@ -247,4 +248,4 @@ What is still intentionally unchanged:
 - `<tool_response>{json}</tool_response>`
 - historical JSON artifacts on disk
 
-The only remaining item from the original rollout plan is the empirical A/B gate in P4.
+The remaining item from the original rollout plan is the empirical P4 gate: run a real E2E JSON-vs-XML comparison and use that evidence before changing the default away from JSON.

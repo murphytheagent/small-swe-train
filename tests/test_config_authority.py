@@ -140,9 +140,9 @@ def test_prompt_contract_includes_read_and_direct_tool_call_rule() -> None:
     prompt = build_assistant_contract_prompt()
 
     assert "Begin with a tool-call block. Do not emit prose before the first tool call." in prompt
-    assert "read XML args: required {path:string" in prompt
-    assert "file_search XML args: required {query:string" in prompt
-    assert "text_search XML args: required {query:string" in prompt
+    assert "read args: required {path:str" in prompt
+    assert "file_search args: required {query:str" in prompt
+    assert "text_search args: required {query:str" in prompt
     assert "start_line:int" in prompt
     assert "end_line:int" in prompt
     assert "read.path" in prompt
@@ -220,7 +220,10 @@ def test_prompt_contract_schema_text_is_rendered_from_tool_schemas(monkeypatch: 
     monkeypatch.setitem(TOOL_SCHEMAS, "file_search", search_schema)
 
     prompt = build_assistant_contract_prompt()
-    assert "file_search XML args: required {query:string(min_len=7, cdata_or_escaped_text)}" in prompt
+    assert "file_search args: required {query:str(min_len=7)}" in prompt
+
+    xml_prompt = build_assistant_contract_prompt(action_payload_format="xml")
+    assert "file_search XML args: required {query:string(min_len=7, cdata_or_escaped_text)}" in xml_prompt
 
 
 def test_prompt_contract_supports_xml_payload_mode() -> None:

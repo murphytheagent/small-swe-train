@@ -28,7 +28,7 @@
       "<tool_response>",
       "</tool_response>"
     ],
-    "action_payload_format": "xml",
+    "action_payload_format": "json",
     "action_parse_mode": "dual",
     "allow_optional_thinking": false,
     "min_tool_calls_per_turn": 1,
