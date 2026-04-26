@@ -1,8 +1,21 @@
 # Teacher-Entropy-Gated `turn_sdpo` Plan
 
 Generated: 2026-03-30 03:00 UTC
+Updated: 2026-04-03 07:59 UTC
 Thread: 1774836140.646779
-Status: planning, no implementation yet
+Status: Milestones 1-2 landed in code; pilot run still pending
+
+## 0. Current Status (2026-04-03 07:59 UTC)
+
+- `configs/verl/sdpo_swe.yaml` now carries a disabled-by-default `self_distillation.entropy_gate` block.
+- `src/verl_integration/ppo_runtime_patch.py` now supports teacher-entropy telemetry on active SDPO tokens and can split low-/high-entropy tokens onto different `alpha` values in both row-level and turn-level loss paths.
+- High-entropy tokens use `alpha_high=0.0` in the default gate config so teacher uncertainty moves toward forward KL / mode-covering behavior rather than reverse KL / mode-seeking behavior.
+- `tests/test_ppo_runtime_patch.py` now covers:
+  - disabled behavior preserving the old single-call loss path,
+  - high-entropy token gating,
+  - protection against activating the gate on non-distilled rows,
+  - turn-level integration.
+- Remaining work is Milestone 3: run the matched baseline vs gated pilot and inspect where the gate actually fires.
 
 ## 1. Goal
 
@@ -126,7 +139,7 @@ Concrete work:
   - `entropy_gate.alpha_high`
 - thread the config into `src/verl_integration/ppo_runtime_patch.py`
 - on active distillation tokens:
-  - use teacher entropy to decide whether to keep the baseline mix or increase the forward-KL weight
+  - use teacher entropy to decide whether to keep the baseline JSD midpoint or switch high-entropy tokens to `alpha_high=0.0` forward-KL behavior
 - keep all of the following fixed:
   - teacher source
   - teacher prompt construction

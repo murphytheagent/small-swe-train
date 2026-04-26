@@ -82,6 +82,14 @@ actor_rollout_ref:
       remove_thinking_from_demonstration: true
       include_environment_feedback: true
       environment_feedback_only_without_solution: true
+      entropy_gate:
+        enable: false                          # keep baseline turn-SDPO path unchanged by default
+        log_stats: true                        # emit teacher-entropy telemetry on active SDPO tokens
+        source: teacher                        # paper-faithful first pass: gate on teacher entropy only
+        threshold_mode: value
+        threshold: 2.0
+        alpha_low: 0.5
+        alpha_high: 0.0
 
       # Templates — our 6-block teacher prompt structure overrides these at the
       # Python adapter layer; the templates below are verl-native fallbacks.

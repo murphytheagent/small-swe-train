@@ -810,6 +810,207 @@ def test_turn_level_expansion_guard_allows_distributed_opt_in(
     assert runtime_patch._should_skip_turn_level_expansion_for_distributed() is False
 
 
+def test_teacher_entropy_gate_disabled_keeps_single_loss_call() -> None:
+    torch = pytest.importorskip("torch")
+
+    calls: list[tuple[torch.Tensor, torch.Tensor, float]] = []
+
+    def _fake_compute_self_distillation_loss(**kwargs):
+        cfg = kwargs["self_distillation_config"]
+        alpha = float(getattr(cfg, "alpha") if hasattr(cfg, "alpha") else cfg["alpha"])
+        calls.append(
+            (
+                kwargs["response_mask"].detach().cpu(),
+                kwargs["self_distillation_mask"].detach().cpu(),
+                alpha,
+            )
+        )
+        return torch.tensor(3.0, dtype=torch.float32), {"metric": 1.0}
+
+    pg_loss, pg_metrics, target_token_count = (
+        runtime_patch._compute_self_distillation_loss_with_teacher_entropy_gate(
+            response_mask=torch.tensor([[1, 1, 0]], dtype=torch.long),
+            self_distillation_mask=torch.tensor([1.0], dtype=torch.float32),
+            self_distillation_cfg=SimpleNamespace(
+                alpha=0.5,
+                entropy_gate=SimpleNamespace(enable=False, log_stats=False),
+            ),
+            teacher_entropy=None,
+            student_log_probs=torch.zeros((1, 3), dtype=torch.float32),
+            teacher_log_probs=torch.zeros((1, 3), dtype=torch.float32),
+            old_log_probs=torch.zeros((1, 3), dtype=torch.float32),
+            student_all_log_probs=None,
+            teacher_all_log_probs=None,
+            student_topk_log_probs=None,
+            teacher_topk_log_probs=None,
+            loss_agg_mode="token-mean",
+            rollout_is_weights=None,
+            compute_self_distillation_loss_fn=_fake_compute_self_distillation_loss,
+        )
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0].tolist() == [[1, 1, 0]]
+    assert calls[0][1].tolist() == [1.0]
+    assert calls[0][2] == pytest.approx(0.5)
+    assert pg_loss.item() == pytest.approx(3.0)
+    assert pg_metrics == {"metric": 1.0}
+    assert target_token_count.item() == pytest.approx(2.0)
+
+
+def test_teacher_entropy_gate_splits_high_entropy_tokens() -> None:
+    torch = pytest.importorskip("torch")
+
+    calls: list[dict[str, Any]] = []
+
+    def _fake_compute_self_distillation_loss(**kwargs):
+        cfg = kwargs["self_distillation_config"]
+        alpha = float(getattr(cfg, "alpha") if hasattr(cfg, "alpha") else cfg["alpha"])
+        calls.append(
+            {
+                "response_mask": kwargs["response_mask"].detach().cpu(),
+                "self_distillation_mask": kwargs["self_distillation_mask"].detach().cpu(),
+                "alpha": alpha,
+            }
+        )
+        return torch.tensor(alpha * 10.0, dtype=torch.float32), {"alpha_metric": alpha}
+
+    pg_loss, pg_metrics, target_token_count = (
+        runtime_patch._compute_self_distillation_loss_with_teacher_entropy_gate(
+            response_mask=torch.tensor([[1, 1, 0, 1]], dtype=torch.long),
+            self_distillation_mask=torch.tensor([1.0], dtype=torch.float32),
+            self_distillation_cfg=SimpleNamespace(
+                alpha=0.5,
+                entropy_gate=SimpleNamespace(
+                    enable=True,
+                    log_stats=True,
+                    source="teacher",
+                    threshold_mode="value",
+                    threshold=2.0,
+                    alpha_low=0.5,
+                    alpha_high=0.0,
+                ),
+            ),
+            teacher_entropy=torch.tensor([[0.2, 2.5, 9.0, 3.0]], dtype=torch.float32),
+            student_log_probs=torch.zeros((1, 4), dtype=torch.float32),
+            teacher_log_probs=torch.zeros((1, 4), dtype=torch.float32),
+            old_log_probs=torch.zeros((1, 4), dtype=torch.float32),
+            student_all_log_probs=None,
+            teacher_all_log_probs=None,
+            student_topk_log_probs=None,
+            teacher_topk_log_probs=None,
+            loss_agg_mode="token-mean",
+            rollout_is_weights=None,
+            compute_self_distillation_loss_fn=_fake_compute_self_distillation_loss,
+        )
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["response_mask"].tolist() == [[1, 0, 0, 0]]
+    assert calls[1]["response_mask"].tolist() == [[0, 1, 0, 1]]
+    assert calls[0]["self_distillation_mask"].tolist() == [1.0]
+    assert calls[1]["self_distillation_mask"].tolist() == [1.0]
+    assert calls[0]["alpha"] == pytest.approx(0.5)
+    assert calls[1]["alpha"] == pytest.approx(0.0)
+    assert pg_loss.item() == pytest.approx(5.0 / 3.0)
+    assert target_token_count.item() == pytest.approx(3.0)
+    assert pg_metrics["self_distillation/teacher_entropy_high_token_count"] == pytest.approx(2.0)
+    assert pg_metrics["self_distillation/teacher_entropy_high_token_fraction"] == pytest.approx(2.0 / 3.0)
+    assert pg_metrics["self_distillation/teacher_entropy_threshold"] == pytest.approx(2.0)
+
+
+def test_teacher_entropy_gate_ignores_non_distilled_rows() -> None:
+    torch = pytest.importorskip("torch")
+
+    calls: list[dict[str, Any]] = []
+
+    def _fake_compute_self_distillation_loss(**kwargs):
+        cfg = kwargs["self_distillation_config"]
+        alpha = float(getattr(cfg, "alpha") if hasattr(cfg, "alpha") else cfg["alpha"])
+        calls.append(
+            {
+                "response_mask": kwargs["response_mask"].detach().cpu(),
+                "self_distillation_mask": kwargs["self_distillation_mask"].detach().cpu(),
+                "alpha": alpha,
+            }
+        )
+        return torch.tensor(alpha, dtype=torch.float32), {}
+
+    _pg_loss, pg_metrics, target_token_count = (
+        runtime_patch._compute_self_distillation_loss_with_teacher_entropy_gate(
+            response_mask=torch.tensor([[1, 1, 1], [1, 1, 1]], dtype=torch.long),
+            self_distillation_mask=torch.tensor([1.0, 0.0], dtype=torch.float32),
+            self_distillation_cfg=SimpleNamespace(
+                alpha=0.5,
+                entropy_gate=SimpleNamespace(
+                    enable=True,
+                    log_stats=True,
+                    source="teacher",
+                    threshold_mode="value",
+                    threshold=1.0,
+                    alpha_low=0.5,
+                    alpha_high=0.0,
+                ),
+            ),
+            teacher_entropy=torch.tensor([[0.0, 2.0, 3.0], [9.0, 9.0, 9.0]], dtype=torch.float32),
+            student_log_probs=torch.zeros((2, 3), dtype=torch.float32),
+            teacher_log_probs=torch.zeros((2, 3), dtype=torch.float32),
+            old_log_probs=torch.zeros((2, 3), dtype=torch.float32),
+            student_all_log_probs=None,
+            teacher_all_log_probs=None,
+            student_topk_log_probs=None,
+            teacher_topk_log_probs=None,
+            loss_agg_mode="token-mean",
+            rollout_is_weights=None,
+            compute_self_distillation_loss_fn=_fake_compute_self_distillation_loss,
+        )
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["response_mask"].tolist() == [[1, 0, 0], [0, 0, 0]]
+    assert calls[1]["response_mask"].tolist() == [[0, 1, 1], [0, 0, 0]]
+    assert calls[0]["self_distillation_mask"].tolist() == [1.0, 0.0]
+    assert calls[1]["self_distillation_mask"].tolist() == [1.0, 0.0]
+    assert target_token_count.item() == pytest.approx(3.0)
+    assert pg_metrics["self_distillation/teacher_entropy_high_token_count"] == pytest.approx(2.0)
+
+
+def test_teacher_entropy_gate_rejects_non_token_mean_aggregation() -> None:
+    torch = pytest.importorskip("torch")
+
+    with pytest.raises(ValueError, match="loss_agg_mode='token-mean'"):
+        runtime_patch._compute_self_distillation_loss_with_teacher_entropy_gate(
+            response_mask=torch.tensor([[1, 1]], dtype=torch.long),
+            self_distillation_mask=torch.tensor([1.0], dtype=torch.float32),
+            self_distillation_cfg=SimpleNamespace(
+                alpha=0.5,
+                entropy_gate=SimpleNamespace(
+                    enable=True,
+                    log_stats=True,
+                    source="teacher",
+                    threshold_mode="value",
+                    threshold=1.0,
+                    alpha_low=0.5,
+                    alpha_high=0.0,
+                ),
+            ),
+            teacher_entropy=torch.tensor([[0.0, 2.0]], dtype=torch.float32),
+            student_log_probs=torch.zeros((1, 2), dtype=torch.float32),
+            teacher_log_probs=torch.zeros((1, 2), dtype=torch.float32),
+            old_log_probs=torch.zeros((1, 2), dtype=torch.float32),
+            student_all_log_probs=None,
+            teacher_all_log_probs=None,
+            student_topk_log_probs=None,
+            teacher_topk_log_probs=None,
+            loss_agg_mode="seq-mean-token-sum-norm",
+            rollout_is_weights=None,
+            compute_self_distillation_loss_fn=lambda **_: (
+                torch.tensor(0.0, dtype=torch.float32),
+                {},
+            ),
+        )
+
+
 def test_turn_level_sequential_loss_accumulates_without_row_filtering() -> None:
     torch = pytest.importorskip("torch")
 
@@ -884,6 +1085,7 @@ def test_turn_level_sequential_loss_accumulates_without_row_filtering() -> None:
         old_log_prob=torch.zeros((1, 4), dtype=torch.float32),
         student_all_logps=None,
         student_topk_logps=None,
+        teacher_entropy_gate_cfg={"enabled": False, "log_stats": False},
         loss_agg_mode="token-mean",
         rollout_is_weights=None,
         compute_self_distillation_loss_fn=_fake_compute_self_distillation_loss,
@@ -893,6 +1095,123 @@ def test_turn_level_sequential_loss_accumulates_without_row_filtering() -> None:
     assert pg_loss.item() == pytest.approx(2.0)
     assert metrics["self_distillation/empty_target_batch"] == pytest.approx(0.0)
     assert metrics["self_distillation/active_turn_pairs_in_micro_batch"] == pytest.approx(2.0)
+
+
+def test_turn_level_sequential_loss_applies_teacher_entropy_gate() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _FakeActor:
+        def __init__(self) -> None:
+            self.teacher_module = object()
+            self.actor_module = object()
+            self.teacher_forward_calls = 0
+
+        def _forward_micro_batch(
+            self,
+            _inputs,
+            *,
+            temperature,
+            calculate_entropy,
+            return_all_logps,
+            distill_topk,
+            topk_indices=None,
+            module=None,
+        ):
+            _ = (temperature, return_all_logps, distill_topk, topk_indices)
+            if module is None:
+                return {"log_probs": torch.zeros((1, 4), dtype=torch.float32)}
+            entropies = [
+                torch.tensor([[0.1, 3.0, 0.0, 0.0]], dtype=torch.float32),
+                torch.tensor([[0.0, 2.5, 4.0, 0.0]], dtype=torch.float32),
+            ]
+            output = {"log_probs": torch.zeros((1, 4), dtype=torch.float32)}
+            if calculate_entropy:
+                output["entropys"] = entropies[self.teacher_forward_calls]
+            self.teacher_forward_calls += 1
+            return output
+
+    actor = _FakeActor()
+    model_inputs = {
+        "responses": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+        "response_mask": torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
+        "turn_teacher_input_ids": torch.tensor(
+            [[[10, 11, 1, 2, 3], [20, 21, 1, 2, 3]]],
+            dtype=torch.long,
+        ),
+        "turn_teacher_attention_mask": torch.ones((1, 2, 5), dtype=torch.long),
+        "turn_teacher_position_ids": torch.tensor(
+            [[[0, 1, 2, 3, 4], [0, 1, 2, 3, 4]]],
+            dtype=torch.long,
+        ),
+        "turn_response_mask": torch.tensor(
+            [[[1, 1, 0, 0], [0, 1, 1, 0]]],
+            dtype=torch.long,
+        ),
+        "turn_self_distillation_mask": torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+    }
+
+    calls: list[dict[str, Any]] = []
+
+    def _fake_compute_self_distillation_loss(**kwargs):
+        cfg = kwargs["self_distillation_config"]
+        alpha = float(getattr(cfg, "alpha") if hasattr(cfg, "alpha") else cfg["alpha"])
+        calls.append(
+            {
+                "response_mask": kwargs["response_mask"].detach().cpu(),
+                "alpha": alpha,
+            }
+        )
+        return torch.tensor(alpha * 10.0, dtype=torch.float32), {}
+
+    pg_loss, metrics = runtime_patch._compute_turn_level_self_distillation_pg_loss(
+        actor,
+        model_inputs=model_inputs,
+        temperature=1.0,
+        self_distillation_cfg=SimpleNamespace(
+            alpha=0.5,
+            full_logit_distillation=False,
+            distillation_topk=None,
+            entropy_gate=SimpleNamespace(
+                enable=True,
+                log_stats=True,
+                source="teacher",
+                threshold_mode="value",
+                threshold=2.0,
+                alpha_low=0.5,
+                alpha_high=0.0,
+            ),
+        ),
+        teacher_regularization="ema",
+        return_all_logps=False,
+        distill_topk=None,
+        student_topk_indices=None,
+        log_prob=torch.zeros((1, 4), dtype=torch.float32),
+        old_log_prob=torch.zeros((1, 4), dtype=torch.float32),
+        student_all_logps=None,
+        student_topk_logps=None,
+        teacher_entropy_gate_cfg={"enabled": True, "log_stats": True},
+        loss_agg_mode="token-mean",
+        rollout_is_weights=None,
+        compute_self_distillation_loss_fn=_fake_compute_self_distillation_loss,
+    )
+
+    assert len(calls) == 3
+    assert calls[0]["response_mask"].tolist() == [[1, 0, 0, 0]]
+    assert calls[1]["response_mask"].tolist() == [[0, 1, 0, 0]]
+    assert calls[2]["response_mask"].tolist() == [[0, 1, 1, 0]]
+    assert calls[0]["alpha"] == pytest.approx(0.5)
+    assert calls[1]["alpha"] == pytest.approx(0.0)
+    assert calls[2]["alpha"] == pytest.approx(0.0)
+    assert pg_loss.item() == pytest.approx(1.25)
+    assert metrics["self_distillation/empty_target_batch"] == pytest.approx(0.0)
+    assert metrics["self_distillation/active_turn_pairs_in_micro_batch"] == pytest.approx(2.0)
+    assert metrics["self_distillation/teacher_entropy_target_token_count"] == pytest.approx(4.0)
+    assert metrics["self_distillation/teacher_entropy_high_token_count"] == pytest.approx(3.0)
+    assert metrics["self_distillation/teacher_entropy_high_token_fraction"] == pytest.approx(0.75)
+    assert metrics["self_distillation/teacher_entropy_bucket_lt_1_count"] == pytest.approx(1.0)
+    assert metrics["self_distillation/teacher_entropy_bucket_2_to_4_count"] == pytest.approx(2.0)
+    assert metrics["self_distillation/teacher_entropy_bucket_ge_4_count"] == pytest.approx(1.0)
+    assert metrics["self_distillation/teacher_entropy_active_max"] == pytest.approx(4.0)
 
 
 def test_patched_distillation_hook_emits_turn_level_tensors(
