@@ -38,5 +38,6 @@
 ## Documentation Guidelines
 - Keep `README.md` focused on orientation, setup, and launch commands.
 - Keep `STATUS.md` focused on active status, next actions, and known blockers.
+- Start feature work by recording the active item in `STATUS.md`, and end feature work by updating `STATUS.md` with the completed outcome and any remaining blockers.
 - Put research notes, migration plans, evaluation plans, and implementation design packets in `docs/`.
 - When moving or adding docs, update relative links in `README.md`, `STATUS.md`, `AGENTS.md`, and neighboring docs.

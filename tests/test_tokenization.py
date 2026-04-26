@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import config
 from data.tokenization import (
     build_labeled_spans,
     label_for_offset,
@@ -36,16 +37,41 @@ def test_build_labeled_spans_from_envelope() -> None:
 
     text, spans = build_labeled_spans(envelope)
 
-    assert "<think>plan</think>" in text
-    assert "<tool_call>" in text
+    if config.ACTION_PAYLOAD_FORMAT == "xml":
+        assert "<think><![CDATA[plan]]></think>" in text
+    else:
+        assert "<think>plan</think>" in text
+    assert "<tool_call" in text
     assert len(spans) == 2
     think_span = spans[0]
     assert think_span[2] == "think"
-    assert text[think_span[0] : think_span[1]] == "<think>plan</think>"
+    if config.ACTION_PAYLOAD_FORMAT == "xml":
+        assert text[think_span[0] : think_span[1]] == "<think><![CDATA[plan]]></think>"
+    else:
+        assert text[think_span[0] : think_span[1]] == "<think>plan</think>"
     tool_span = spans[1]
     assert tool_span[2] == "tool_call"
-    assert text[tool_span[0] : tool_span[1]].startswith("<tool_call>")
-    assert text[tool_span[0] : tool_span[1]].endswith("</tool_call>")
+    tool_text = text[tool_span[0] : tool_span[1]]
+    if config.ACTION_PAYLOAD_FORMAT == "xml":
+        assert tool_text.startswith('<tool_call name="bash">')
+    else:
+        assert tool_text.startswith("<tool_call>")
+    assert tool_text.endswith("</tool_call>")
+
+
+def test_build_labeled_spans_uses_xml_safe_think_rendering() -> None:
+    envelope = ActionEnvelope(
+        tool_calls=(ToolCall(tool="submit", args={"final_response": "done"}),),
+        thinking="x < y & </think>",
+    )
+
+    text, spans = build_labeled_spans(envelope)
+
+    think_text = text[spans[0][0] : spans[0][1]]
+    if config.ACTION_PAYLOAD_FORMAT == "xml":
+        assert think_text == "<think><![CDATA[x < y & </think>]]></think>"
+    else:
+        assert think_text == "<think>x < y & </think></think>"
 
 
 def test_build_labeled_spans_no_thinking() -> None:

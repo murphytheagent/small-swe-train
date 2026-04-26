@@ -11,5 +11,5 @@
   # Slot queueing should not consume per-attempt execution budget.
   # 0 disables slot-wait timeout and allows queued tasks to wait indefinitely.
   container_slot_wait_timeout_sec: 0
-  max_tool_calls_per_turn: 3
+  max_tool_calls_per_turn: 1
   verifier_timeout_sec: 600

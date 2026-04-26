@@ -1,6 +1,5 @@
 """Rollout package."""
 
-from .onpolicy_collector import OnPolicyRolloutCollector
 from .turn_parser import (
     TurnParseError,
     TurnParser,
@@ -17,3 +16,11 @@ __all__ = [
     "parse_assistant_turn_payload",
     "parse_chatml_assistant_turn",
 ]
+
+
+def __getattr__(name: str):
+    if name == "OnPolicyRolloutCollector":
+        from .onpolicy_collector import OnPolicyRolloutCollector
+
+        return OnPolicyRolloutCollector
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -28,6 +28,23 @@ from .contracts import (
     validate_tool_call,
 )
 from .rollout_records import RolloutRow, RolloutRowRequired
+from .xml_action_schema import (
+    XML_BUILTIN_ESCAPES,
+    XML_CDATA_END,
+    XML_THINK_ELEMENT,
+    XML_TOOL_CALL_ELEMENT,
+    XML_TOOL_NAME_ATTRIBUTE,
+    XmlArgSchema,
+    XmlToolSchema,
+    get_xml_arg_order,
+    get_xml_arg_schema,
+    get_xml_list_item_tag,
+    get_xml_tool_schema,
+    iter_xml_tool_schemas,
+    render_xml_arg_placeholder,
+    render_xml_contract_signature,
+    render_xml_tool_schema_line,
+)
 
 __all__ = [
     "ALLOWED_TOOLS",
@@ -52,4 +69,19 @@ __all__ = [
     "RolloutRowRequired",
     "make_tool_call",
     "validate_tool_call",
+    "XML_BUILTIN_ESCAPES",
+    "XML_CDATA_END",
+    "XML_THINK_ELEMENT",
+    "XML_TOOL_CALL_ELEMENT",
+    "XML_TOOL_NAME_ATTRIBUTE",
+    "XmlArgSchema",
+    "XmlToolSchema",
+    "get_xml_arg_order",
+    "get_xml_arg_schema",
+    "get_xml_list_item_tag",
+    "get_xml_tool_schema",
+    "iter_xml_tool_schemas",
+    "render_xml_arg_placeholder",
+    "render_xml_contract_signature",
+    "render_xml_tool_schema_line",
 ]

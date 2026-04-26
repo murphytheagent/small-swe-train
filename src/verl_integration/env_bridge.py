@@ -10,7 +10,7 @@ from config import MAX_TOOL_CALLS_PER_TURN, resolve_feedback_deterministic_trunc
 from data.feedback_canonicalizer import truncate_tool_output_payload
 from env.runtime_protocol import EnvironmentStep, ToolRequest, ToolResponse
 from prompts.model_delimiters import default_delimiters
-from rollout.turn_parser import parse_assistant_turn_payload, parse_chatml_assistant_turn
+from rollout.action_format import parse_assistant_text as parse_assistant_action_text
 from schemas import ActionEnvelope, ToolCall, validate_tool_call
 
 
@@ -30,10 +30,7 @@ class BridgeResult:
 
 
 def _parse_assistant_text(assistant_text: str, *, max_tool_calls: int) -> ActionEnvelope:
-    stripped = assistant_text.strip()
-    if stripped.startswith("<|im_start|>assistant"):
-        return parse_chatml_assistant_turn(stripped, max_tool_calls=max_tool_calls)
-    return parse_assistant_turn_payload(stripped, max_tool_calls=max_tool_calls)
+    return parse_assistant_action_text(assistant_text, max_tool_calls=max_tool_calls)
 
 
 def build_tool_response_payload(response: ToolResponse) -> dict[str, Any]:

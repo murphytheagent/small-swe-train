@@ -50,6 +50,17 @@ def test_derive_turn_tool_response_blocks_groups_by_turn() -> None:
     ]
 
 
+def test_assistant_turn_has_terminal_submit_supports_xml_payload() -> None:
+    pilot = _load_pilot_module()
+
+    assert (
+        pilot._assistant_turn_has_terminal_submit(
+            '<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+        )
+        is True
+    )
+
+
 def test_summarize_pair_rewards_computes_delta_statistics() -> None:
     pilot = _load_pilot_module()
     pairs = [

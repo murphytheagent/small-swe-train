@@ -317,37 +317,49 @@ cd "${PROJECT_ROOT}"
 VLLM_PID=$!
 
 READY_TIMEOUT_SEC="${PROBE_VLLM_READY_TIMEOUT_SEC:-300}"
-READY_STATUS=0
-"${PYTHON_BIN}" - "${SMALL_SWE_VLLM_BASE_URL}" "${READY_TIMEOUT_SEC}" "${VLLM_PID}" <<'PY' || READY_STATUS=$?
+READY_STATUS=1
+READY_DEADLINE="$(( SECONDS + READY_TIMEOUT_SEC ))"
+
+vllm_is_running() {
+  local process_state
+  process_state="$(ps -o stat= -p "${VLLM_PID}" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -z "${process_state}" ]]; then
+    return 1
+  fi
+  if [[ "${process_state:0:1}" == "Z" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+while (( SECONDS < READY_DEADLINE )); do
+  if ! vllm_is_running; then
+    READY_STATUS=2
+    break
+  fi
+  if "${PYTHON_BIN}" - "${SMALL_SWE_VLLM_BASE_URL}" <<'PY'
 from __future__ import annotations
 
 import json
-import os
 import sys
-import time
-from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 base_url = sys.argv[1].rstrip("/")
-deadline = time.time() + int(sys.argv[2])
-vllm_pid = int(sys.argv[3])
 endpoint = base_url + "/models"
 
-while time.time() < deadline:
-    try:
-        os.kill(vllm_pid, 0)
-    except OSError:
-        raise SystemExit(2)
-    try:
-        with urlopen(Request(endpoint, method="GET"), timeout=5) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        if isinstance(payload, dict):
-            sys.exit(0)
-    except Exception:
-        time.sleep(1)
-
-raise SystemExit(1)
+try:
+    with urlopen(Request(endpoint, method="GET"), timeout=1) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(payload, dict) else 1)
 PY
+  then
+    READY_STATUS=0
+    break
+  fi
+  sleep 1
+done
 if [[ "${READY_STATUS}" -ne 0 ]]; then
   if [[ "${READY_STATUS}" -eq 2 ]]; then
     echo "vLLM process exited before readiness probe succeeded." >&2

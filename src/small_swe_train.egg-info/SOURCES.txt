@@ -33,6 +33,7 @@ src/prompts/teacher_messages.py
 src/prompts/model_configs/__init__.py
 src/prompts/model_configs/qwen3.yaml
 src/rollout/__init__.py
+src/rollout/action_format.py
 src/rollout/onpolicy_collector.py
 src/rollout/turn_parser.py
 src/rollout/vllm_turn_generator.py
@@ -71,6 +72,7 @@ src/verl_integration/rft_rejection.py
 src/verl_integration/rft_runtime.py
 src/verl_integration/submission_verifier.py
 src/verl_integration/swe_bridge_agent_loop.py
+tests/test_action_format.py
 tests/test_action_masking.py
 tests/test_check_sdpo_turn_integrity.py
 tests/test_config_authority.py
