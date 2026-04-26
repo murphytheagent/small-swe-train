@@ -22,6 +22,7 @@ from schemas import (
     TEXT_SEARCH_TOOL_NAME,
     TOOL_SCHEMAS,
     ToolCall,
+    get_xml_tool_schema,
     validate_tool_call,
 )
 
@@ -38,9 +39,33 @@ def test_output_contract_exports_match_runtime_defaults() -> None:
 
     assert config.MIN_TOOL_CALLS_PER_TURN == int(output_contract["min_tool_calls_per_turn"])
     assert config.MAX_TOOL_CALLS_PER_TURN == int(output_contract["max_tool_calls_per_turn"])
+    assert config.MAX_TOOL_CALLS_PER_TURN == 1
     assert config.TERMINAL_TOOL_NAME == str(output_contract["terminal_tool"]).strip().lower()
     assert config.SUBMIT_MUST_BE_ONLY_TOOL_CALL is bool(output_contract["submit_must_be_only_tool_call"])
     assert config.TERMINAL_VALIDITY_PENALTY == float(output_contract.get("terminal_validity_penalty", 0.2))
+    assert config.ACTION_PAYLOAD_FORMAT == str(output_contract.get("action_payload_format", "json")).strip().lower()
+    assert config.ACTION_PARSE_MODE == str(output_contract.get("action_parse_mode", "json_only")).strip().lower()
+
+
+def test_xml_tool_schema_is_derived_from_tool_schemas() -> None:
+    schema = get_xml_tool_schema("bash")
+    args = {arg.name: arg for arg in schema.args}
+
+    assert schema.tool == "bash"
+    assert schema.element == "tool_call"
+    assert schema.name_attribute == "name"
+    assert args["command"].kind == "string"
+    assert args["command"].required is True
+    assert args["command"].string_encoding == "cdata"
+    assert args["command"].constraints["min_length"] == 1
+    assert args["timeout_sec"].kind == "int"
+    assert args["timeout_sec"].constraints["minimum"] == 1
+    assert args["timeout_sec"].constraints["maximum"] == 7200
+
+    submit_schema = get_xml_tool_schema("submit")
+    submit_args = {arg.name: arg for arg in submit_schema.args}
+    assert submit_args["changed_paths"].kind == "list[string]"
+    assert submit_args["changed_paths"].list_item_tag == "path"
 
 
 def test_default_training_model_name_is_loaded_from_shared_verl_config() -> None:
@@ -165,7 +190,7 @@ def test_teacher_output_contract_block_wraps_shared_contract() -> None:
 
 
 def test_prompt_contract_renders_tool_examples_from_tool_schemas() -> None:
-    prompt = build_assistant_contract_prompt()
+    prompt = build_assistant_contract_prompt(action_payload_format="json")
     assert "Realistic examples (one tool call each):" in prompt
     for tool_name in ALLOWED_TOOLS:
         schema = TOOL_SCHEMAS.get(tool_name)
@@ -177,6 +202,16 @@ def test_prompt_contract_renders_tool_examples_from_tool_schemas() -> None:
             assert f"   - {tool_name}: {serialized}" in prompt
 
 
+def test_default_system_prompt_uses_centralized_action_payload_format() -> None:
+    prompt = build_onpolicy_system_prompt()
+
+    if config.ACTION_PAYLOAD_FORMAT == "xml":
+        assert '<tool_call name="tool_name"><arg_name><![CDATA[value]]></arg_name></tool_call>' in prompt
+        assert "Use CDATA for string-valued args" in prompt
+    else:
+        assert '<tool_call>{"tool":"...","args":{...}}</tool_call>' in prompt
+
+
 def test_prompt_contract_schema_text_is_rendered_from_tool_schemas(monkeypatch: pytest.MonkeyPatch) -> None:
     search_schema = dict(TOOL_SCHEMAS["file_search"])
     constraints = dict(search_schema["constraints"])
@@ -186,6 +221,34 @@ def test_prompt_contract_schema_text_is_rendered_from_tool_schemas(monkeypatch: 
 
     prompt = build_assistant_contract_prompt()
     assert "file_search args: required {query:str(min_len=7)}" in prompt
+
+    xml_prompt = build_assistant_contract_prompt(action_payload_format="xml")
+    assert "file_search XML args: required {query:string(min_len=7, cdata_or_escaped_text)}" in xml_prompt
+
+
+def test_prompt_contract_supports_xml_payload_mode() -> None:
+    prompt = build_assistant_contract_prompt(action_payload_format="xml")
+
+    assert '<tool_call name="tool_name"><arg_name><![CDATA[value]]></arg_name></tool_call>' in prompt
+    assert "Every XML tool call MUST use a 'name' attribute for the tool and direct child elements for args." in prompt
+    assert "Do not add an <args> wrapper." in prompt
+    assert "Use CDATA for string-valued args" in prompt
+    assert "If a string contains ']]>', use escaped XML text instead." in prompt
+    assert "built-in escapes: &lt;, &gt;, &amp;, &quot;, and &apos;" in prompt
+    assert "<changed_paths><path><![CDATA[src/app.py]]></path></changed_paths>" in prompt
+    assert (
+        "Do not emit comments, namespaces, DTDs, external entities, custom entities, processing instructions, extra attributes, or mixed JSON/XML payloads."
+        in prompt
+    )
+    assert '   - bash: <tool_call name="bash"><command><![CDATA[make test-target]]></command><cwd><![CDATA[.]]></cwd><timeout_sec>120</timeout_sec></tool_call>' in prompt
+
+
+def test_teacher_output_contract_block_supports_xml_payload_mode() -> None:
+    prompt = build_teacher_output_contract_block(action_payload_format="xml")
+
+    assert "Assistant output contract:" in prompt
+    assert '<tool_call name="tool_name"><arg_name><![CDATA[value]]></arg_name></tool_call>' in prompt
+    assert "Teacher-specific tool guidance:" in prompt
 
 
 def test_prompt_contract_examples_are_environment_neutral() -> None:
@@ -216,6 +279,14 @@ def test_sdpo_followup_message_uses_canonical_tool_names() -> None:
 def test_terminal_tool_validator_rejects_unknown_name() -> None:
     with pytest.raises(ValueError, match="Invalid terminal tool"):
         config._validate_terminal_tool_name("not-a-tool", allowed_tools=ALLOWED_TOOLS)
+
+
+def test_action_format_contract_rejects_incompatible_payload_and_parse_modes() -> None:
+    with pytest.raises(ValueError, match="JSON output cannot use xml_only parsing"):
+        config._validate_action_format_contract(payload_format="json", parse_mode="xml_only")
+
+    with pytest.raises(ValueError, match="XML output cannot use json_only parsing"):
+        config._validate_action_format_contract(payload_format="xml", parse_mode="json_only")
 
 
 def test_on_policy_runtime_defaults_load_from_central_json() -> None:

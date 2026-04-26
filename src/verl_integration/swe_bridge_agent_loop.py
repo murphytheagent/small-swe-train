@@ -136,7 +136,7 @@ _FALLBACK_RUNTIME_DEFAULTS: dict[str, int] = {
     # 0 disables queue wait timeout so slot contention does not consume
     # per-attempt execution budget.
     "container_slot_wait_timeout_sec": 0,
-    "max_tool_calls_per_turn": 3,
+    "max_tool_calls_per_turn": 1,
     "verifier_timeout_sec": 600,
 }
 _DEFAULT_LOOP_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs/verl/agent_loops/swe_bridge_agent.yaml"

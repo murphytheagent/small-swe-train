@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 try:
     from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME, resolve_on_policy_settings
     from rollout.onpolicy_collector import OnPolicyRolloutCollector
-    from rollout.turn_parser import parse_assistant_turn_payload
+    from rollout.action_format import parse_assistant_text
     from rollout.vllm_turn_generator import (
         VLLMTurnGeneratorConfig,
         _extract_assistant_content,
@@ -37,7 +37,7 @@ except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from config import DEFAULT_ON_POLICY_DATA_CONFIG_NAME, resolve_on_policy_settings
     from rollout.onpolicy_collector import OnPolicyRolloutCollector
-    from rollout.turn_parser import parse_assistant_turn_payload
+    from rollout.action_format import parse_assistant_text
     from rollout.vllm_turn_generator import (
         VLLMTurnGeneratorConfig,
         _extract_assistant_content,
@@ -227,7 +227,7 @@ def _assistant_turn_has_terminal_submit(turn_text: str) -> bool:
     if not text:
         return False
     try:
-        envelope = parse_assistant_turn_payload(text)
+        envelope = parse_assistant_text(text)
     except Exception:
         return False
     return any(getattr(tool_call, "tool", "") == "submit" for tool_call in envelope.tool_calls)

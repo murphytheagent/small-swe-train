@@ -1,6 +1,6 @@
 # STATUS
 
-Last updated: 2026-04-25.
+Last updated: 2026-04-26.
 
 ## Current State
 - Canonical staged pipeline: `format_rft -> positive_rft -> turn_sdpo`.
@@ -9,9 +9,12 @@ Last updated: 2026-04-25.
 - The next executable artifact is the first full `SWE-smith-py` difficulty-probe cache against the `2040` format-stage checkpoint.
 - JS/TS work should stay focused on repo-aware Node verifier adapters, not a generic `node_test` command toggle.
 - Root documentation policy is now: keep only `AGENTS.md`, `README.md`, and `STATUS.md` at repo root; keep research, design, migration, and evaluation plans under `docs/`.
+- JSON remains the default assistant payload format; XML action format is implemented as an opt-in path with reusable schema derivation, dual parsing, prompt/render support, and JSON fallback for non-XML-representable structured tool calls.
+- PR #34 Codex P1 is addressed: XML rendering now rejects list values for scalar schema args so structured vLLM fallback preserves malformed scalar-list payloads as JSON for downstream validation.
 
 ## Active TODO
 - Materialize the `SWE-smith-py` difficulty-probe cache against the `2040` format-stage checkpoint.
+- Run a real E2E JSON-vs-XML rollout comparison before deciding whether XML is effective enough to become the default assistant payload surface.
 - Diagnose why positive-stage training selected `0` rows despite nonzero held-out eval resolution.
 - Continue JS/TS verifier planning around repo-aware selector normalization, runner detection, and bounded target reporting.
 - Run the first `turn_sdpo` teacher-entropy pilot before adding an entropy-gated objective.

@@ -335,3 +335,36 @@ def test_preprocess_trajectories_records_parse_error_for_non_numeric_step_index(
     assert rows[0]["parse_error"] == "step_index must be an integer >= 0"
     assert rows[1]["format_valid"] is True
     assert rows[1]["parse_error"] is None
+
+
+def test_preprocess_trajectories_preserves_invalid_xml_calls_for_validation() -> None:
+    trajectories = [
+        {
+            "prompt": "Fix test",
+            "assistant_response": (
+                '<tool_call name="bash">'
+                "<command><![CDATA[pytest -q]]></command>"
+                "<bogus><![CDATA[oops]]></bogus>"
+                "</tool_call>"
+            ),
+        }
+    ]
+
+    rows = preprocess_trajectories(trajectories, tokenizer=_CharTokenizer())
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["format_valid"] is False
+    assert row["parse_error"] is None
+    assert row["validation_errors"] == ["tool_call[0]: Unknown arg 'bogus' for tool 'bash'"]
+    assert row["label_blocks"] == [
+        {
+            "type": "tool_call",
+            "text": '<tool_call>{"args": {"bogus": "oops", "command": "pytest -q"}, "tool": "bash"}</tool_call>',
+        }
+    ]
+    assert row["canonical_text"] == (
+        '<tool_call>{"args": {"bogus": "oops", "command": "pytest -q"}, "tool": "bash"}</tool_call>'
+    )
+    assert "input_ids" in row
+    assert len(row["input_ids"]) == len(row["token_labels"])

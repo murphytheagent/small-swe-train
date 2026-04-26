@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import config
 import trainer.rft_runtime as rft_runtime_module
 from trainer.rft_runtime import (
     OnPolicyRFTRuntimeRequest,
@@ -110,7 +111,10 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
         step_index=0,
         history=(),
     )
-    assert '"tool":"submit"' in submit_turn
+    if config.ACTION_PAYLOAD_FORMAT == "xml":
+        assert '<tool_call name="submit">' in submit_turn
+    else:
+        assert '"tool":"submit"' in submit_turn
 
     manifest_path = tmp_path / "rft_runtime_manifest.json"
     manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))

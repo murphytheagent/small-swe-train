@@ -319,12 +319,59 @@ def _validate_terminal_tool_name(terminal_tool_name: str, *, allowed_tools: Sequ
 
 _output_contract = output_contract_defaults()
 
+SUPPORTED_ACTION_PAYLOAD_FORMATS: tuple[str, ...] = ("json", "xml")
+SUPPORTED_ACTION_PARSE_MODES: tuple[str, ...] = ("json_only", "dual", "xml_only")
+
+
+def _normalize_action_payload_format(value: Any) -> str:
+    normalized = str(value or "json").strip().lower()
+    if normalized not in SUPPORTED_ACTION_PAYLOAD_FORMATS:
+        allowed = ", ".join(SUPPORTED_ACTION_PAYLOAD_FORMATS)
+        raise ValueError(
+            "Invalid action payload format configured in training policy defaults: "
+            f"{normalized!r}. Expected one of: {allowed}."
+        )
+    return normalized
+
+
+def _normalize_action_parse_mode(value: Any) -> str:
+    normalized = str(value or "json_only").strip().lower()
+    if normalized not in SUPPORTED_ACTION_PARSE_MODES:
+        allowed = ", ".join(SUPPORTED_ACTION_PARSE_MODES)
+        raise ValueError(
+            "Invalid action parse mode configured in training policy defaults: "
+            f"{normalized!r}. Expected one of: {allowed}."
+        )
+    return normalized
+
+
+def _validate_action_format_contract(*, payload_format: str, parse_mode: str) -> None:
+    if payload_format == "json" and parse_mode == "xml_only":
+        raise ValueError(
+            "action_payload_format/action_parse_mode are incompatible: JSON output cannot use xml_only parsing."
+        )
+    if payload_format == "xml" and parse_mode == "json_only":
+        raise ValueError(
+            "action_payload_format/action_parse_mode are incompatible: XML output cannot use json_only parsing."
+        )
+
+
 MIN_TOOL_CALLS_PER_TURN: int = int(_output_contract["min_tool_calls_per_turn"])
 MAX_TOOL_CALLS_PER_TURN: int = int(_output_contract["max_tool_calls_per_turn"])
 TERMINAL_TOOL_NAME: str = str(_output_contract["terminal_tool"]).strip().lower()
 SUBMIT_MUST_BE_ONLY_TOOL_CALL: bool = bool(_output_contract["submit_must_be_only_tool_call"])
 TERMINAL_VALIDITY_PENALTY: float = float(_output_contract.get("terminal_validity_penalty", 0.2))
+ACTION_PAYLOAD_FORMAT: str = _normalize_action_payload_format(
+    _output_contract.get("action_payload_format", "json")
+)
+ACTION_PARSE_MODE: str = _normalize_action_parse_mode(
+    _output_contract.get("action_parse_mode", "json_only")
+)
 DEFAULT_TRAINING_MODEL_NAME: str = default_training_model_name()
+_validate_action_format_contract(
+    payload_format=ACTION_PAYLOAD_FORMAT,
+    parse_mode=ACTION_PARSE_MODE,
+)
 
 if MIN_TOOL_CALLS_PER_TURN < 1:
     raise ValueError("min_tool_calls_per_turn must be >= 1")

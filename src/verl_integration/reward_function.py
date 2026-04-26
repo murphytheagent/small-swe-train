@@ -7,7 +7,8 @@ from typing import Any, Mapping, Sequence
 
 from config import MAX_TOOL_CALLS_PER_TURN, TERMINAL_VALIDITY_PENALTY
 from metrics.contracts import FormatMetrics, rate
-from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
+from rollout.action_format import parse_assistant_text
+from rollout.turn_parser import TurnParseError
 from schemas import ALLOWED_TOOLS, TERMINAL_TOOL_NAME, ActionEnvelope, validate_tool_call
 
 _TRUE_STRINGS = {"1", "true", "t", "yes", "y", "on"}
@@ -16,10 +17,7 @@ _ALLOWED_TOOLS_SET = set(ALLOWED_TOOLS)
 
 
 def _parse_response_text(response_text: str, *, max_tool_calls: int) -> ActionEnvelope:
-    stripped = response_text.strip()
-    if stripped.startswith("<|im_start|>assistant"):
-        return parse_chatml_assistant_turn(stripped, max_tool_calls=max_tool_calls)
-    return parse_assistant_turn_payload(stripped, max_tool_calls=max_tool_calls)
+    return parse_assistant_text(response_text, max_tool_calls=max_tool_calls)
 
 
 def _thinking_delimiters_balanced(response_text: str) -> bool:

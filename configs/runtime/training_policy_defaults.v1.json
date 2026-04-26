@@ -28,9 +28,11 @@
       "<tool_response>",
       "</tool_response>"
     ],
+    "action_payload_format": "json",
+    "action_parse_mode": "dual",
     "allow_optional_thinking": false,
     "min_tool_calls_per_turn": 1,
-    "max_tool_calls_per_turn": 3,
+    "max_tool_calls_per_turn": 1,
     "terminal_tool": "submit",
     "submit_must_be_only_tool_call": true,
     "terminal_validity_penalty": 0.2,
@@ -95,7 +97,7 @@
     "tool_timeout_sec": 60,
     "container_start_timeout_sec": 120,
     "attempt_timeout_sec": 300,
-    "max_tool_calls_per_turn": 3,
+    "max_tool_calls_per_turn": 1,
     "verify_submissions": false,
     "verifier_timeout_sec": 600
   },

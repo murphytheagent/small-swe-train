@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping, Sequence
 
 from data.feedback_canonicalizer import build_feedback_packet
@@ -14,7 +13,8 @@ from data.tokenization import (
 )
 from data.tool_schema_adapter import adapt_external_tool_call
 from losses.action_masking import build_action_token_mask
-from rollout.turn_parser import TurnParseError, parse_assistant_turn_payload, parse_chatml_assistant_turn
+from rollout.action_format import parse_assistant_text, render_tool_call_block
+from rollout.turn_parser import TurnParseError
 from config import MAX_TOOL_CALLS_PER_TURN
 from schemas import ActionEnvelope, ToolCall, validate_tool_call
 
@@ -23,10 +23,7 @@ _FALSE_STRINGS = {"0", "false", "f", "no", "n", "off", ""}
 
 
 def _parse_assistant_response(assistant_response: str, *, max_tool_calls: int) -> ActionEnvelope:
-    stripped = assistant_response.strip()
-    if stripped.startswith("<|im_start|>assistant"):
-        return parse_chatml_assistant_turn(stripped, max_tool_calls=max_tool_calls)
-    return parse_assistant_turn_payload(stripped, max_tool_calls=max_tool_calls)
+    return parse_assistant_text(assistant_response, max_tool_calls=max_tool_calls)
 
 
 def _adapt_external_calls(external_calls: Sequence[Any]) -> tuple[ToolCall, ...]:
@@ -54,8 +51,12 @@ def _label_blocks_from_envelope(envelope: ActionEnvelope) -> list[dict[str, str]
     if envelope.thinking:
         blocks.append({"type": "think", "text": envelope.thinking})
     for call in envelope.tool_calls:
-        serialized = json.dumps(call.to_dict(), sort_keys=True, ensure_ascii=True)
-        blocks.append({"type": "tool_call", "text": serialized})
+        blocks.append(
+            {
+                "type": "tool_call",
+                "text": render_tool_call_block(call, fallback_payload_format="json"),
+            }
+        )
     return blocks
 
 
@@ -72,7 +73,7 @@ def _approx_labels_from_envelope(envelope: ActionEnvelope) -> list[str]:
         labels.extend(["think"] * think_tokens)
 
     for call in envelope.tool_calls:
-        serialized = json.dumps(call.to_dict(), sort_keys=True, ensure_ascii=True)
+        serialized = render_tool_call_block(call, fallback_payload_format="json")
         tool_tokens = max(1, len(serialized.split()))
         labels.extend(["tool_call"] * tool_tokens)
 
@@ -197,7 +198,10 @@ def preprocess_trajectories(
         canonical_text: str | None = None
 
         if envelope is not None and tokenizer is not None:
-            canonical_text, labeled_spans = build_labeled_spans(envelope)
+            canonical_text, labeled_spans = build_labeled_spans(
+                envelope,
+                tool_call_fallback_payload_format="json",
+            )
             token_labels = []
             tokenization_row_indexes.append(len(rows))
             tokenization_texts.append(canonical_text)

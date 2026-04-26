@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping, Protocol, Sequence, cast
 
 from losses.action_masking import TokenLabel
 from prompts.model_delimiters import ModelDelimiters, default_delimiters
+from rollout.action_format import render_think_block, render_tool_call_block
 from schemas import ActionEnvelope
 
 LabeledSpan = tuple[int, int, TokenLabel]
@@ -149,6 +149,7 @@ def tokenize_batch_with_labels(
 def build_labeled_spans(
     envelope: ActionEnvelope,
     delimiters: ModelDelimiters | None = None,
+    tool_call_fallback_payload_format: str | None = None,
 ) -> tuple[str, list[LabeledSpan]]:
     """Construct canonical text from *envelope* and track character-level label spans.
 
@@ -161,14 +162,17 @@ def build_labeled_spans(
     cursor = 0
 
     if envelope.thinking:
-        block = f"{d.think_start}{envelope.thinking}{d.think_end}"
+        block = render_think_block(envelope.thinking, delimiters=d)
         spans.append((cursor, cursor + len(block), "think"))
         chunks.append(block)
         cursor += len(block)
 
     for call in envelope.tool_calls:
-        payload = json.dumps(call.to_dict(), sort_keys=True, ensure_ascii=True)
-        block = f"{d.tool_call_start}{payload}{d.tool_call_end}"
+        block = render_tool_call_block(
+            call,
+            delimiters=d,
+            fallback_payload_format=tool_call_fallback_payload_format,
+        )
         spans.append((cursor, cursor + len(block), "tool_call"))
         chunks.append(block)
         cursor += len(block)
