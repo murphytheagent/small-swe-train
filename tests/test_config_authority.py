@@ -368,6 +368,20 @@ def test_sdpo_config_disables_runtime_prompt_length_filter() -> None:
     assert data_cfg["filter_overlong_prompts"] is False
 
 
+def test_sdpo_entropy_gate_defaults_are_disabled_and_mode_covering_for_high_entropy() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    payload = yaml.safe_load((repo_root / "configs/verl/sdpo_swe.yaml").read_text(encoding="utf-8"))
+    gate_cfg = payload["actor_rollout_ref"]["actor"]["self_distillation"]["entropy_gate"]
+
+    assert gate_cfg["enable"] is False
+    assert gate_cfg["log_stats"] is True
+    assert gate_cfg["source"] == "teacher"
+    assert gate_cfg["threshold_mode"] == "value"
+    assert gate_cfg["threshold"] == pytest.approx(2.0)
+    assert gate_cfg["alpha_low"] == pytest.approx(0.5)
+    assert gate_cfg["alpha_high"] == pytest.approx(0.0)
+
+
 def test_verl_configs_fallback_project_root_when_env_unset() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     sdpo_payload = yaml.safe_load((repo_root / "configs/verl/sdpo_swe.yaml").read_text(encoding="utf-8"))
@@ -467,6 +481,7 @@ def test_rft_runtime_defaults_load_loop_and_vllm_config() -> None:
     assert runtime_defaults["loop"]["train_batch_size"] >= 1
     assert 0.0 <= float(runtime_defaults["loop"]["eval_split_fraction"]) < 1.0
     assert runtime_defaults["loop"]["eval_min_rows"] >= 1
+    assert runtime_defaults["loop"]["eval_task_count"] >= 1
     assert runtime_defaults["loop"]["checkpoint_keep_last"] >= 1
     assert runtime_defaults["vllm"]["base_url"].startswith("http://")
     assert runtime_defaults["vllm_parallelism"]["default_tensor_parallel_size"] >= 1

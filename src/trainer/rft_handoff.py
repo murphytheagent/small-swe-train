@@ -38,6 +38,7 @@ def build_onpolicy_collector(
     task_partition: str = "all",
     task_eval_split_fraction: float = 0.0,
     task_eval_min_rows: int = 0,
+    task_eval_task_count: int | None = None,
     stage_name: str = "format_rft",
     dataset_loader: DatasetLoader | None = None,
     pool_factory: PoolFactory | None = None,
@@ -60,6 +61,7 @@ def build_onpolicy_collector(
         task_partition=task_partition,
         task_eval_split_fraction=task_eval_split_fraction,
         task_eval_min_rows=task_eval_min_rows,
+        task_eval_task_count=task_eval_task_count,
         stage_name=stage_name,
     )
 

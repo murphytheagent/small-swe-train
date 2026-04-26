@@ -24,6 +24,7 @@ def _run_script(
     script_name: str,
     *args: str,
     env_overrides: Mapping[str, str] | None = None,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     script_path = _repo_root() / "scripts" / script_name
     env = os.environ.copy()
@@ -34,7 +35,7 @@ def _run_script(
     return subprocess.run(
         ["bash", str(script_path), "--dry-run", *args],
         cwd=_repo_root(),
-        check=True,
+        check=check,
         text=True,
         capture_output=True,
         env=env,
@@ -547,6 +548,19 @@ def test_run_rft_script_dry_run_direct_mode_wires_positive_selection_overrides()
     assert "+data.on_policy.rft_handoff_overrides.selection.require_format_valid=false" in result.stdout
 
 
+def test_run_rft_script_rejects_unpatched_trainer_module() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        env_overrides={
+            "RFT_TRAINER_MODULE": "verl.trainer.fsdp_sft_trainer",
+        },
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "RFT_TRAINER_MODULE must be verl_integration.fsdp_sft_trainer_entry" in result.stderr
+
+
 def test_run_rft_script_dry_run_direct_mode_propagates_task_holdout_settings() -> None:
     result = _run_script(
         "run_rft.sh",
@@ -554,11 +568,15 @@ def test_run_rft_script_dry_run_direct_mode_propagates_task_holdout_settings() -
             "RFT_RUNTIME_MODE": "direct",
             "RFT_EVAL_SPLIT_FRACTION": "0.25",
             "RFT_EVAL_MIN_ROWS": "2",
+            "RFT_EVAL_TASK_COUNT": "50",
             "NPROC_PER_NODE": "1",
         },
     )
     assert "+data.on_policy.task_eval_split_fraction=0.25" in result.stdout
     assert "+data.on_policy.task_eval_min_rows=2" in result.stdout
+    assert "+data.on_policy.task_eval_task_count=50" in result.stdout
+    assert "trainer.test_freq=0" in result.stdout
+    assert "data.val_files=\\[\\]" in result.stdout
 
 
 def test_run_rft_script_dry_run_rejects_eval_split_for_all_partition_partial_rollout_probe_cache(
@@ -701,6 +719,7 @@ def test_run_rft_script_dry_run_direct_mode_uses_cli_eval_split_override_for_par
     result = _run_script(
         "run_rft.sh",
         "+data.on_policy.task_eval_split_fraction=0",
+        "+data.on_policy.task_eval_task_count=0",
         env_overrides={
             "RFT_RUNTIME_MODE": "direct",
             "RFT_DATA_CONFIG_NAME": "on_policy_swe_smith_rollout_probe_partial",
@@ -711,6 +730,7 @@ def test_run_rft_script_dry_run_direct_mode_uses_cli_eval_split_override_for_par
     )
 
     assert "+data.on_policy.task_eval_split_fraction=0" in result.stdout
+    assert "+data.on_policy.task_eval_task_count=0" in result.stdout
 
 
 def test_run_rft_script_dry_run_direct_mode_rejects_cli_partial_cache_override_with_eval_split(
@@ -761,6 +781,7 @@ def test_run_rft_script_dry_run_direct_mode_rejects_cli_partial_cache_override_w
             "RFT_RUNTIME_MODE": "direct",
             "RFT_DATA_CONFIG_NAME": "on_policy_swe_smith",
             "RFT_EVAL_SPLIT_FRACTION": "0",
+            "RFT_EVAL_TASK_COUNT": "0",
             "SMALL_SWE_DIFFICULTY_BAND_CACHE_PATH": str(cache_path),
             "NPROC_PER_NODE": "1",
         },
@@ -789,7 +810,7 @@ def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topo
     fake_python = _write_python_defaults_stub(
         tmp_path,
         (
-            "100 8 64 32 1 1 512 0.1 1 2 2 "
+            "100 8 64 32 1 1 512 0.1 1 50 2 2 "
             "http://127.0.0.1:8000/v1 "
             f"{config.DEFAULT_TRAINING_MODEL_NAME} 90 1024 0.0 1.0 8 12288 "
             "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
@@ -813,7 +834,7 @@ def test_run_rft_script_dry_run_defaults_nproc_to_detected_gpu_count(
     fake_python = _write_python_defaults_stub(
         tmp_path,
         (
-            "100 8 64 32 1 1 512 0.1 1 2 4 "
+            "100 8 64 32 1 1 512 0.1 1 50 2 4 "
             "http://127.0.0.1:8000/v1 "
             f"{config.DEFAULT_TRAINING_MODEL_NAME} 90 1024 0.0 1.0 8 12288 "
             "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"

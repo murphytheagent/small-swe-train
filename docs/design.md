@@ -122,6 +122,17 @@ Computed from canonical feedback fields (when `feedback_processing.extract_self_
 - `losses/action_masking.py` — `should_train_token()` + `build_action_token_mask()` implemented and tested.
 - `verl_integration/mask_injector.py` — injects stage-aware response masks for verl batches.
 
+## 6.1 RFT held-out eval policy
+
+RFT convergence telemetry is collected at outer-step boundaries only.
+
+- `rft_runtime.loop.eval_task_count` reserves a deterministic fixed held-out task partition from the valid on-policy task pool (`50` tasks by default).
+- The runtime validates that the fixed eval pool exists before a non-dry-run loop starts step 0.
+- Step 0 evaluates the initial model; later outer steps evaluate the current checkpoint before the next SFT update.
+- Format RFT and positive RFT both use the same outer-step eval path with stage-specific selection/verifier semantics.
+- The inner SFT trainer does not run validation for this signal: runtime-loop commands pass `trainer.test_freq=0` and `data.val_files=[]`, and the local `verl_integration.fsdp_sft_trainer_entry` skips verl validation dataset construction and last-step validation when validation is disabled.
+- Held-out eval never falls back to train rows.
+
 ## 7) Tool schema alignment with SWE-bench / SWE-smith
 
 ### 7.1 Adapter mapping (deterministic)
@@ -203,8 +214,6 @@ small-swe-train/
       action_masking.py
     metrics/
       contracts.py             # FormatMetrics, rate()
-    eval/
-      swebench_lite.py         # EpisodeResult, summarize, compare
     verl_integration/            # adapter layer: our modules ↔ verl
       main_ppo_entry.py
       ppo_runtime_patch.py
@@ -229,8 +238,6 @@ small-swe-train/
     run_sdpo.sh
     run_step_sdpo_scaffold.py
     run_rft_onpolicy_rollout_proof.sh
-    eval_swebench_lite.sh
-    eval_swebench_lite.py
     check_sdpo_turn_integrity.py
     run_flash_attn_rebuild.sh
     SLURM_GPU_LAUNCH.md
@@ -284,7 +291,7 @@ for Ray/tmpdir and cleanup guidance. The launcher defaults
 ### Training + verl integration (done; live runs require GPU/Slurm)
 | Module | Key exports | Tests |
 |--------|------------|-------|
-| `trainer/rft_runtime_loop.py` | `run_rft_runtime_loop` orchestration | `test_rft_runtime_loop.py` |
+| `trainer/rft_runtime_loop.py` | `run_rft_runtime_loop` orchestration, fixed outer-step held-out eval | `test_rft_runtime_loop.py` |
 | `trainer/rft_runtime.py` | on-policy runtime batch collection | `test_rft_runtime.py` |
 | `trainer/rft_trainer.py` | `RFTTrainer` scaffold | — |
 | `trainer/rft_handoff.py` | rollout → parquet handoff + selection | `test_onpolicy_rollout_adapter.py` |
@@ -301,14 +308,13 @@ for Ray/tmpdir and cleanup guidance. The launcher defaults
 | `verl_integration/ppo_runtime_patch.py` | RayPPOTrainer hook patching | `test_ppo_runtime_patch.py` |
 | `verl_integration/swe_bridge_agent_loop.py` | SDPO agent loop + Docker tools | `test_swe_bridge_agent_loop.py` |
 | `trainer/sdpo_trainer.py` | `SDPOTrainerScaffold` | `test_sdpo_trainer.py` |
-| `eval/swebench_lite.py` | SWE-bench Lite metrics | `test_swebench_lite.py` |
 
 ### Remaining gaps / TODO
 | Component | Description | Notes |
 |-----------|-------------|-------|
 | **Teacher memory compression** | Implement real compression/critical-fact extraction in `teacher/memory_builder.py`. | Currently returns empty blocks. |
 | **Live GPU validation** | Run `scripts/run_rft.sh` + `scripts/run_sdpo.sh` on Slurm with vLLM/Ray to validate full loops. | Requires external infra. |
-| **End-to-end evaluation harness** | Produce prediction JSONs from live agent runs and score via `eval/swebench_lite.py`. | Partial offline evaluator exists. |
+| **Benchmark stage** | Choose a current benchmark target, define prediction artifacts, and implement a scoring runner. | RFT has fixed outer-step held-out telemetry; no general post-training benchmark stage exists yet. |
 
 ## 11) Bug-fix log (v1.9, 2026-03-05)
 
@@ -346,7 +352,7 @@ have regression tests in `tests/`.
 
 3. **Implement teacher memory compression** — Replace the placeholder logic in `teacher/memory_builder.py` with real summarization / critical-facts extraction.
 
-4. **Automate evaluation pipeline** — Produce prediction JSONs from live agent runs and score via `scripts/eval_swebench_lite.py` (or integrate into SDPO/RFT post-run steps).
+4. **Define the benchmark stage** — Choose the benchmark target and artifact/scoring contract before implementing post-training evaluation. RFT already has fixed outer-step held-out telemetry, but that is not a general benchmark runner.
 
 ## 13) Training infrastructure decision
 

@@ -1,8 +1,36 @@
 # Teacher-Entropy-Gated `turn_sdpo` Plan
 
 Generated: 2026-03-30 03:00 UTC
+Updated: 2026-04-26 UTC
 Thread: 1774836140.646779
-Status: planning, no implementation yet
+Status: Implementation refreshed and tested; pilot run still pending
+
+## 0. Current Status (2026-04-26 UTC)
+
+- PR #30 has been refreshed onto current `origin/main` as a single implementation commit.
+- `configs/verl/sdpo_swe.yaml` carries a disabled-by-default `self_distillation.entropy_gate` block:
+  - `enable: false`
+  - `log_stats: true`
+  - `source: teacher`
+  - `threshold_mode: value`
+  - `threshold: 2.0`
+  - `alpha_low: 0.5`
+  - `alpha_high: 0.0`
+- `src/verl_integration/ppo_runtime_patch.py` supports teacher-entropy telemetry on active SDPO tokens and can split low-/high-entropy tokens onto different `alpha` values in both row-level and turn-level loss paths.
+- High-entropy tokens use `alpha_high=0.0` so teacher uncertainty moves toward forward KL / mode-covering behavior rather than reverse KL / mode-seeking behavior.
+- The implementation preserves the existing SDPO importance-ratio clipping path by delegating each token bucket to the existing distillation loss. No separate JSD clamp is introduced.
+- Turn-level entropy count metrics are summed across turns, not averaged, and the high-token fraction is recomputed from the summed counts.
+- Tests cover:
+  - disabled behavior preserving the old single-call loss path,
+  - high-entropy token gating,
+  - protection against activating the gate on non-distilled rows,
+  - turn-level integration,
+  - default config authority for disabled-by-default mode and `alpha_high=0.0`.
+- Validation run:
+  - `uv run python -m pytest tests/test_ppo_runtime_patch.py -q`
+  - `uv run python -m pytest tests/test_config_authority.py -q`
+
+This is not fully done as an experiment. The code path and PR refresh are done, but Milestone 3 is still pending: run the matched baseline versus gated pilot and inspect where the gate fires.
 
 ## 1. Goal
 
@@ -85,6 +113,8 @@ The first milestone exists to separate those two cases before the repo absorbs a
 
 ### Milestone 1: Validate the entropy signal
 
+Status: Partially done. Telemetry exists and is unit-tested, but the required pilot log and written judgment are still missing.
+
 Objective:
 
 - measure teacher entropy only on already active `turn_sdpo` target tokens;
@@ -111,6 +141,8 @@ Go / no-go rule:
 
 ### Milestone 2: Implement EOPD-lite inside `turn_sdpo`
 
+Status: Done in PR #30.
+
 Objective:
 
 - make the existing forward-KL / JSD mix conditional on teacher entropy without changing the rest of the training path.
@@ -126,7 +158,7 @@ Concrete work:
   - `entropy_gate.alpha_high`
 - thread the config into `src/verl_integration/ppo_runtime_patch.py`
 - on active distillation tokens:
-  - use teacher entropy to decide whether to keep the baseline mix or increase the forward-KL weight
+  - use teacher entropy to decide whether to keep the baseline JSD midpoint or switch high-entropy tokens to `alpha_high=0.0` forward-KL behavior
 - keep all of the following fixed:
   - teacher source
   - teacher prompt construction
@@ -150,6 +182,8 @@ Acceptance:
   - no unintended activation on non-distilled tokens
 
 ### Milestone 3: Pilot and decision
+
+Status: Not done.
 
 Objective:
 

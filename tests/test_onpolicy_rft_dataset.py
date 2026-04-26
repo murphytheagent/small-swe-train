@@ -40,6 +40,7 @@ def _build_key(tokenizer: object) -> str:
         task_partition="all",
         task_eval_split_fraction=0.0,
         task_eval_min_rows=0,
+        task_eval_task_count=None,
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -121,6 +122,7 @@ def test_cache_key_includes_parquet_split_fingerprint() -> None:
         task_partition="train",
         task_eval_split_fraction=0.25,
         task_eval_min_rows=1,
+        task_eval_task_count=None,
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -136,6 +138,7 @@ def test_cache_key_includes_parquet_split_fingerprint() -> None:
         task_partition="eval",
         task_eval_split_fraction=0.25,
         task_eval_min_rows=1,
+        task_eval_task_count=None,
         parquet_files=["/tmp/val.parquet"],
         tokenizer=tokenizer,
     )
@@ -222,6 +225,7 @@ def test_onpolicy_dataset_evicts_stale_empty_cache_entry(
         task_partition="all",
         task_eval_split_fraction=0.0,
         task_eval_min_rows=0,
+        task_eval_task_count=None,
         parquet_files=["/tmp/train.parquet"],
         tokenizer=tokenizer,
     )
@@ -366,6 +370,7 @@ def test_onpolicy_dataset_routes_train_and_eval_partitions_from_dataset_paths(
             "enabled": True,
             "task_eval_split_fraction": 0.25,
             "task_eval_min_rows": 2,
+            "task_eval_task_count": 50,
         },
     }
 
@@ -384,9 +389,13 @@ def test_onpolicy_dataset_routes_train_and_eval_partitions_from_dataset_paths(
     assert captured_requests[0].task_partition == "train"
     assert captured_requests[0].task_eval_split_fraction == 0.25
     assert captured_requests[0].task_eval_min_rows == 2
+    assert captured_requests[0].task_eval_task_count == 50
     assert captured_requests[1].task_partition == "eval"
     assert captured_requests[1].task_eval_split_fraction == 0.25
     assert captured_requests[1].task_eval_min_rows == 2
+    assert captured_requests[1].task_eval_task_count == 50
+    assert captured_requests[1].runtime_overrides["task_batch_size"] == 50
+    assert captured_requests[1].runtime_overrides["attempts_per_task"] == 1
 
 
 def test_onpolicy_dataset_rejects_ambiguous_identical_train_and_val_paths(
@@ -440,7 +449,7 @@ def test_onpolicy_dataset_explicit_partition_overrides_identical_dataset_paths(
     assert captured_requests[0].task_partition == "eval"
 
 
-def test_onpolicy_dataset_reuses_train_partition_when_eval_split_is_empty(
+def test_onpolicy_dataset_rejects_empty_eval_without_train_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_requests = []
@@ -465,17 +474,11 @@ def test_onpolicy_dataset_reuses_train_partition_when_eval_split_is_empty(
         },
     }
 
-    eval_dataset = dataset_module.OnPolicyRFTDataset(
-        parquet_files=["/tmp/onpolicy-rft-val.parquet"],
-        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
-        config=config,
-    )
-    train_dataset = dataset_module.OnPolicyRFTDataset(
-        parquet_files=["/tmp/onpolicy-rft-train.parquet"],
-        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
-        config=config,
-    )
+    with pytest.raises(ValueError, match="zero selected rows"):
+        dataset_module.OnPolicyRFTDataset(
+            parquet_files=["/tmp/onpolicy-rft-val.parquet"],
+            tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+            config=config,
+        )
 
-    assert len(eval_dataset) == 2
-    assert len(train_dataset) == 2
-    assert [request.task_partition for request in captured_requests] == ["eval", "train"]
+    assert [request.task_partition for request in captured_requests] == ["eval"]

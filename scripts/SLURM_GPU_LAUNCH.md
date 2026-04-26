@@ -501,7 +501,6 @@ bash scripts/run_flash_attn_rebuild.sh --dry-run
 
 ## Notes
 
-- `eval_swebench_lite.py` and `eval_swebench_lite.sh` are not GPU launch scripts.
 - If your cluster policy differs, keep the GPU count contract intact:
   - `run_rft.sh`: `NPROC_PER_NODE == requested GPUs`
   - `run_rft_onpolicy_rollout_proof.sh`: `ON_POLICY_PROOF_NPROC_PER_NODE == requested GPUs`
