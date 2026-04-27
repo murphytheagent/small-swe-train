@@ -1,8 +1,8 @@
-# small-swe-train: Research Mode v1.9 Design Revision Packet
+# small-swe-train Design
 
-Generated: 2026-02-21 06:24 UTC (original), updated 2026-03-04
-Thread: 1771579678.414229
-Supersedes: v1.8 at this same path
+Last updated: 2026-04-26.
+
+This document describes the current training-system design. Active status and task tracking live in `../STATUS.md`; detailed 8B/9B-scale system optimization tracking lives in `system_optimization_8b.md`.
 
 ## 0) Architecture overview
 
@@ -38,11 +38,12 @@ flowchart TD
   end
 ```
 
-## 1) Chat contract for Qwen3-4B
+## 1) Chat contract for Qwen3-8B
 
 ### 1.1 Decision
-- ChatML-style turn framing for Qwen3-4B.
+- ChatML-style turn framing for `Qwen/Qwen3-8B`.
 - Turn boundaries: `<|im_start|>{role}` / `<|im_end|>`.
+- Thinking is disabled by default through launcher and tokenizer policy. The empty `<think>\n\n</think>\n\n` prefill may appear at the assistant generation boundary, but generated hidden reasoning content should not be trained or rolled out by default.
 
 ### 1.2 Intra-turn delimiters (assistant payload)
 1. Optional thinking block: `<think> ... </think>`
@@ -344,15 +345,21 @@ have regression tests in `tests/`.
 | 6 | `data_preprocessor.py` | Non-string `thinking` field (e.g. int) passed to `ActionEnvelope` caused `AttributeError` on `.strip()` | Coerce `thinking` to `str(value)` when non-None and non-string |
 | 7 | `rft_swe.yaml` / `sdpo_swe.yaml` | No LoRA configuration despite blueprint memory budget assuming LoRA (optimizer states ~0.05 GB vs ~8+ GB for full fine-tuning) | Added `lora:` block with `rank=64`, `alpha=128`, targets `q_proj/k_proj/v_proj/o_proj` |
 
-## 12) Recommended next steps (priority order)
+## 12) Operational design status
 
-1. **Run end-to-end RFT loop on Slurm** — Use `scripts/run_rft.sh` (or `trainer/rft_runtime_loop.py`) with a live vLLM server and Docker task images to validate rollouts, handoff parquet, and LoRA SFT training (`configs/verl/rft_swe.yaml`).
+- RFT and SDPO share `configs/verl/model_defaults.yaml` for the default model id.
+- RFT rollout collection, deterministic outer eval partitioning, cache writing, inner SFT, checkpoint export, and vLLM restart are orchestrated by `trainer/rft_runtime_loop.py`.
+- The inner RFT SFT trainer consumes pre-tokenized full multiturn transcript rows through `trainer.rft_token_cache.CachedRFTSFTDataset`; verl `MultiTurnSFTDataset` is not used in the runtime-loop inner trainer path.
+- Cached RFT inner SFT length bucketing uses verl's DP-normalized per-rank train batch size after sharding; the runtime loop still passes a global train batch target into Hydra.
+- RFT convergence eval is outer-loop only. Inner verl validation is disabled for runtime-loop RFT.
+- `turn_sdpo` uses `verl_integration/main_ppo_entry.py` plus `ppo_runtime_patch.py` for SWE-specific reward, reprompt, turn-level teacher supervision, and profiler metrics.
+- `profiler/*` telemetry is shared across RFT and SDPO; see `system_optimization_8b.md` for required keys and current memory defaults.
 
-2. **Validate SDPO PPO runtime** — Use `scripts/run_sdpo.sh` with `configs/verl/agent_loops/swe_bridge_agent.yaml` to confirm `ppo_runtime_patch.py` hooks, `swe_bridge_agent_loop.py` tool execution, reward/reprompt flow, and container cleanup.
+Remaining design constraints:
 
-3. **Implement teacher memory compression** — Replace the placeholder logic in `teacher/memory_builder.py` with real summarization / critical-facts extraction.
-
-4. **Define the benchmark stage** — Choose the benchmark target and artifact/scoring contract before implementing post-training evaluation. RFT already has fixed outer-step held-out telemetry, but that is not a general benchmark runner.
+- Teacher memory compression is still a placeholder design surface.
+- Define the benchmark stage, including the target and artifact/scoring contract, before implementing post-training evaluation. RFT already has fixed outer-step held-out telemetry, but that is not a general benchmark runner.
+- 8B rollout throughput under `enforce_eager=true` still needs measurement before enabling cuda-graph behavior.
 
 ## 13) Training infrastructure decision
 
@@ -360,7 +367,7 @@ have regression tests in `tests/`.
 - **Trainer & rollout**: `lasgroup/SDPO` (a fork of [verl](https://github.com/verl-project/verl)) used as-is.
 - **Rollout engine**: vLLM (via verl's colocated rollout worker).
 - **Training engine**: FSDP `FULL_SHARD` across 8 GPUs (via verl's `DataParallelPPOActor`).
-- FSDP is needed not for model size (Qwen3-4B ≈ 8 GB bf16) but for **activation memory headroom** with long SWE-bench trajectories (8K–16K tokens).
+- FSDP is needed for both `Qwen/Qwen3-8B` weight sharding and activation memory headroom with long SWE-bench trajectories (8K–19K tokens).
 
 ### 13.2 Hardware target
 - Single node, 8× A100 or H100 GPUs (80 GB each).
@@ -376,11 +383,11 @@ have regression tests in `tests/`.
 ### 13.4 Integration layer
 - New package `src/verl_integration/` bridges our protocol modules with verl hooks.
 - SDPO entrypoint: `src/verl_integration/main_ppo_entry.py` (applies runtime patches + registers agent loop).
-- RFT SFT entrypoint: `src/verl_integration/fsdp_sft_trainer_entry.py` (FlashAttention compatibility guard).
+- RFT SFT entrypoint: `src/verl_integration/fsdp_sft_trainer_entry.py` (FlashAttention compatibility guard, cached dataset dataloader, disabled inner validation path).
 - Full architecture, data flow, and milestone plan live in this design packet.
 
 ## 14) Sources
-- Qwen3 tokenizer chat template: https://huggingface.co/Qwen/Qwen3-4B/blob/main/tokenizer_config.json
+- Qwen3 tokenizer chat template: https://huggingface.co/Qwen/Qwen3-8B/blob/main/tokenizer_config.json
 - SDPO baseline: https://github.com/lasgroup/SDPO
 - verl framework: https://github.com/verl-project/verl
 - Thread review: https://github.com/murphytheagent/small-swe-train/pull/2#discussion_r2835868321

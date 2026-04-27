@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +12,110 @@ import config
 def _load_entry_module():
     pytest.importorskip("transformers")
     return importlib.import_module("verl_integration.fsdp_sft_trainer_entry")
+
+
+def test_distributed_profiler_token_counts_all_reduce(monkeypatch) -> None:
+    entry = _load_entry_module()
+
+    class _FakeTensor:
+        def __init__(self, values):
+            self.values = [float(value) for value in values]
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def tolist(self):
+            return list(self.values)
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.__path__ = []  # type: ignore[attr-defined]
+    fake_torch.float64 = "float64"
+    fake_torch.device = lambda *parts: ":".join(str(part) for part in parts)
+    fake_torch.tensor = lambda values, **_kwargs: _FakeTensor(values)
+    fake_torch.cuda = SimpleNamespace(
+        is_available=lambda: False,
+        current_device=lambda: 0,
+    )
+
+    fake_dist = types.ModuleType("torch.distributed")
+    fake_dist.is_available = lambda: True
+    fake_dist.is_initialized = lambda: True
+    fake_dist.ReduceOp = SimpleNamespace(SUM="sum")
+
+    def _fake_all_reduce(tensor, *, op):
+        assert op == "sum"
+        tensor.values = [value * 2 for value in tensor.values]
+
+    fake_dist.all_reduce = _fake_all_reduce
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "torch.distributed", fake_dist)
+
+    counts = entry._distributed_profiler_token_counts(
+        {"total_tokens": 10.0, "non_padding_tokens": 6.0, "loss_tokens": 3.0},
+        reference=None,
+    )
+
+    assert counts == {
+        "total_tokens": 20.0,
+        "non_padding_tokens": 12.0,
+        "loss_tokens": 6.0,
+    }
+
+
+def test_cached_train_dataloader_uses_normalized_per_rank_batch(monkeypatch) -> None:
+    entry = _load_entry_module()
+    omegaconf = pytest.importorskip("omegaconf")
+
+    class _Mesh:
+        def get_rank(self):
+            return 0
+
+        def size(self, *_args):
+            return 8
+
+    class _Dataset:
+        sequence_lengths = [10] * 32
+        collate_fn = object()
+
+        def __len__(self):
+            return len(self.sequence_lengths)
+
+    class _StatefulDataLoader:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _DistributedSampler:
+        def __init__(self, dataset, **kwargs):
+            self.dataset = dataset
+            self.kwargs = kwargs
+
+    trainer = object.__new__(entry._SmallSWEFSDPSFTTrainer)
+    trainer.config = omegaconf.OmegaConf.create(
+        {
+            "data": {
+                "train_batch_size": 32,
+                "micro_batch_size_per_gpu": 1,
+            },
+            "ulysses_sequence_parallel_size": 1,
+        }
+    )
+    trainer.device_mesh = _Mesh()
+    trainer.ulysses_device_mesh = None
+
+    monkeypatch.setattr(entry._verl_sft_trainer, "get_device_name", lambda: "cpu")
+    monkeypatch.setattr(entry._verl_sft_trainer, "StatefulDataLoader", _StatefulDataLoader)
+    monkeypatch.setattr(entry._verl_sft_trainer, "DistributedSampler", _DistributedSampler)
+
+    trainer._normalize_config_bsz()
+    trainer._build_dataloader(_Dataset(), _Dataset())
+
+    assert trainer.config.data.train_batch_size == 4
+    assert trainer.train_sampler.batch_size == 4
+    assert trainer.train_dataloader.kwargs["batch_size"] == 4
+    assert trainer.val_dataloader.kwargs["batch_size"] == 1
 
 
 def test_patched_from_pretrained_uses_sdpa_fallback_when_flash_attn_disabled(

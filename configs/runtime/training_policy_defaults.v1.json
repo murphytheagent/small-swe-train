@@ -127,6 +127,7 @@
       "task_batch_size": 512,
       "collector_max_in_flight_tasks": 32,
       "train_batch_size": 32,
+      "train_min_rows": 32,
       "eval_split_fraction": 0.1,
       "eval_min_rows": 1,
       "eval_task_count": 50,
@@ -134,7 +135,7 @@
     },
     "vllm": {
       "base_url": "http://127.0.0.1:8000/v1",
-      "model_name": "Qwen/Qwen3-4B-Instruct-2507",
+      "model_name": "Qwen/Qwen3-8B",
       "request_timeout_sec": 180,
       "max_tokens": 1024,
       "temperature": 0.6,

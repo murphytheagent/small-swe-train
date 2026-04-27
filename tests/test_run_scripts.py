@@ -801,7 +801,42 @@ def test_run_rft_script_dry_run_defaults_vllm_tp_dp_for_eight_gpus() -> None:
     )
     assert f"--tensor-parallel-size {expected_tp}" in result.stdout
     assert f"--data-parallel-size {expected_dp}" in result.stdout
-    assert "--gpu-memory-utilization 0.8" in result.stdout
+    assert "--gpu-memory-utilization 0.75" in result.stdout
+    assert "--max-num-seqs 32" in result.stdout
+    assert "--max-num-batched-tokens 131072" in result.stdout
+    assert "--default-chat-template-kwargs" in result.stdout
+    assert "enable_thinking" in result.stdout
+
+
+def test_run_rft_script_dry_run_defaults_train_min_rows_to_effective_train_batch() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+        env_overrides={"RFT_TRAIN_BATCH_SIZE": "8"},
+    )
+    assert "data.train_batch_size=8" in result.stdout
+    assert "data.train_min_rows=8" in result.stdout
+
+
+def test_run_rft_script_dry_run_honors_configured_train_min_rows_default(
+    tmp_path: Path,
+) -> None:
+    fake_python = _write_python_defaults_stub(
+        tmp_path,
+        (
+            "100 8 64 32 1 1 32 50 0.1 1 50 2 2 "
+            "http://127.0.0.1:8000/v1 "
+            f"{config.DEFAULT_TRAINING_MODEL_NAME} 90 1024 0.0 1.0 8 12288 "
+            "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+        ),
+    )
+    result = _run_script(
+        "run_rft.sh",
+        "trainer.total_training_steps=1",
+        env_overrides={"PYTHON_BIN": str(fake_python)},
+    )
+    assert "data.train_batch_size=32" in result.stdout
+    assert "data.train_min_rows=50" in result.stdout
 
 
 def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topology(
@@ -810,7 +845,7 @@ def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topo
     fake_python = _write_python_defaults_stub(
         tmp_path,
         (
-            "100 8 64 32 1 1 512 0.1 1 50 2 2 "
+            "100 8 64 32 1 1 512 512 0.1 1 50 2 2 "
             "http://127.0.0.1:8000/v1 "
             f"{config.DEFAULT_TRAINING_MODEL_NAME} 90 1024 0.0 1.0 8 12288 "
             "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
@@ -834,7 +869,7 @@ def test_run_rft_script_dry_run_defaults_nproc_to_detected_gpu_count(
     fake_python = _write_python_defaults_stub(
         tmp_path,
         (
-            "100 8 64 32 1 1 512 0.1 1 50 2 4 "
+            "100 8 64 32 1 1 512 512 0.1 1 50 2 4 "
             "http://127.0.0.1:8000/v1 "
             f"{config.DEFAULT_TRAINING_MODEL_NAME} 90 1024 0.0 1.0 8 12288 "
             "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
@@ -1045,6 +1080,19 @@ def test_teacher_reprompt_pilot_slurm_script_dry_run_uses_all_visible_gpus_for_t
     assert "--max-in-flight-tasks 128" in result.stdout
 
 
+def test_teacher_reprompt_pilot_slurm_script_dry_run_disables_qwen_thinking() -> None:
+    result = _run_script(
+        "run_teacher_reprompt_pilot_slurm.sh",
+        env_overrides={
+            "SLURM_GPUS_ON_NODE": "8",
+            "PILOT_MODEL_PATH": "/tmp/nonexistent-model-ok-for-dry-run",
+        },
+    )
+    assert "--default-chat-template-kwargs" in result.stdout
+    assert "enable_thinking" in result.stdout
+    assert "false" in result.stdout
+
+
 def test_teacher_reprompt_pilot_slurm_script_dry_run_accepts_fixed_kv_cache_overrides() -> None:
     result = _run_script(
         "run_teacher_reprompt_pilot_slurm.sh",
@@ -1117,7 +1165,14 @@ def test_teacher_reprompt_pilot_slurm_script_dry_run_load_latest_rft_checkpoint_
     manifest_path = run_dir / "rft_runtime_loop_manifest.json"
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps({"final_model_path": str(checkpoint_path)}), encoding="utf-8")
-    future_epoch = 4_102_444_800  # 2100-01-01T00:00:00Z
+    existing_manifest_mtimes = [
+        path.stat().st_mtime
+        for path in (repo_root / "outputs" / "slurm" / "rft_runtime").glob(
+            "*/rft_runtime_loop_manifest.json"
+        )
+        if path != manifest_path
+    ]
+    future_epoch = max([4_102_444_800, *existing_manifest_mtimes]) + 1.0
     os.utime(manifest_path, (future_epoch, future_epoch))
 
     try:
@@ -1719,7 +1774,14 @@ def test_run_sdpo_script_dry_run_discovers_manifest_from_slurm_rft_runtime(
         encoding="utf-8",
     )
 
-    future_epoch = 4_102_444_800  # 2100-01-01T00:00:00Z
+    existing_manifest_mtimes = [
+        path.stat().st_mtime
+        for path in (repo_root / "outputs" / "slurm" / "rft_runtime").glob(
+            "*/rft_runtime_loop_manifest.json"
+        )
+        if path != manifest_path
+    ]
+    future_epoch = max([4_102_444_800, *existing_manifest_mtimes]) + 1.0
     os.utime(manifest_path, (future_epoch, future_epoch))
 
     try:

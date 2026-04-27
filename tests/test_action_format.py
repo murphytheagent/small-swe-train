@@ -33,6 +33,29 @@ def test_parse_assistant_text_accepts_chatml_assistant_turn() -> None:
     assert envelope.tool_calls[0].tool == "submit"
 
 
+@pytest.mark.parametrize(
+    ("payload", "parse_mode"),
+    [
+        (
+            '<tool_call>{"tool":"submit","args":{"final_response":"done"}}</tool_call>'
+            '<tool_call>{"tool":"bash","args":{"command":"echo hi"}}</tool_call>',
+            "json_only",
+        ),
+        (
+            '<tool_call name="submit"><final_response><![CDATA[done]]></final_response></tool_call>'
+            '<tool_call name="bash"><command><![CDATA[echo hi]]></command></tool_call>',
+            "xml_only",
+        ),
+    ],
+)
+def test_parse_assistant_text_prioritizes_submit_singleton_error(
+    payload: str,
+    parse_mode: str,
+) -> None:
+    with pytest.raises(TurnParseError, match="submit"):
+        parse_assistant_text(payload, parse_mode=parse_mode, max_tool_calls=1)
+
+
 def test_parse_assistant_text_accepts_xml_payload_in_xml_only_mode() -> None:
     envelope = parse_assistant_text(
         '<tool_call name="submit">'

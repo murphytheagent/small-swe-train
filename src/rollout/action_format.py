@@ -28,6 +28,7 @@ from schemas import (
     XML_TOOL_CALL_ELEMENT,
     XML_TOOL_NAME_ATTRIBUTE,
     ActionEnvelope,
+    TERMINAL_TOOL_NAME,
     ToolCall,
     canonical_tool_name,
     get_xml_arg_order,
@@ -325,6 +326,11 @@ def _parse_json_assistant_turn_payload_dual(
             tool_calls.append(make_tool_call(payload_obj))
         except ValueError as exc:
             raise TurnParseError(str(exc)) from exc
+        if (
+            any(call.tool == TERMINAL_TOOL_NAME for call in tool_calls)
+            and len(tool_calls) != 1
+        ):
+            raise TurnParseError("'submit' must be the only tool call in the final turn.")
         if len(tool_calls) > max_tool_calls:
             raise TurnParseError(
                 f"Too many tool calls: got {len(tool_calls)}, max is {max_tool_calls}."
@@ -618,6 +624,11 @@ def parse_xml_assistant_turn_payload(
             raise TurnParseError(f"Unsupported XML assistant payload tag <{tag}>.")
 
         tool_calls.append(_parse_xml_tool_call(child))
+        if (
+            any(call.tool == TERMINAL_TOOL_NAME for call in tool_calls)
+            and len(tool_calls) != 1
+        ):
+            raise TurnParseError("'submit' must be the only tool call in the final turn.")
         if len(tool_calls) > max_tool_calls:
             raise TurnParseError(
                 f"Too many tool calls: got {len(tool_calls)}, max is {max_tool_calls}."

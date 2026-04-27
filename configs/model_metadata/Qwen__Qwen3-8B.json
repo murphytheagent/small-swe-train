@@ -1,0 +1,11 @@
+{
+  "architectures": [
+    "Qwen3ForCausalLM"
+  ],
+  "files": [
+    "config.json",
+    "tokenizer_config.json"
+  ],
+  "model_id": "Qwen/Qwen3-8B",
+  "pipeline_tag": "text-generation"
+}

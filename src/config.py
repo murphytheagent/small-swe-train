@@ -33,6 +33,7 @@ _DATA_CONFIGS_DIR = _CONFIGS_DIR / "data"
 _TRAINING_POLICY_PATH = _CONFIGS_DIR / "runtime" / "training_policy_defaults.v1.json"
 _PHASE_TRANSITION_GATES_PATH = _CONFIGS_DIR / "runtime" / "phase_transition_gates.v1.json"
 _VERL_MODEL_DEFAULTS_PATH = _CONFIGS_DIR / "verl" / "model_defaults.yaml"
+_MODEL_METADATA_DIR = _CONFIGS_DIR / "model_metadata"
 _MODEL_CONFIG_OVERRIDE_DIR = _CONFIGS_DIR / "model"
 _BUNDLED_MODEL_CONFIGS_DIR = Path(__file__).resolve().parent / "prompts" / "model_configs"
 
@@ -164,6 +165,50 @@ def default_training_model_name() -> str:
             f"`model_defaults.primary_name` must be a non-empty string in {_VERL_MODEL_DEFAULTS_PATH}."
         )
     return model_name.strip()
+
+
+def model_metadata_fixture_path(model_id: str) -> Path:
+    """Return the checked-in metadata fixture path for a Hugging Face model id."""
+    normalized = model_id.strip().replace("/", "__")
+    return _MODEL_METADATA_DIR / f"{normalized}.json"
+
+
+def load_model_metadata_fixture(model_id: str) -> dict[str, Any]:
+    """Load a checked-in HF metadata fixture without making network calls."""
+    path = model_metadata_fixture_path(model_id)
+    if not path.is_file():
+        raise FileNotFoundError(f"Model metadata fixture not found for {model_id!r}: {path}")
+    with path.open(encoding="utf-8") as fh:
+        payload = json.load(fh)
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Model metadata fixture {path} must be a mapping.")
+    return dict(payload)
+
+
+def validate_text_only_model_metadata(model_id: str, metadata: Mapping[str, Any]) -> None:
+    """Reject defaults whose checked metadata indicates a multimodal model."""
+    pipeline_tag = str(metadata.get("pipeline_tag", "")).strip().lower()
+    if pipeline_tag and pipeline_tag not in {"text-generation", "text2text-generation"}:
+        raise ValueError(
+            f"Model {model_id!r} is not text-only: pipeline_tag={pipeline_tag!r}."
+        )
+    file_names = {str(item).strip() for item in metadata.get("files", []) if str(item).strip()}
+    multimodal_files = {"preprocessor_config.json", "video_preprocessor_config.json"}
+    present_multimodal_files = sorted(file_names & multimodal_files)
+    if present_multimodal_files:
+        raise ValueError(
+            f"Model {model_id!r} appears multimodal; fixture includes "
+            f"{', '.join(present_multimodal_files)}."
+        )
+    architectures = [
+        str(item).strip().lower()
+        for item in metadata.get("architectures", [])
+        if str(item).strip()
+    ]
+    if any("conditionalgeneration" in item or "vl" in item for item in architectures):
+        raise ValueError(
+            f"Model {model_id!r} appears multimodal from architectures={architectures!r}."
+        )
 
 
 @functools.lru_cache(maxsize=8)
@@ -368,6 +413,10 @@ ACTION_PARSE_MODE: str = _normalize_action_parse_mode(
     _output_contract.get("action_parse_mode", "json_only")
 )
 DEFAULT_TRAINING_MODEL_NAME: str = default_training_model_name()
+validate_text_only_model_metadata(
+    DEFAULT_TRAINING_MODEL_NAME,
+    load_model_metadata_fixture(DEFAULT_TRAINING_MODEL_NAME),
+)
 _validate_action_format_contract(
     payload_format=ACTION_PAYLOAD_FORMAT,
     parse_mode=ACTION_PARSE_MODE,

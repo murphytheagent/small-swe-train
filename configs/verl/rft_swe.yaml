@@ -3,7 +3,7 @@
 # Assistant-generated action tokens are included in loss (§6 masking policy).
 #
 # Hardware target: single node, variable GPU count
-# Model: Qwen3-4B-Instruct-2507 with LoRA
+# Model: Qwen3-8B with LoRA; thinking is disabled by launcher/tokenizer defaults.
 #
 # This stage must pass format quality gates before entering turn-SDPO.
 # Gate thresholds are in configs/runtime/phase_transition_gates.v1.json.
@@ -54,18 +54,18 @@ actor_rollout_ref:
 # this section is only here for compatibility with verl SFT trainer config
   rollout:
     name: vllm
-    gpu_memory_utilization: 0.8
+    gpu_memory_utilization: 0.75
     enforce_eager: true
     free_cache_engine: true
-    max_num_seqs: 64
-    max_num_batched_tokens: 262144
+    max_num_seqs: 32
+    max_num_batched_tokens: 131072
 
 # RFT token budget per packed training row.
 # This is consumed by data.max_length and by run_rft.sh overrides.
 max_model_len: 16384
 
 data:
-  micro_batch_size_per_gpu: 2
+  micro_batch_size_per_gpu: 1
   # SFT row truncation/padding length.
   max_length: ${max_model_len}
   apply_chat_template_kwargs: {}
@@ -74,6 +74,10 @@ data:
   custom_cls:
     path: pkg://verl_integration.onpolicy_rft_dataset
     name: OnPolicyRFTDataset
+  train_min_rows: 32
+  token_cache:
+    schema_version: 1
+    expected_fingerprint: null
   on_policy:
     enabled: true
     data_config_name: on_policy_swe_smith
