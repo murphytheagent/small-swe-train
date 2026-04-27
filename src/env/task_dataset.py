@@ -1100,6 +1100,7 @@ def load_task_samples(
     task_partition: str = _TASK_PARTITION_ALL,
     eval_split_fraction: float = 0.0,
     min_eval_rows: int = 0,
+    eval_task_count: int | None = None,
 ) -> list[TaskSample]:
     """Load the deterministic task pool for one partition of the on-policy dataset."""
     normalized_partition = _normalize_task_partition(task_partition)
@@ -1138,6 +1139,7 @@ def load_task_samples(
         tasks,
         eval_split_fraction=eval_split_fraction,
         min_eval_rows=min_eval_rows,
+        eval_task_count=eval_task_count,
     )
     return train_tasks if normalized_partition == _TASK_PARTITION_TRAIN else eval_tasks
 
@@ -1151,6 +1153,7 @@ def load_task_batch(
     task_partition: str = _TASK_PARTITION_ALL,
     eval_split_fraction: float = 0.0,
     min_eval_rows: int = 0,
+    eval_task_count: int | None = None,
     stage_name: str = _FORMAT_RFT_STAGE_NAME,
 ) -> list[TaskSample]:
     """Load a deterministic on-policy task batch for a given global step."""
@@ -1167,6 +1170,7 @@ def load_task_batch(
             task_partition=normalized_partition,
             eval_split_fraction=eval_split_fraction,
             min_eval_rows=min_eval_rows,
+            eval_task_count=eval_task_count,
         )
     except ValueError as exc:
         if normalized_partition != _TASK_PARTITION_ALL:
@@ -1501,12 +1505,15 @@ def split_task_samples_for_eval(
     *,
     eval_split_fraction: float,
     min_eval_rows: int,
+    eval_task_count: int | None = None,
 ) -> tuple[list[TaskSample], list[TaskSample]]:
     """Split valid task samples into deterministic train/eval partitions."""
     if eval_split_fraction < 0.0 or eval_split_fraction >= 1.0:
         raise ValueError("eval_split_fraction must be in [0.0, 1.0).")
     if min_eval_rows < 0:
         raise ValueError("min_eval_rows must be >= 0.")
+    if eval_task_count is not None and eval_task_count < 0:
+        raise ValueError("eval_task_count must be >= 0.")
 
     copied_tasks = list(tasks)
     total = len(copied_tasks)
@@ -1514,14 +1521,23 @@ def split_task_samples_for_eval(
         raise ValueError("tasks must be non-empty.")
 
     max_eval_rows = total - 1
-    if max_eval_rows < 1 or eval_split_fraction <= 0.0:
+    if eval_task_count is not None and eval_task_count > 0:
+        if eval_task_count > max_eval_rows:
+            raise ValueError(
+                "Unable to reserve fixed held-out eval task set: "
+                f"requested eval_task_count={eval_task_count}, but only {total} valid tasks "
+                "are available. Need at least eval_task_count + 1 valid tasks so the train "
+                "partition is non-empty."
+            )
+        eval_rows_target = eval_task_count
+    elif max_eval_rows < 1 or eval_split_fraction <= 0.0:
         return copied_tasks, []
-
-    eval_rows_target = int(total * eval_split_fraction)
-    eval_rows_target = max(eval_rows_target, min_eval_rows)
-    eval_rows_target = min(eval_rows_target, max_eval_rows)
-    if eval_rows_target < 1:
-        return copied_tasks, []
+    else:
+        eval_rows_target = int(total * eval_split_fraction)
+        eval_rows_target = max(eval_rows_target, min_eval_rows)
+        eval_rows_target = min(eval_rows_target, max_eval_rows)
+        if eval_rows_target < 1:
+            return copied_tasks, []
 
     ranked_indexes = sorted(
         range(total),

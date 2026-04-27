@@ -86,16 +86,25 @@ class OnPolicyRFTDataset:
             on_policy_cfg.get("task_eval_min_rows", 0),
             label="data.on_policy.task_eval_min_rows",
         )
+        task_eval_task_count_raw = on_policy_cfg.get("task_eval_task_count")
+        task_eval_task_count = (
+            _coerce_non_negative_int(
+                task_eval_task_count_raw,
+                label="data.on_policy.task_eval_task_count",
+            )
+            if task_eval_task_count_raw is not None
+            else None
+        )
         output_dir_raw = on_policy_cfg.get("output_dir")
         output_dir = str(output_dir_raw).strip() if isinstance(output_dir_raw, str) and output_dir_raw.strip() else None
         parquet_file_fingerprint = _normalize_parquet_files(parquet_files)
-        train_file_fingerprint = _normalize_parquet_files(config_mapping.get("train_files"))
         task_partition = _resolve_task_partition(
             explicit_partition=explicit_task_partition_raw,
             parquet_files=parquet_file_fingerprint,
             train_files=config_mapping.get("train_files"),
             val_files=config_mapping.get("val_files"),
             task_eval_split_fraction=task_eval_split_fraction,
+            task_eval_task_count=task_eval_task_count,
         )
 
         def _build_cache_key_for(
@@ -115,6 +124,7 @@ class OnPolicyRFTDataset:
                 task_partition=resolved_task_partition,
                 task_eval_split_fraction=task_eval_split_fraction,
                 task_eval_min_rows=task_eval_min_rows,
+                task_eval_task_count=task_eval_task_count,
                 parquet_files=resolved_parquet_files,
                 tokenizer=tokenizer,
             )
@@ -123,32 +133,32 @@ class OnPolicyRFTDataset:
             resolved_task_partition=task_partition,
             resolved_parquet_files=parquet_file_fingerprint,
         )
-        allow_empty_eval_fallback_to_train = (
-            task_partition == _TASK_PARTITION_EVAL
-            and task_eval_split_fraction > 0.0
-            and not explicit_task_partition
-            and bool(train_file_fingerprint)
-        )
-        train_cache_key = (
-            _build_cache_key_for(
-                resolved_task_partition=_TASK_PARTITION_TRAIN,
-                resolved_parquet_files=train_file_fingerprint,
-            )
-            if allow_empty_eval_fallback_to_train
-            else None
-        )
-
         def _collect_runtime_batch_for_partition(resolved_task_partition: str) -> dict[str, Any]:
+            request_runtime_overrides = dict(runtime_overrides)
+            if (
+                resolved_task_partition == _TASK_PARTITION_EVAL
+                and task_eval_task_count is not None
+                and task_eval_task_count > 0
+            ):
+                request_runtime_overrides["task_batch_size"] = task_eval_task_count
+                request_runtime_overrides["attempts_per_task"] = 1
+                max_in_flight = request_runtime_overrides.get("max_in_flight_tasks")
+                if isinstance(max_in_flight, int) and not isinstance(max_in_flight, bool):
+                    request_runtime_overrides["max_in_flight_tasks"] = min(
+                        max_in_flight,
+                        task_eval_task_count,
+                    )
             request = OnPolicyRFTRuntimeRequest(
                 data_config_name=data_config_name,
                 turn_generator_mode=turn_generator_mode,
                 total_steps=total_steps,
-                runtime_overrides=runtime_overrides,
+                runtime_overrides=request_runtime_overrides,
                 data_overrides=data_overrides,
                 handoff_overrides=handoff_overrides,
                 task_partition=resolved_task_partition,
                 task_eval_split_fraction=task_eval_split_fraction,
                 task_eval_min_rows=task_eval_min_rows,
+                task_eval_task_count=task_eval_task_count,
                 verify_submissions=verify_submissions,
                 stage_name=stage_name,
                 output_dir=output_dir,
@@ -164,12 +174,6 @@ class OnPolicyRFTDataset:
                 torch_module=torch,
                 collect_fn=lambda: _collect_runtime_batch_for_partition(task_partition),
             )
-            if _selected_sample_count(collected_result) < 1 and train_cache_key is not None:
-                collected_result = _collect_empty_eval_fallback(
-                    torch_module=torch,
-                    train_cache_key=train_cache_key,
-                    collect_train_fn=lambda: _collect_runtime_batch_for_partition(_TASK_PARTITION_TRAIN),
-                )
             if _selected_sample_count(collected_result) < 1:
                 raise ValueError("OnPolicyRFTDataset produced zero selected rows for training.")
             _ONPOLICY_RFT_CACHE[cache_key] = collected_result
@@ -234,27 +238,6 @@ def _selected_sample_count(result: Mapping[str, Any]) -> int:
     if not isinstance(input_ids, Sequence) or isinstance(input_ids, (str, bytes)):
         return 0
     return len(input_ids)
-
-
-def _collect_empty_eval_fallback(
-    *,
-    torch_module: Any,
-    train_cache_key: str,
-    collect_train_fn: Callable[[], dict[str, Any]],
-) -> dict[str, Any]:
-    cached_train_result = _ONPOLICY_RFT_CACHE.get(train_cache_key)
-    if cached_train_result is not None:
-        if _selected_sample_count(cached_train_result) > 0:
-            return cached_train_result
-        _ONPOLICY_RFT_CACHE.pop(train_cache_key, None)
-
-    train_result = _collect_on_rank0_and_broadcast(
-        torch_module=torch_module,
-        collect_fn=collect_train_fn,
-    )
-    if _selected_sample_count(train_result) > 0:
-        _ONPOLICY_RFT_CACHE[train_cache_key] = train_result
-    return train_result
 
 
 def _as_rows(value: Any, *, label: str) -> list[list[int]]:
@@ -388,13 +371,18 @@ def _resolve_task_partition(
     train_files: Any,
     val_files: Any,
     task_eval_split_fraction: float,
+    task_eval_task_count: int | None,
 ) -> str:
     normalized_explicit = ""
     if explicit_partition is not None:
         normalized_explicit = str(explicit_partition).strip()
     if normalized_explicit:
         return _normalize_task_partition(normalized_explicit)
-    if task_eval_split_fraction <= 0.0:
+    task_eval_enabled = (
+        (task_eval_task_count is not None and task_eval_task_count > 0)
+        or task_eval_split_fraction > 0.0
+    )
+    if not task_eval_enabled:
         return _TASK_PARTITION_ALL
 
     normalized_train_files = _normalize_parquet_files(train_files)
@@ -407,6 +395,7 @@ def _resolve_task_partition(
     ):
         raise ValueError(
             "data.train_files and data.val_files must differ when "
+            "data.on_policy.task_eval_task_count > 0 or "
             "data.on_policy.task_eval_split_fraction > 0 unless "
             "data.on_policy.task_partition is set explicitly."
         )
@@ -438,6 +427,7 @@ def _cache_key(
     task_partition: str,
     task_eval_split_fraction: float,
     task_eval_min_rows: int,
+    task_eval_task_count: int | None,
     parquet_files: Sequence[str],
     tokenizer: Any,
 ) -> str:
@@ -453,6 +443,9 @@ def _cache_key(
         "task_partition": str(task_partition),
         "task_eval_split_fraction": float(task_eval_split_fraction),
         "task_eval_min_rows": int(task_eval_min_rows),
+        "task_eval_task_count": (
+            int(task_eval_task_count) if task_eval_task_count is not None else None
+        ),
         "parquet_files": [str(path) for path in parquet_files],
         "tokenizer_fingerprint": _tokenizer_cache_fingerprint(tokenizer),
     }

@@ -218,6 +218,16 @@ def _dataset_has_sequence_lengths(dataset: Any) -> bool:
     return isinstance(lengths, (list, tuple)) and len(lengths) == len(dataset)
 
 
+def _cached_train_batch_size_per_rank(trainer: Any) -> int:
+    value = getattr(trainer, "_small_swe_train_batch_size_per_rank", None)
+    if value is None:
+        value = _config_get(_config_get(trainer.config, "data"), "train_batch_size")
+    batch_size = int(value)
+    if batch_size < 1:
+        raise ValueError("cached train dataloader batch size must be >= 1.")
+    return batch_size
+
+
 def _inner_profiler_path(trainer: Any, *, rank: int) -> Path:
     fallback_dir = os.environ.get(
         "SMALL_SWE_INNER_PROFILER_DIR",
@@ -399,6 +409,12 @@ def _fit_without_validation(trainer: Any) -> None:
 
 
 class _SmallSWEFSDPSFTTrainer(_ORIGINAL_FSDP_SFT_TRAINER):
+    def _normalize_config_bsz(self) -> None:
+        super()._normalize_config_bsz()
+        self._small_swe_train_batch_size_per_rank = int(
+            _config_get(_config_get(self.config, "data"), "train_batch_size")
+        )
+
     def _build_dataloader(self, train_dataset: Any, val_dataset: Any) -> None:
         if not _dataset_has_sequence_lengths(train_dataset):
             super()._build_dataloader(train_dataset, val_dataset)
@@ -421,17 +437,18 @@ class _SmallSWEFSDPSFTTrainer(_ORIGINAL_FSDP_SFT_TRAINER):
             )
 
         device_name = _verl_sft_trainer.get_device_name()
+        train_batch_size_per_rank = _cached_train_batch_size_per_rank(self)
         self.train_sampler = LengthBucketDistributedSampler(
             self.train_dataset,
             shuffle=True,
             num_replicas=world_size,
             rank=rank,
-            batch_size=int(config.data.train_batch_size),
+            batch_size=train_batch_size_per_rank,
             drop_last=True,
         )
         self.train_dataloader = _verl_sft_trainer.StatefulDataLoader(
             dataset=self.train_dataset,
-            batch_size=config.data.train_batch_size,
+            batch_size=train_batch_size_per_rank,
             sampler=self.train_sampler,
             num_workers=8,
             pin_memory=True,

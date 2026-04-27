@@ -157,6 +157,77 @@ def test_split_task_samples_for_eval_is_deterministic() -> None:
     assert eval_a
 
 
+def test_split_task_samples_for_eval_supports_fixed_eval_task_count() -> None:
+    tasks = [
+        TaskSample(
+            task_id=f"task-{index}",
+            image_name=f"img:{index}",
+            problem_statement=f"Problem {index}",
+            fail_to_pass=[f"tests/test_bug.py::test_{index}"],
+            pass_to_pass=[f"tests/test_ok.py::test_{index}"],
+            raw={},
+        )
+        for index in range(8)
+    ]
+
+    train_tasks, eval_tasks = split_task_samples_for_eval(
+        tasks,
+        eval_split_fraction=0.0,
+        min_eval_rows=0,
+        eval_task_count=3,
+    )
+
+    assert len(eval_tasks) == 3
+    assert len(train_tasks) == 5
+    assert not ({task.task_id for task in train_tasks} & {task.task_id for task in eval_tasks})
+
+
+def test_split_task_samples_for_eval_zero_count_keeps_fraction_mode() -> None:
+    tasks = [
+        TaskSample(
+            task_id=f"task-{index}",
+            image_name=f"img:{index}",
+            problem_statement=f"Problem {index}",
+            fail_to_pass=[f"tests/test_bug.py::test_{index}"],
+            pass_to_pass=[f"tests/test_ok.py::test_{index}"],
+            raw={},
+        )
+        for index in range(8)
+    ]
+
+    train_tasks, eval_tasks = split_task_samples_for_eval(
+        tasks,
+        eval_split_fraction=0.25,
+        min_eval_rows=1,
+        eval_task_count=0,
+    )
+
+    assert len(eval_tasks) == 2
+    assert len(train_tasks) == 6
+
+
+def test_split_task_samples_for_eval_rejects_fixed_count_that_exhausts_train() -> None:
+    tasks = [
+        TaskSample(
+            task_id=f"task-{index}",
+            image_name=f"img:{index}",
+            problem_statement=f"Problem {index}",
+            fail_to_pass=[f"tests/test_bug.py::test_{index}"],
+            pass_to_pass=[f"tests/test_ok.py::test_{index}"],
+            raw={},
+        )
+        for index in range(2)
+    ]
+
+    with pytest.raises(ValueError, match="eval_task_count=2"):
+        split_task_samples_for_eval(
+            tasks,
+            eval_split_fraction=0.0,
+            min_eval_rows=0,
+            eval_task_count=2,
+        )
+
+
 def test_split_task_samples_for_eval_keeps_duplicate_logical_tasks_together() -> None:
     duplicate_a = TaskSample(
         task_id="synthetic:0",

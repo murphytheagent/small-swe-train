@@ -65,6 +65,59 @@ def test_distributed_profiler_token_counts_all_reduce(monkeypatch) -> None:
     }
 
 
+def test_cached_train_dataloader_uses_normalized_per_rank_batch(monkeypatch) -> None:
+    entry = _load_entry_module()
+    omegaconf = pytest.importorskip("omegaconf")
+
+    class _Mesh:
+        def get_rank(self):
+            return 0
+
+        def size(self, *_args):
+            return 8
+
+    class _Dataset:
+        sequence_lengths = [10] * 32
+        collate_fn = object()
+
+        def __len__(self):
+            return len(self.sequence_lengths)
+
+    class _StatefulDataLoader:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _DistributedSampler:
+        def __init__(self, dataset, **kwargs):
+            self.dataset = dataset
+            self.kwargs = kwargs
+
+    trainer = object.__new__(entry._SmallSWEFSDPSFTTrainer)
+    trainer.config = omegaconf.OmegaConf.create(
+        {
+            "data": {
+                "train_batch_size": 32,
+                "micro_batch_size_per_gpu": 1,
+            },
+            "ulysses_sequence_parallel_size": 1,
+        }
+    )
+    trainer.device_mesh = _Mesh()
+    trainer.ulysses_device_mesh = None
+
+    monkeypatch.setattr(entry._verl_sft_trainer, "get_device_name", lambda: "cpu")
+    monkeypatch.setattr(entry._verl_sft_trainer, "StatefulDataLoader", _StatefulDataLoader)
+    monkeypatch.setattr(entry._verl_sft_trainer, "DistributedSampler", _DistributedSampler)
+
+    trainer._normalize_config_bsz()
+    trainer._build_dataloader(_Dataset(), _Dataset())
+
+    assert trainer.config.data.train_batch_size == 4
+    assert trainer.train_sampler.batch_size == 4
+    assert trainer.train_dataloader.kwargs["batch_size"] == 4
+    assert trainer.val_dataloader.kwargs["batch_size"] == 1
+
+
 def test_patched_from_pretrained_uses_sdpa_fallback_when_flash_attn_disabled(
     monkeypatch,
 ) -> None:

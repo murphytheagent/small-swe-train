@@ -391,6 +391,10 @@ RFT_EVAL_MIN_ROWS="${RFT_EVAL_MIN_ROWS:-}"
 RFT_STAGE_NAME="${RFT_STAGE_NAME:-format_rft}"
 RFT_DATA_CONFIG_NAME="${RFT_DATA_CONFIG_NAME:-on_policy_swe_smith}"
 RFT_TURN_GENERATOR_MODE="${RFT_TURN_GENERATOR_MODE:-default}"
+if [[ "${RFT_TRAINER_MODULE}" != "verl_integration.fsdp_sft_trainer_entry" ]]; then
+  echo "RFT_TRAINER_MODULE must be verl_integration.fsdp_sft_trainer_entry because RFT disables verl inner validation with trainer.test_freq=0 and data.val_files=[]." >&2
+  exit 1
+fi
 
 _load_rft_runtime_defaults() {
   "${PYTHON_BIN}" - <<'PY'
@@ -431,6 +435,14 @@ def _required_positive_int(value, *, label):
     if isinstance(value, int) and value >= 1:
         return value
     raise ValueError(f"`{label}` must be an integer >= 1.")
+
+
+def _required_non_negative_int(value, *, label):
+    if isinstance(value, bool):
+        raise ValueError(f"`{label}` must be an integer >= 0.")
+    if isinstance(value, int) and value >= 0:
+        return value
+    raise ValueError(f"`{label}` must be an integer >= 0.")
 
 
 def _required_number(value, *, label):
@@ -494,6 +506,10 @@ if eval_split_fraction < 0.0 or eval_split_fraction >= 1.0:
 eval_min_rows = _required_positive_int(
     loop.get("eval_min_rows", 1),
     label="rft_runtime.loop.eval_min_rows",
+)
+eval_task_count = _required_non_negative_int(
+    loop.get("eval_task_count", 50),
+    label="rft_runtime.loop.eval_task_count",
 )
 nproc_per_node = _parse_positive_int(os.environ.get("NPROC_PER_NODE"), 1)
 default_tp, default_dp = resolve_rft_vllm_parallel_defaults(nproc_per_node=nproc_per_node)
@@ -579,6 +595,7 @@ print(
     train_min_rows,
     eval_split_fraction,
     eval_min_rows,
+    eval_task_count,
     default_tp,
     default_dp,
     base_url,
@@ -601,6 +618,7 @@ PY
 _resolve_direct_mode_partial_rollout_probe_validation_surface() {
   PARTIAL_ROLLOUT_PROBE_VALIDATION_DATA_CONFIG_NAME="${RFT_DATA_CONFIG_NAME}"
   PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_SPLIT_FRACTION="${RFT_EVAL_SPLIT_FRACTION}"
+  PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_TASK_COUNT="${RFT_EVAL_TASK_COUNT}"
   local override normalized_override override_key override_value
   for override in "$@"; do
     normalized_override="${override}"
@@ -616,6 +634,9 @@ _resolve_direct_mode_partial_rollout_probe_validation_surface() {
       data.on_policy.task_eval_split_fraction)
         PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_SPLIT_FRACTION="${override_value}"
         ;;
+      data.on_policy.task_eval_task_count)
+        PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_TASK_COUNT="${override_value}"
+        ;;
     esac
   done
 }
@@ -623,7 +644,8 @@ _resolve_direct_mode_partial_rollout_probe_validation_surface() {
 _validate_partial_rollout_probe_partition_surface() {
   local data_config_name="${1}"
   local eval_split_fraction="${2}"
-  "${PYTHON_BIN}" - "${data_config_name}" "${eval_split_fraction}" <<'PY'
+  local eval_task_count="${3}"
+  "${PYTHON_BIN}" - "${data_config_name}" "${eval_split_fraction}" "${eval_task_count}" <<'PY'
 import sys
 
 from config import resolve_on_policy_settings
@@ -631,7 +653,8 @@ from env.task_dataset import validate_partial_rollout_probe_partition_request
 
 data_config_name = sys.argv[1].strip()
 eval_split_fraction = float(sys.argv[2])
-if eval_split_fraction <= 0.0:
+eval_task_count = int(sys.argv[3])
+if eval_split_fraction <= 0.0 and eval_task_count <= 0:
     raise SystemExit(0)
 
 settings = resolve_on_policy_settings(data_config_name=data_config_name)
@@ -646,8 +669,35 @@ validate_partial_rollout_probe_partition_request(
 PY
 }
 
+_validate_fixed_rft_eval_task_pool() {
+  local data_config_name="${1}"
+  local eval_task_count="${2}"
+  "${PYTHON_BIN}" - "${data_config_name}" "${eval_task_count}" <<'PY'
+import sys
+
+from config import resolve_on_policy_settings
+from env.task_dataset import load_task_samples
+
+data_config_name = sys.argv[1].strip()
+eval_task_count = int(sys.argv[2])
+if eval_task_count <= 0:
+    raise SystemExit(0)
+
+settings = resolve_on_policy_settings(data_config_name=data_config_name)
+eval_tasks = load_task_samples(
+    config=settings.data,
+    task_partition="eval",
+    eval_task_count=eval_task_count,
+)
+if len(eval_tasks) != eval_task_count:
+    raise RuntimeError(
+        f"Requested {eval_task_count} fixed RFT eval tasks, got {len(eval_tasks)}."
+    )
+PY
+}
+
 RFT_DEFAULTS="$(_load_rft_runtime_defaults)"
-read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_RFT_TRAIN_MIN_ROWS DEFAULT_RFT_EVAL_SPLIT_FRACTION DEFAULT_RFT_EVAL_MIN_ROWS DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT DEFAULT_RFT_MAX_SEQUENCE_LENGTH DEFAULT_ADAPTATION_MODE DEFAULT_ADAPTATION_COMPUTE_PRECISION DEFAULT_LORA_RANK DEFAULT_LORA_ALPHA DEFAULT_LORA_TARGET_MODULES <<<"${RFT_DEFAULTS}"
+read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_RFT_TRAIN_MIN_ROWS DEFAULT_RFT_EVAL_SPLIT_FRACTION DEFAULT_RFT_EVAL_MIN_ROWS DEFAULT_RFT_EVAL_TASK_COUNT DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT DEFAULT_RFT_MAX_SEQUENCE_LENGTH DEFAULT_ADAPTATION_MODE DEFAULT_ADAPTATION_COMPUTE_PRECISION DEFAULT_LORA_RANK DEFAULT_LORA_ALPHA DEFAULT_LORA_TARGET_MODULES <<<"${RFT_DEFAULTS}"
 
 RFT_STEPS="${RFT_STEPS:-${DEFAULT_RFT_STEPS}}"
 SAMPLES_PER_TASK="${SAMPLES_PER_TASK:-${DEFAULT_SAMPLES_PER_TASK}}"
@@ -670,6 +720,7 @@ if [[ -z "${RFT_TRAIN_MIN_ROWS:-}" ]]; then
 fi
 RFT_EVAL_SPLIT_FRACTION="${RFT_EVAL_SPLIT_FRACTION:-${DEFAULT_RFT_EVAL_SPLIT_FRACTION}}"
 RFT_EVAL_MIN_ROWS="${RFT_EVAL_MIN_ROWS:-${DEFAULT_RFT_EVAL_MIN_ROWS}}"
+RFT_EVAL_TASK_COUNT="${RFT_EVAL_TASK_COUNT:-${DEFAULT_RFT_EVAL_TASK_COUNT}}"
 RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT="${RFT_COLLECTOR_MAX_TURNS_PER_ATTEMPT:-${DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT}}"
 RFT_MAX_SEQUENCE_LENGTH="${RFT_MAX_SEQUENCE_LENGTH:-${DEFAULT_RFT_MAX_SEQUENCE_LENGTH}}"
 RFT_ADAPTATION_MODE="${RFT_ADAPTATION_MODE:-${DEFAULT_ADAPTATION_MODE}}"
@@ -779,13 +830,15 @@ export SMALL_SWE_RFT_LOOP_WANDB_ENABLE="${SMALL_SWE_RFT_LOOP_WANDB_ENABLE:-1}"
 
 PARTIAL_ROLLOUT_PROBE_VALIDATION_DATA_CONFIG_NAME="${RFT_DATA_CONFIG_NAME}"
 PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_SPLIT_FRACTION="${RFT_EVAL_SPLIT_FRACTION}"
+PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_TASK_COUNT="${RFT_EVAL_TASK_COUNT}"
 if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
   _resolve_direct_mode_partial_rollout_probe_validation_surface "$@"
 fi
 
 if ! _validate_partial_rollout_probe_partition_surface \
   "${PARTIAL_ROLLOUT_PROBE_VALIDATION_DATA_CONFIG_NAME}" \
-  "${PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_SPLIT_FRACTION}"; then
+  "${PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_SPLIT_FRACTION}" \
+  "${PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_TASK_COUNT}"; then
   exit 1
 fi
 
@@ -804,7 +857,9 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
     max_model_len="${RFT_MAX_SEQUENCE_LENGTH}"
     trainer.total_epochs="${RFT_SFT_NUM_EPOCH_PER_BATCH}"
     trainer.total_training_steps="${RFT_STEPS}"
+    trainer.test_freq=0
     data.train_batch_size="${RFT_TRAIN_BATCH_SIZE}"
+    data.val_files=[]
     model.partial_pretrain="${RFT_INITIAL_MODEL}"
     model.fsdp_config.model_dtype="${RFT_MODEL_DTYPE}"
     model.lora_rank="${RFT_LORA_RANK}"
@@ -818,6 +873,7 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
     +data.on_policy.stage_name="${RFT_STAGE_NAME}"
     +data.on_policy.task_eval_split_fraction="${RFT_EVAL_SPLIT_FRACTION}"
     +data.on_policy.task_eval_min_rows="${RFT_EVAL_MIN_ROWS}"
+    +data.on_policy.task_eval_task_count="${RFT_EVAL_TASK_COUNT}"
     +data.on_policy.runtime_overrides.task_batch_size="${RFT_TASK_BATCH_SIZE}"
     +data.on_policy.runtime_overrides.attempts_per_task="${SAMPLES_PER_TASK}"
     +data.on_policy.runtime_overrides.max_in_flight_tasks="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS}"
@@ -839,6 +895,12 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
   if ! "${PYTHON_BIN}" -c "import verl" >/dev/null 2>&1; then
     echo "verl is not installed. Install SDPO/verl and retry."
     echo "  pip install -e \".[train]\""
+    exit 1
+  fi
+
+  if ! _validate_fixed_rft_eval_task_pool \
+    "${PARTIAL_ROLLOUT_PROBE_VALIDATION_DATA_CONFIG_NAME}" \
+    "${PARTIAL_ROLLOUT_PROBE_VALIDATION_EVAL_TASK_COUNT}"; then
     exit 1
   fi
 
@@ -867,6 +929,7 @@ LOOP_CMD=(
   --train-min-rows "${RFT_TRAIN_MIN_ROWS}"
   --eval-split-fraction "${RFT_EVAL_SPLIT_FRACTION}"
   --eval-min-rows "${RFT_EVAL_MIN_ROWS}"
+  --eval-task-count "${RFT_EVAL_TASK_COUNT}"
   --stage-name "${RFT_STAGE_NAME}"
   --output-dir "${RFT_OUTPUT_DIR}"
   --data-config-name "${RFT_DATA_CONFIG_NAME}"

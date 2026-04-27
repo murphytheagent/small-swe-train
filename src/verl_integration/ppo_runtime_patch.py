@@ -52,6 +52,24 @@ _LEGACY_GATING_POLICIES = {
     _LEGACY_GATING_FEEDBACK_PRESENT,
     _LEGACY_GATING_ALWAYS,
 }
+_ENTROPY_GATE_SOURCE_TEACHER = "teacher"
+_ENTROPY_GATE_THRESHOLD_VALUE = "value"
+_ENTROPY_GATE_THRESHOLD_QUANTILE = "quantile"
+_ENTROPY_GATE_SOURCES = {_ENTROPY_GATE_SOURCE_TEACHER}
+_ENTROPY_GATE_THRESHOLD_MODES = {
+    _ENTROPY_GATE_THRESHOLD_VALUE,
+    _ENTROPY_GATE_THRESHOLD_QUANTILE,
+}
+_TEACHER_ENTROPY_BUCKET_BOUNDS = (
+    ("lt_1", None, 1.0),
+    ("1_to_2", 1.0, 2.0),
+    ("2_to_4", 2.0, 4.0),
+    ("ge_4", 4.0, None),
+)
+_TEACHER_ENTROPY_TARGET_TOKEN_COUNT_KEY = "self_distillation/teacher_entropy_target_token_count"
+_TEACHER_ENTROPY_HIGH_TOKEN_COUNT_KEY = "self_distillation/teacher_entropy_high_token_count"
+_TEACHER_ENTROPY_HIGH_TOKEN_FRACTION_KEY = "self_distillation/teacher_entropy_high_token_fraction"
+_TEACHER_ENTROPY_ACTIVE_MAX_KEY = "self_distillation/teacher_entropy_active_max"
 _TURN_LEVEL_REQUIRED_KEYS = {
     "turn_teacher_input_ids",
     "turn_teacher_attention_mask",
@@ -1318,6 +1336,382 @@ def _coerce_bool(value: Any) -> bool:
     return bool(value)
 
 
+class _ConfigOverlay(dict[str, Any]):
+    def __getattr__(self, item: str) -> Any:
+        try:
+            return self[item]
+        except KeyError as exc:  # pragma: no cover - defensive attribute shim
+            raise AttributeError(item) from exc
+
+
+def _coerce_float(value: Any, *, default: float) -> float:
+    if value is None:
+        return float(default)
+    if isinstance(value, numbers.Real) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value.strip())
+        except ValueError:
+            return float(default)
+    return float(default)
+
+
+def _overlay_config(container: Any, **updates: Any) -> _ConfigOverlay:
+    base: dict[str, Any] = {}
+    if isinstance(container, Mapping):
+        base.update(dict(container))
+    else:
+        try:
+            base.update(vars(container))
+        except TypeError:
+            pass
+    base.update(updates)
+    return _ConfigOverlay(base)
+
+
+def _resolve_teacher_entropy_gate_config(self_distillation_cfg: Any) -> dict[str, Any]:
+    baseline_alpha = _coerce_float(_cfg_get(self_distillation_cfg, "alpha", 0.5), default=0.5)
+    raw_cfg = _cfg_get(self_distillation_cfg, "entropy_gate")
+    if raw_cfg is None:
+        return {
+            "enabled": False,
+            "log_stats": False,
+            "source": _ENTROPY_GATE_SOURCE_TEACHER,
+            "threshold_mode": _ENTROPY_GATE_THRESHOLD_VALUE,
+            "threshold": 0.0,
+            "alpha_low": baseline_alpha,
+            "alpha_high": baseline_alpha,
+        }
+
+    enabled = _coerce_bool(_cfg_get(raw_cfg, "enable", False))
+    log_stats = _coerce_bool(_cfg_get(raw_cfg, "log_stats", False))
+    source = str(_cfg_get(raw_cfg, "source", _ENTROPY_GATE_SOURCE_TEACHER)).strip().lower()
+    if not source:
+        source = _ENTROPY_GATE_SOURCE_TEACHER
+    if source not in _ENTROPY_GATE_SOURCES:
+        supported = ", ".join(sorted(_ENTROPY_GATE_SOURCES))
+        raise ValueError(f"entropy_gate.source must be one of: {supported}")
+
+    threshold_mode = str(_cfg_get(raw_cfg, "threshold_mode", _ENTROPY_GATE_THRESHOLD_VALUE)).strip().lower()
+    if not threshold_mode:
+        threshold_mode = _ENTROPY_GATE_THRESHOLD_VALUE
+    if threshold_mode not in _ENTROPY_GATE_THRESHOLD_MODES:
+        supported = ", ".join(sorted(_ENTROPY_GATE_THRESHOLD_MODES))
+        raise ValueError(f"entropy_gate.threshold_mode must be one of: {supported}")
+
+    threshold = _coerce_float(_cfg_get(raw_cfg, "threshold", 0.0), default=0.0)
+    if threshold_mode == _ENTROPY_GATE_THRESHOLD_QUANTILE and not 0.0 <= threshold <= 1.0:
+        raise ValueError("entropy_gate.threshold must be within [0, 1] for quantile mode.")
+
+    alpha_low = _coerce_float(_cfg_get(raw_cfg, "alpha_low", baseline_alpha), default=baseline_alpha)
+    alpha_high = _coerce_float(_cfg_get(raw_cfg, "alpha_high", baseline_alpha), default=baseline_alpha)
+    for label, alpha in (("alpha_low", alpha_low), ("alpha_high", alpha_high)):
+        if alpha < 0.0 or alpha > 1.0:
+            raise ValueError(f"entropy_gate.{label} must be within [0, 1].")
+
+    return {
+        "enabled": enabled,
+        "log_stats": log_stats,
+        "source": source,
+        "threshold_mode": threshold_mode,
+        "threshold": threshold,
+        "alpha_low": alpha_low,
+        "alpha_high": alpha_high,
+    }
+
+
+def _resolve_teacher_entropy_threshold(
+    *,
+    teacher_entropy: Any,
+    target_mask: Any,
+    entropy_gate_cfg: Mapping[str, Any],
+) -> Any:
+    threshold = float(entropy_gate_cfg["threshold"])
+    if entropy_gate_cfg["threshold_mode"] != _ENTROPY_GATE_THRESHOLD_QUANTILE:
+        return teacher_entropy.new_tensor(threshold)
+
+    active_entropy = teacher_entropy.masked_select(target_mask)
+    if int(active_entropy.numel()) == 0:
+        return teacher_entropy.new_tensor(threshold)
+    return torch.quantile(active_entropy.float(), threshold).to(
+        dtype=teacher_entropy.dtype,
+        device=teacher_entropy.device,
+    )
+
+
+def _is_numeric_metric(value: Any) -> bool:
+    return isinstance(value, numbers.Real) and not isinstance(value, bool)
+
+
+def _merge_weighted_metric_dicts(
+    weighted_metrics: Sequence[tuple[float, Mapping[str, Any]]],
+) -> dict[str, float]:
+    valid_parts = [(float(weight), metrics) for weight, metrics in weighted_metrics if float(weight) > 0.0]
+    if not valid_parts:
+        return {}
+
+    keys: set[str] = set()
+    for _, metrics in valid_parts:
+        keys.update(str(key) for key in metrics.keys())
+
+    merged: dict[str, float] = {}
+    total_weight = sum(weight for weight, _ in valid_parts)
+    for key in sorted(keys):
+        weighted_sum = 0.0
+        used_weight = 0.0
+        for weight, metrics in valid_parts:
+            value = metrics.get(key)
+            if not _is_numeric_metric(value):
+                continue
+            weighted_sum += float(value) * weight
+            used_weight += weight
+        if used_weight > 0.0:
+            merged[key] = weighted_sum / used_weight
+    if total_weight <= 0.0:
+        return {}
+    return merged
+
+
+def _build_teacher_entropy_metrics(
+    *,
+    teacher_entropy: Any,
+    target_mask: Any,
+    threshold_tensor: Any,
+    entropy_gate_cfg: Mapping[str, Any],
+    high_mask: Any,
+) -> dict[str, float]:
+    active_entropy = teacher_entropy.masked_select(target_mask)
+    target_token_count = float(target_mask.sum().item())
+    high_token_count = float(high_mask.sum().item())
+    metrics = {
+        "self_distillation/teacher_entropy_gate_enabled": 1.0 if entropy_gate_cfg["enabled"] else 0.0,
+        "self_distillation/teacher_entropy_log_stats_enabled": (
+            1.0 if entropy_gate_cfg["log_stats"] else 0.0
+        ),
+        "self_distillation/teacher_entropy_threshold": float(threshold_tensor.item()),
+        "self_distillation/teacher_entropy_alpha_low": float(entropy_gate_cfg["alpha_low"]),
+        "self_distillation/teacher_entropy_alpha_high": float(entropy_gate_cfg["alpha_high"]),
+        "self_distillation/teacher_entropy_target_token_count": target_token_count,
+        "self_distillation/teacher_entropy_high_token_count": high_token_count,
+        "self_distillation/teacher_entropy_high_token_fraction": (
+            high_token_count / target_token_count if target_token_count > 0.0 else 0.0
+        ),
+    }
+    if target_token_count <= 0.0:
+        metrics["self_distillation/teacher_entropy_active_mean"] = 0.0
+        metrics["self_distillation/teacher_entropy_active_max"] = 0.0
+        for label, _, _ in _TEACHER_ENTROPY_BUCKET_BOUNDS:
+            metrics[f"self_distillation/teacher_entropy_bucket_{label}_count"] = 0.0
+        return metrics
+
+    metrics["self_distillation/teacher_entropy_active_mean"] = float(active_entropy.float().mean().item())
+    metrics["self_distillation/teacher_entropy_active_max"] = float(active_entropy.float().max().item())
+    for label, lower, upper in _TEACHER_ENTROPY_BUCKET_BOUNDS:
+        bucket_mask = target_mask.clone()
+        if lower is not None:
+            bucket_mask = bucket_mask & (teacher_entropy >= lower)
+        if upper is not None:
+            bucket_mask = bucket_mask & (teacher_entropy < upper)
+        metrics[f"self_distillation/teacher_entropy_bucket_{label}_count"] = float(bucket_mask.sum().item())
+    return metrics
+
+
+def _merge_turn_level_pg_metrics(
+    weighted_metrics: Sequence[tuple[float, Mapping[str, Any]]],
+) -> dict[str, float]:
+    merged = _merge_weighted_metric_dicts(weighted_metrics)
+    if not merged:
+        return {}
+
+    teacher_entropy_count_keys = {
+        _TEACHER_ENTROPY_TARGET_TOKEN_COUNT_KEY,
+        _TEACHER_ENTROPY_HIGH_TOKEN_COUNT_KEY,
+        *(
+            f"self_distillation/teacher_entropy_bucket_{label}_count"
+            for label, _, _ in _TEACHER_ENTROPY_BUCKET_BOUNDS
+        ),
+    }
+    for key in teacher_entropy_count_keys:
+        total = 0.0
+        saw_value = False
+        for _, metrics in weighted_metrics:
+            value = metrics.get(key)
+            if not _is_numeric_metric(value):
+                continue
+            total += float(value)
+            saw_value = True
+        if saw_value:
+            merged[key] = total
+
+    active_max_values = [
+        float(metrics[_TEACHER_ENTROPY_ACTIVE_MAX_KEY])
+        for _, metrics in weighted_metrics
+        if _is_numeric_metric(metrics.get(_TEACHER_ENTROPY_ACTIVE_MAX_KEY))
+    ]
+    if active_max_values:
+        merged[_TEACHER_ENTROPY_ACTIVE_MAX_KEY] = max(active_max_values)
+
+    target_token_count = merged.get(_TEACHER_ENTROPY_TARGET_TOKEN_COUNT_KEY)
+    high_token_count = merged.get(_TEACHER_ENTROPY_HIGH_TOKEN_COUNT_KEY)
+    if _is_numeric_metric(target_token_count) and _is_numeric_metric(high_token_count):
+        target_token_count = float(target_token_count)
+        high_token_count = float(high_token_count)
+        merged[_TEACHER_ENTROPY_HIGH_TOKEN_FRACTION_KEY] = (
+            high_token_count / target_token_count if target_token_count > 0.0 else 0.0
+        )
+    return merged
+
+
+def _compute_self_distillation_loss_with_teacher_entropy_gate(
+    *,
+    response_mask: Any,
+    self_distillation_mask: Any,
+    self_distillation_cfg: Any,
+    teacher_entropy: Any | None,
+    student_log_probs: Any,
+    teacher_log_probs: Any,
+    old_log_probs: Any,
+    student_all_log_probs: Any,
+    teacher_all_log_probs: Any,
+    student_topk_log_probs: Any,
+    teacher_topk_log_probs: Any,
+    loss_agg_mode: str,
+    rollout_is_weights: Any,
+    compute_self_distillation_loss_fn: Any,
+) -> tuple[Any, dict[str, float], Any]:
+    if torch is None:
+        raise RuntimeError("torch is required for teacher-entropy-gated SDPO loss.")
+
+    entropy_gate_cfg = _resolve_teacher_entropy_gate_config(self_distillation_cfg)
+    response_mask_tensor = _ensure_tensor_like(
+        response_mask,
+        dtype=getattr(response_mask, "dtype", torch.long),
+        device=student_log_probs.device,
+    )
+    if self_distillation_mask is None:
+        self_distillation_mask_tensor = torch.ones(
+            (response_mask_tensor.shape[0],),
+            dtype=torch.float32,
+            device=student_log_probs.device,
+        )
+    else:
+        self_distillation_mask_tensor = _ensure_tensor_like(
+            self_distillation_mask,
+            dtype=torch.float32,
+            device=student_log_probs.device,
+        )
+
+    target_mask = (response_mask_tensor > 0) & (self_distillation_mask_tensor.unsqueeze(1) > 0)
+    target_token_count = target_mask.to(dtype=torch.float32).sum()
+    needs_teacher_entropy = entropy_gate_cfg["enabled"] or entropy_gate_cfg["log_stats"]
+
+    if entropy_gate_cfg["enabled"] and str(loss_agg_mode).strip() != "token-mean":
+        raise ValueError("Teacher entropy gating currently requires loss_agg_mode='token-mean'.")
+
+    if not needs_teacher_entropy:
+        pg_loss, pg_metrics = compute_self_distillation_loss_fn(
+            student_log_probs=student_log_probs,
+            teacher_log_probs=teacher_log_probs,
+            response_mask=response_mask_tensor,
+            self_distillation_config=self_distillation_cfg,
+            old_log_probs=old_log_probs,
+            student_all_log_probs=student_all_log_probs,
+            teacher_all_log_probs=teacher_all_log_probs,
+            student_topk_log_probs=student_topk_log_probs,
+            teacher_topk_log_probs=teacher_topk_log_probs,
+            self_distillation_mask=self_distillation_mask_tensor,
+            loss_agg_mode=loss_agg_mode,
+            rollout_is_weights=rollout_is_weights,
+        )
+        return pg_loss, dict(pg_metrics), target_token_count
+
+    if teacher_entropy is None:
+        raise ValueError("Teacher entropy gate requested teacher entropy, but the teacher forward pass did not return it.")
+
+    teacher_entropy_tensor = _ensure_tensor_like(
+        teacher_entropy,
+        dtype=torch.float32,
+        device=student_log_probs.device,
+    )
+    if tuple(getattr(teacher_entropy_tensor, "shape", ())) != tuple(getattr(response_mask_tensor, "shape", ())):
+        raise ValueError("Teacher entropy tensor must match response_mask shape.")
+
+    threshold_tensor = _resolve_teacher_entropy_threshold(
+        teacher_entropy=teacher_entropy_tensor,
+        target_mask=target_mask,
+        entropy_gate_cfg=entropy_gate_cfg,
+    )
+    high_mask = target_mask & (teacher_entropy_tensor > threshold_tensor)
+    teacher_entropy_metrics = _build_teacher_entropy_metrics(
+        teacher_entropy=teacher_entropy_tensor,
+        target_mask=target_mask,
+        threshold_tensor=threshold_tensor,
+        entropy_gate_cfg=entropy_gate_cfg,
+        high_mask=high_mask,
+    )
+
+    if not entropy_gate_cfg["enabled"]:
+        pg_loss, pg_metrics = compute_self_distillation_loss_fn(
+            student_log_probs=student_log_probs,
+            teacher_log_probs=teacher_log_probs,
+            response_mask=response_mask_tensor,
+            self_distillation_config=self_distillation_cfg,
+            old_log_probs=old_log_probs,
+            student_all_log_probs=student_all_log_probs,
+            teacher_all_log_probs=teacher_all_log_probs,
+            student_topk_log_probs=student_topk_log_probs,
+            teacher_topk_log_probs=teacher_topk_log_probs,
+            self_distillation_mask=self_distillation_mask_tensor,
+            loss_agg_mode=loss_agg_mode,
+            rollout_is_weights=rollout_is_weights,
+        )
+        merged_metrics = dict(pg_metrics)
+        merged_metrics.update(teacher_entropy_metrics)
+        return pg_loss, merged_metrics, target_token_count
+
+    low_mask = target_mask & ~high_mask
+    weighted_metrics: list[tuple[float, Mapping[str, Any]]] = []
+    weighted_pg_loss = student_log_probs.new_zeros(())
+    total_weight = student_log_probs.new_zeros(())
+
+    for token_mask, alpha in (
+        (low_mask, float(entropy_gate_cfg["alpha_low"])),
+        (high_mask, float(entropy_gate_cfg["alpha_high"])),
+    ):
+        token_count = token_mask.to(dtype=torch.float32).sum()
+        if float(token_count.item()) <= 0.0:
+            continue
+        row_mask = token_mask.any(dim=-1).to(dtype=torch.float32, device=student_log_probs.device)
+        pg_loss, pg_metrics = compute_self_distillation_loss_fn(
+            student_log_probs=student_log_probs,
+            teacher_log_probs=teacher_log_probs,
+            response_mask=token_mask.to(dtype=response_mask_tensor.dtype),
+            self_distillation_config=_overlay_config(self_distillation_cfg, alpha=alpha),
+            old_log_probs=old_log_probs,
+            student_all_log_probs=student_all_log_probs,
+            teacher_all_log_probs=teacher_all_log_probs,
+            student_topk_log_probs=student_topk_log_probs,
+            teacher_topk_log_probs=teacher_topk_log_probs,
+            self_distillation_mask=row_mask,
+            loss_agg_mode=loss_agg_mode,
+            rollout_is_weights=rollout_is_weights,
+        )
+        weighted_pg_loss = weighted_pg_loss + pg_loss * token_count
+        total_weight = total_weight + token_count
+        weighted_metrics.append((float(token_count.item()), dict(pg_metrics)))
+
+    if float(total_weight.item()) <= 0.0:
+        zero_pg_loss = (student_log_probs * 0.0).sum()
+        merged_metrics = {"self_distillation/empty_target_batch": 1.0}
+    else:
+        zero_pg_loss = weighted_pg_loss / total_weight.clamp(min=1.0)
+        merged_metrics = _merge_weighted_metric_dicts(weighted_metrics)
+
+    merged_metrics.update(teacher_entropy_metrics)
+    return zero_pg_loss, merged_metrics, target_token_count
+
+
 def _coerce_role(value: Any) -> str:
     role = str(value or "").strip().lower()
     if role in {"system", "user", "assistant"}:
@@ -1452,6 +1846,7 @@ def _compute_turn_level_self_distillation_pg_loss(
     old_log_prob: Any,
     student_all_logps: Any,
     student_topk_logps: Any,
+    teacher_entropy_gate_cfg: Mapping[str, Any],
     loss_agg_mode: str,
     rollout_is_weights: Any,
     compute_self_distillation_loss_fn: Any,
@@ -1482,6 +1877,7 @@ def _compute_turn_level_self_distillation_pg_loss(
     weighted_pg_loss = log_prob.new_zeros(())
     total_target_tokens = log_prob.new_zeros(())
     total_active_turn_pairs = log_prob.new_zeros(())
+    turn_metric_accumulator: list[tuple[float, Mapping[str, Any]]] = []
 
     for turn_index in range(turn_count):
         teacher_inputs = {
@@ -1494,7 +1890,9 @@ def _compute_turn_level_self_distillation_pg_loss(
             teacher_outputs = actor._forward_micro_batch(
                 teacher_inputs,
                 temperature=temperature,
-                calculate_entropy=False,
+                calculate_entropy=(
+                    teacher_entropy_gate_cfg["enabled"] or teacher_entropy_gate_cfg["log_stats"]
+                ),
                 return_all_logps=return_all_logps,
                 distill_topk=distill_topk,
                 topk_indices=student_topk_indices,
@@ -1504,36 +1902,46 @@ def _compute_turn_level_self_distillation_pg_loss(
         turn_teacher_log_prob = teacher_outputs["log_probs"]
         turn_teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
         turn_teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
+        turn_teacher_entropy = (
+            teacher_outputs.get("entropys")
+            if teacher_entropy_gate_cfg["enabled"] or teacher_entropy_gate_cfg["log_stats"]
+            else None
+        )
 
         turn_pair_mask = turn_self_distillation_mask[:, turn_index].to(dtype=torch.float32, device=log_prob.device)
         turn_response_mask = turn_response_masks[:, turn_index, :].to(
             dtype=model_inputs["response_mask"].dtype,
             device=log_prob.device,
         )
-        turn_pg_loss, _ = compute_self_distillation_loss_fn(
+        turn_pg_loss, turn_pg_metrics, turn_token_count = _compute_self_distillation_loss_with_teacher_entropy_gate(
+            response_mask=turn_response_mask,
+            self_distillation_mask=turn_pair_mask,
+            self_distillation_cfg=self_distillation_cfg,
+            teacher_entropy=turn_teacher_entropy,
             student_log_probs=log_prob,
             teacher_log_probs=turn_teacher_log_prob,
-            response_mask=turn_response_mask,
-            self_distillation_config=self_distillation_cfg,
             old_log_probs=old_log_prob,
             student_all_log_probs=student_all_logps,
             teacher_all_log_probs=turn_teacher_all_logps,
             student_topk_log_probs=student_topk_logps,
             teacher_topk_log_probs=turn_teacher_topk_logps,
-            self_distillation_mask=turn_pair_mask,
             loss_agg_mode=loss_agg_mode,
             rollout_is_weights=rollout_is_weights,
+            compute_self_distillation_loss_fn=compute_self_distillation_loss_fn,
         )
-        turn_token_count = (turn_response_mask * turn_pair_mask.unsqueeze(1)).sum()
         weighted_pg_loss = weighted_pg_loss + turn_pg_loss * turn_token_count
         total_target_tokens = total_target_tokens + turn_token_count
         total_active_turn_pairs = total_active_turn_pairs + turn_pair_mask.sum()
+        if turn_token_count.item() > 0:
+            turn_metric_accumulator.append((float(turn_token_count.item()), dict(turn_pg_metrics)))
 
     pg_loss = weighted_pg_loss / total_target_tokens.clamp(min=1.0)
     pg_metrics = {
         "self_distillation/empty_target_batch": 1.0 if total_target_tokens.item() == 0 else 0.0,
         "self_distillation/active_turn_pairs_in_micro_batch": float(total_active_turn_pairs.item()),
     }
+    if turn_metric_accumulator:
+        pg_metrics.update(_merge_turn_level_pg_metrics(turn_metric_accumulator))
     return pg_loss, pg_metrics
 
 
@@ -1645,6 +2053,10 @@ def _run_turn_level_sequential_update_policy(
                 teacher_regularization = "ema"
                 return_all_logps = False
                 distill_topk = None
+                teacher_entropy_gate_cfg = {
+                    "enabled": False,
+                    "log_stats": False,
+                }
                 if self_distillation_enabled:
                     teacher_regularization = str(
                         _cfg_get(self_distillation_cfg, "teacher_regularization", "ema")
@@ -1653,6 +2065,7 @@ def _run_turn_level_sequential_update_policy(
                         raise ValueError("trust-region teacher requires disabling fused kernels to access logits.")
                     full_logit_distillation = bool(_cfg_get(self_distillation_cfg, "full_logit_distillation", False))
                     distillation_topk = _cfg_get(self_distillation_cfg, "distillation_topk", None)
+                    teacher_entropy_gate_cfg = _resolve_teacher_entropy_gate_config(self_distillation_cfg)
                     return_all_logps = (
                         full_logit_distillation and not distillation_topk
                     )
@@ -1694,6 +2107,7 @@ def _run_turn_level_sequential_update_policy(
                             old_log_prob=old_log_prob,
                             student_all_logps=student_all_logps,
                             student_topk_logps=student_topk_logps,
+                            teacher_entropy_gate_cfg=teacher_entropy_gate_cfg,
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,
                             compute_self_distillation_loss_fn=compute_self_distillation_loss_fn,
@@ -1714,7 +2128,10 @@ def _run_turn_level_sequential_update_policy(
                             teacher_outputs = actor._forward_micro_batch(
                                 teacher_inputs,
                                 temperature=temperature,
-                                calculate_entropy=False,
+                                calculate_entropy=(
+                                    teacher_entropy_gate_cfg["enabled"]
+                                    or teacher_entropy_gate_cfg["log_stats"]
+                                ),
                                 return_all_logps=return_all_logps,
                                 distill_topk=distill_topk,
                                 topk_indices=student_topk_indices,
@@ -1723,23 +2140,30 @@ def _run_turn_level_sequential_update_policy(
                         teacher_log_prob = teacher_outputs["log_probs"]
                         teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
                         teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
+                        teacher_entropy = (
+                            teacher_outputs.get("entropys")
+                            if teacher_entropy_gate_cfg["enabled"] or teacher_entropy_gate_cfg["log_stats"]
+                            else None
+                        )
                         self_distillation_mask = model_inputs.get("self_distillation_mask")
-                        pg_loss, pg_metrics = compute_self_distillation_loss_fn(
+                        pg_loss, pg_metrics, target_token_count = _compute_self_distillation_loss_with_teacher_entropy_gate(
+                            response_mask=response_mask,
+                            self_distillation_mask=self_distillation_mask,
+                            self_distillation_cfg=self_distillation_cfg,
+                            teacher_entropy=teacher_entropy,
                             student_log_probs=log_prob,
                             teacher_log_probs=teacher_log_prob,
-                            response_mask=response_mask,
-                            self_distillation_config=self_distillation_cfg,
                             old_log_probs=old_log_prob,
                             student_all_log_probs=student_all_logps,
                             teacher_all_log_probs=teacher_all_logps,
                             student_topk_log_probs=student_topk_logps,
                             teacher_topk_log_probs=teacher_topk_logps,
-                            self_distillation_mask=self_distillation_mask,
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,
+                            compute_self_distillation_loss_fn=compute_self_distillation_loss_fn,
                         )
                         pg_metrics["self_distillation/empty_target_batch"] = (
-                            1.0 if self_distillation_mask is None or self_distillation_mask.sum().item() == 0 else 0.0
+                            1.0 if float(target_token_count.item()) == 0.0 else 0.0
                         )
                     micro_batch_metrics.update(pg_metrics)
                 else:
@@ -1844,7 +2268,7 @@ def _maybe_expand_turn_level_distillation_data(data: Any) -> Any | None:
 
     non_tensors: dict[str, Any] = {}
     non_tensor_batch = getattr(data, "non_tensor_batch", {}) or {}
-    sample_index_cpu = sample_index.detach().cpu().numpy()
+    sample_index_cpu = sample_index.detach().cpu().tolist()
     if hasattr(non_tensor_batch, "items"):
         for key, value in non_tensor_batch.items():
             try:

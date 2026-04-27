@@ -23,7 +23,12 @@ from urllib.request import Request, urlopen
 
 import yaml
 
-from config import resolve_rft_collector_max_in_flight_default, resolve_rft_handoff_settings
+from config import (
+    resolve_on_policy_settings,
+    resolve_rft_collector_max_in_flight_default,
+    resolve_rft_handoff_settings,
+)
+from env.task_dataset import load_task_samples
 from metrics.profiler import append_profiler_jsonl, nvidia_smi_utilization, token_profile_metrics
 from trainer.rft_multiturn_dataset import (
     build_multiturn_messages,
@@ -74,6 +79,8 @@ _FORMAT_RFT_STAGE_NAME = "format_rft"
 _POSITIVE_RFT_STAGE_NAME = "positive_rft"
 _DEFAULT_PROCESS_GROUP_CLEANUP_TIMEOUT_SEC = 5.0
 _DEFAULT_DIAGNOSTIC_COMMAND_TIMEOUT_SEC = 5.0
+_DEFAULT_RFT_EVAL_TASK_COUNT = 50
+_RFT_SFT_TRAINER_ENTRYPOINT = "verl_integration.fsdp_sft_trainer_entry"
 _MODEL_ARTIFACT_FILE_NAMES = {
     "model.safetensors",
     "model.safetensors.index.json",
@@ -117,6 +124,7 @@ class RFTLoopConfig:
     eval_split_fraction: float = 0.1
     eval_min_rows: int = 1
     train_min_rows: int | None = None
+    eval_task_count: int = _DEFAULT_RFT_EVAL_TASK_COUNT
     stage_name: str = _FORMAT_RFT_STAGE_NAME
 
 
@@ -165,6 +173,78 @@ def resolve_rft_stage_handoff_overrides(stage_name: str) -> dict[str, Any]:
 def resolve_rft_stage_verify_submissions(stage_name: str) -> bool:
     resolved_stage_name = resolve_rft_stage_name(stage_name)
     return resolved_stage_name == _POSITIVE_RFT_STAGE_NAME
+
+
+def rft_heldout_eval_enabled(config: RFTLoopConfig) -> bool:
+    return config.eval_task_count > 0 or config.eval_split_fraction > 0.0
+
+
+def validate_fixed_eval_task_pool(
+    *,
+    data_config_name: str,
+    eval_task_count: int,
+) -> tuple[str, ...]:
+    if eval_task_count < 0:
+        raise ValueError("eval_task_count must be >= 0.")
+    if eval_task_count == 0:
+        return ()
+
+    settings = resolve_on_policy_settings(data_config_name=data_config_name)
+    try:
+        eval_tasks = load_task_samples(
+            config=settings.data,
+            task_partition="eval",
+            eval_task_count=eval_task_count,
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            "Unable to reserve the fixed held-out RFT eval task pool before starting "
+            f"the run for data_config_name={data_config_name!r}: {exc}"
+        ) from exc
+
+    if len(eval_tasks) != eval_task_count:
+        raise RuntimeError(
+            "Fixed held-out RFT eval task pool size mismatch before starting the run: "
+            f"requested {eval_task_count}, got {len(eval_tasks)}."
+        )
+    return tuple(task.task_id for task in eval_tasks)
+
+
+def _coerce_manifest_fixed_eval_task_ids(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return None
+    return tuple(str(item) for item in value)
+
+
+def resolve_fixed_eval_task_ids_for_run(
+    *,
+    runtime_manifest: Mapping[str, Any],
+    committed_step_index: int,
+    data_config_name: str,
+    eval_task_count: int,
+) -> tuple[str, ...]:
+    resolved_task_ids = validate_fixed_eval_task_pool(
+        data_config_name=data_config_name,
+        eval_task_count=eval_task_count,
+    )
+    stored_task_ids = _coerce_manifest_fixed_eval_task_ids(
+        runtime_manifest.get("fixed_eval_task_ids")
+    )
+    if stored_task_ids is None:
+        if committed_step_index >= 0 and eval_task_count > 0:
+            raise RuntimeError(
+                "Cannot resume fixed held-out RFT eval without stored fixed_eval_task_ids "
+                "in the runtime manifest."
+            )
+        return resolved_task_ids
+    if stored_task_ids != resolved_task_ids:
+        raise RuntimeError(
+            "Fixed held-out RFT eval task pool changed across resume; refusing to mix "
+            "different eval sets in one convergence curve."
+        )
+    return stored_task_ids
 
 
 class VLLMServerController:
@@ -709,6 +789,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         "verify_submissions": stage_verify_submissions,
         "eval_split_fraction": config.eval_split_fraction,
         "eval_min_rows": config.eval_min_rows,
+        "eval_task_count": config.eval_task_count,
         "collector_max_in_flight_tasks": collector_max_in_flight_tasks,
         "collector_max_turns_per_attempt": collector_max_turns_per_attempt,
         "sft_num_epoch_per_batch": config.sft_num_epoch_per_batch,
@@ -767,6 +848,26 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         )
         return
 
+    current_model_path = (
+        str(latest_committed_checkpoint.resume_model_path)
+        if latest_committed_checkpoint is not None
+        else config.initial_model
+    )
+    start_step_index = committed_step_index + 1
+    if start_step_index >= config.rft_steps:
+        runtime_manifest["final_model_path"] = current_model_path
+        runtime_manifest["completed_utc"] = _utc_now()
+        _write_json(_runtime_loop_manifest_path(config.output_dir), runtime_manifest)
+        return
+    fixed_eval_task_ids = resolve_fixed_eval_task_ids_for_run(
+        runtime_manifest=runtime_manifest,
+        committed_step_index=committed_step_index,
+        data_config_name=config.data_config_name,
+        eval_task_count=config.eval_task_count,
+    )
+    runtime_manifest["fixed_eval_task_count"] = len(fixed_eval_task_ids)
+    runtime_manifest["fixed_eval_task_ids"] = list(fixed_eval_task_ids)
+
     tokenizer = _load_tokenizer(config.initial_model)
     token_cache_fingerprint = build_rft_token_cache_fingerprint(
         tokenizer=tokenizer,
@@ -780,17 +881,6 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         "fingerprint": token_cache_fingerprint,
         "chat_template_kwargs": dict(chat_template_kwargs),
     }
-    current_model_path = (
-        str(latest_committed_checkpoint.resume_model_path)
-        if latest_committed_checkpoint is not None
-        else config.initial_model
-    )
-    start_step_index = committed_step_index + 1
-    if start_step_index >= config.rft_steps:
-        runtime_manifest["final_model_path"] = current_model_path
-        runtime_manifest["completed_utc"] = _utc_now()
-        _write_json(_runtime_loop_manifest_path(config.output_dir), runtime_manifest)
-        return
     vllm_controller = VLLMServerController(config=config, log_path=vllm_logs)
     existing_step_dirs = _discover_existing_step_dirs(
         config.output_dir,
@@ -800,6 +890,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     checkpoint_step_dirs: list[Path] = [
         step_dir for step_dir in existing_step_dirs if (step_dir / "trainer_checkpoints").is_dir()
     ]
+    heldout_eval_enabled = rft_heldout_eval_enabled(config)
     wandb_run = _init_rft_runtime_loop_wandb_run(config=config)
 
     try:
@@ -815,7 +906,6 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             collector_train_dir = collector_dir / "train"
             collector_eval_dir = collector_dir / "eval"
             train_parquet_path = step_dir / "accepted_trajectories.parquet"
-            eval_parquet_path = step_dir / "accepted_trajectories_eval.parquet"
             trainer_checkpoint_root = step_dir / "trainer_checkpoints"
             reset_step_artifacts(step_dir)
             step_dir.mkdir(parents=True, exist_ok=True)
@@ -836,11 +926,12 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 runtime_overrides=runtime_overrides,
                 handoff_overrides=stage_handoff_overrides,
                 output_dir=str(collector_train_dir),
-                task_partition=(
-                    "train" if config.eval_split_fraction > 0.0 else "all"
-                ),
+                task_partition=("train" if heldout_eval_enabled else "all"),
                 task_eval_split_fraction=config.eval_split_fraction,
                 task_eval_min_rows=config.eval_min_rows,
+                task_eval_task_count=(
+                    config.eval_task_count if config.eval_task_count > 0 else None
+                ),
                 verify_submissions=stage_verify_submissions,
                 stage_name=resolved_stage_name,
             )
@@ -885,7 +976,6 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             selected_rows_eval_upsampled = 0
             eval_selected_rows_over_max_length_dropped = 0
             eval_split_fallback_to_train = False
-            resolved_val_parquet_path = train_parquet_path
             effective_train_batch_size: int | None = None
             effective_eval_batch_size: int | None = None
             trainer_command: list[str] | None = None
@@ -910,18 +1000,29 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             profiler_attention_masks: list[list[int]] = []
             profiler_loss_masks: list[list[int]] = []
 
-            if config.eval_split_fraction > 0.0:
+            if heldout_eval_enabled:
+                eval_runtime_overrides = dict(runtime_overrides)
+                if config.eval_task_count > 0:
+                    eval_runtime_overrides["task_batch_size"] = config.eval_task_count
+                    eval_runtime_overrides["attempts_per_task"] = 1
+                    eval_runtime_overrides["max_in_flight_tasks"] = min(
+                        collector_max_in_flight_tasks,
+                        config.eval_task_count,
+                    )
                 eval_request = OnPolicyRFTRuntimeRequest(
                     data_config_name=config.data_config_name,
                     turn_generator_mode=config.turn_generator_mode,
                     total_steps=1,
                     start_step_index=step_index,
-                    runtime_overrides=runtime_overrides,
+                    runtime_overrides=eval_runtime_overrides,
                     handoff_overrides=stage_handoff_overrides,
                     output_dir=str(collector_eval_dir),
                     task_partition="eval",
                     task_eval_split_fraction=config.eval_split_fraction,
                     task_eval_min_rows=config.eval_min_rows,
+                    task_eval_task_count=(
+                        config.eval_task_count if config.eval_task_count > 0 else None
+                    ),
                     verify_submissions=stage_verify_submissions,
                     stage_name=resolved_stage_name,
                 )
@@ -967,7 +1068,6 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
 
                 world_size = config.nnodes * config.nproc_per_node
                 if not trainer_skipped:
-                    effective_eval_batch_size = world_size * micro_batch_size_per_gpu
                     token_cache_write_start = time.monotonic()
                     selected_count_for_train = write_selected_rows_to_multiturn_parquet(
                         selected_rows_for_train,
@@ -978,25 +1078,14 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                         chat_template_kwargs=chat_template_kwargs,
                     )
                     token_cache_write_duration_sec = time.monotonic() - token_cache_write_start
-                    if selected_rows_for_eval:
-                        selected_rows_for_eval, selected_rows_eval_upsampled = (
-                            upsample_selected_rows_to_batch_multiple(
-                                selected_rows_for_eval,
-                                global_batch_size=effective_eval_batch_size,
-                            )
+                    token_cache_write_duration_sec = (
+                        time.monotonic() - token_cache_write_start
+                    )
+                    if heldout_eval_enabled and not selected_rows_for_eval:
+                        raise RuntimeError(
+                            "Held-out RFT eval produced zero selected rows after filtering; "
+                            "refusing to run the inner SFT trainer without outer-step eval telemetry."
                         )
-                        selected_count_for_eval = write_selected_rows_to_multiturn_parquet(
-                            selected_rows_for_eval,
-                            eval_parquet_path,
-                            tokenizer=tokenizer,
-                            max_sequence_length=effective_keep_budget,
-                            cache_fingerprint=token_cache_fingerprint,
-                            chat_template_kwargs=chat_template_kwargs,
-                        )
-                        resolved_val_parquet_path = eval_parquet_path
-                    else:
-                        eval_split_fallback_to_train = True
-                        resolved_val_parquet_path = train_parquet_path
 
                     effective_train_batch_size = resolve_effective_train_batch_size(
                         requested=config.train_batch_size,
@@ -1045,7 +1134,6 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                             config_dir=config.config_dir,
                             model_path=current_model_path,
                             train_parquet_path=train_parquet_path,
-                            val_parquet_path=resolved_val_parquet_path,
                             trainer_output_dir=trainer_checkpoint_root,
                             train_batch_size=effective_train_batch_size,
                             train_min_rows=effective_train_min_rows,
@@ -1163,6 +1251,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "eval_selected_rows_over_max_length_dropped": (
                     eval_selected_rows_over_max_length_dropped
                 ),
+                "eval_task_count": config.eval_task_count,
                 "selected_count_for_train_raw": selected_count_for_train_raw,
                 "selected_count_for_train": selected_count_for_train,
                 "selected_count_for_eval_raw": selected_count_for_eval_raw,
@@ -1221,7 +1310,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "inner_val_loss_delta": trainer_metrics.get("val_loss_delta"),
                 "step_duration_sec": step_duration_sec,
                 "train_parquet": str(train_parquet_path),
-                "eval_parquet": str(resolved_val_parquet_path),
+                "eval_parquet": None,
+                "outer_eval_artifact_dir": str(collector_eval_dir) if heldout_eval_enabled else None,
                 "trainer_checkpoint_root": str(trainer_checkpoint_root),
                 "latest_hf_checkpoint": str(latest_hf_checkpoint) if latest_hf_checkpoint else None,
                 "latest_vllm_checkpoint": (
@@ -1288,7 +1378,6 @@ def build_trainer_step_command(
     config_dir: Path,
     model_path: str,
     train_parquet_path: Path,
-    val_parquet_path: Path,
     trainer_output_dir: Path,
     train_batch_size: int,
     train_min_rows: int,
@@ -1305,6 +1394,11 @@ def build_trainer_step_command(
     inner_trainer_logger = "[console]"
     if _coerce_bool_env("SMALL_SWE_RFT_INNER_TRAINER_WANDB_ENABLE", default=False):
         inner_trainer_logger = "[console,wandb]"
+    if trainer_module != _RFT_SFT_TRAINER_ENTRYPOINT:
+        raise ValueError(
+            "RFT inner validation is disabled with trainer.test_freq=0 and data.val_files=[]; "
+            f"use {_RFT_SFT_TRAINER_ENTRYPOINT!r} so the local entrypoint skips verl validation."
+        )
 
     required_overrides = [
         f"trainer.total_epochs={sft_num_epoch_per_batch}",
@@ -1313,6 +1407,8 @@ def build_trainer_step_command(
         f"trainer.logger={inner_trainer_logger}",
         f"trainer.default_local_dir={trainer_output_dir}",
         f"trainer.save_freq={_INNER_SFT_CHECKPOINT_DISABLED_SAVE_FREQ}",
+        # Held-out RFT eval is collected once per outer step by the runtime loop.
+        # Disable verl's per-inner-step validation path.
         "trainer.test_freq=0",
         # Runtime loop only consumes HuggingFace exports for vLLM restarts; keeping
         # checkpoint payloads hf_model-only avoids redundant dense/FSDP artifacts.
@@ -1880,6 +1976,7 @@ def _print_dry_run_plan(
         f"eval_split_fraction={config.eval_split_fraction}",
         f"eval_min_rows={config.eval_min_rows}",
         f"train_min_rows={config.train_min_rows or config.train_batch_size}",
+        f"eval_task_count={config.eval_task_count}",
         f"collector_max_in_flight_tasks={collector_max_in_flight_tasks}",
         "collector_max_turns_per_attempt="
         f"{config.collector_max_turns_per_attempt or 'default'}",
@@ -1899,12 +1996,12 @@ def _print_dry_run_plan(
     for step_index in range(preview_steps):
         step_dir = config.output_dir / f"rft_step_{step_index:05d}"
         train_parquet_path = step_dir / "accepted_trajectories.parquet"
-        eval_parquet_path = step_dir / "accepted_trajectories_eval.parquet"
+        collector_eval_dir = step_dir / "collector_artifacts" / "eval"
         checkpoint_root = step_dir / "trainer_checkpoints"
         print(
             "# [dry-run] step="
             f"{step_index} collect selected trajectories -> train:{train_parquet_path} "
-            f"eval:{eval_parquet_path}"
+            f"outer_eval:{collector_eval_dir}"
         )
         trainer_command = build_trainer_step_command(
             python_bin=config.python_bin,
@@ -1915,7 +2012,6 @@ def _print_dry_run_plan(
             config_dir=config.config_dir,
             model_path=config.initial_model,
             train_parquet_path=train_parquet_path,
-            val_parquet_path=eval_parquet_path,
             trainer_output_dir=checkpoint_root,
             train_batch_size=config.train_batch_size,
             train_min_rows=config.train_min_rows or config.train_batch_size,
@@ -2426,6 +2522,7 @@ def _init_rft_runtime_loop_wandb_run(*, config: RFTLoopConfig) -> Any | None:
                 "train_batch_size": config.train_batch_size,
                 "eval_split_fraction": config.eval_split_fraction,
                 "eval_min_rows": config.eval_min_rows,
+                "eval_task_count": config.eval_task_count,
                 "output_dir": str(config.output_dir),
                 "initial_model": config.initial_model,
             },
@@ -2934,7 +3031,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
     parser.add_argument("--config-name", default="rft_swe")
     parser.add_argument(
         "--trainer-module",
-        default="verl_integration.fsdp_sft_trainer_entry",
+        default=_RFT_SFT_TRAINER_ENTRYPOINT,
         help=(
             "trainer module (project wrapper around verl entrypoint; "
             f"upstream source: {_VERL_SFT_TRAINER_DOC})"
@@ -2994,6 +3091,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
             "at least two valid tasks are available."
         ),
     )
+    parser.add_argument(
+        "--eval-task-count",
+        type=int,
+        default=_DEFAULT_RFT_EVAL_TASK_COUNT,
+        help=(
+            "fixed number of valid tasks to reserve for held-out RFT eval; "
+            "when positive, this overrides fraction-based eval sizing."
+        ),
+    )
     parser.add_argument("--stage-name", default=_FORMAT_RFT_STAGE_NAME)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--data-config-name", default="on_policy_swe_smith")
@@ -3043,6 +3149,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         raise ValueError("--eval-split-fraction must satisfy 0.0 <= value < 1.0.")
     if args.eval_min_rows < 0:
         raise ValueError("--eval-min-rows must be >= 0.")
+    if args.eval_task_count < 0:
+        raise ValueError("--eval-task-count must be >= 0.")
     if args.nnodes < 1:
         raise ValueError("--nnodes must be >= 1.")
     if args.nproc_per_node < 1:
@@ -3091,6 +3199,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> RFTLoopConfig:
         train_min_rows=(
             int(args.train_min_rows) if args.train_min_rows is not None else None
         ),
+        eval_task_count=int(args.eval_task_count),
         stage_name=resolved_stage_name,
     )
 

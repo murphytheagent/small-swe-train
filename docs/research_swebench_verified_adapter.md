@@ -48,7 +48,7 @@ Status: research draft (implementation-ready plan; no code changes in this PR)
 - `src/eval/adapters/swebench_verified/cli.py`
   - Batch orchestration entrypoint.
 - `scripts/eval_swebench_verified.py`
-  - Thin script wrapper (aligned with existing `scripts/eval_swebench_lite.py` pattern).
+  - Thin script wrapper for the future benchmark adapter.
 
 ### Data contract boundaries
 - `TaskSpec` (adapter input): `instance_id`, `repo`, `base_commit`, `problem_statement`, `test_patch`, optional metadata.

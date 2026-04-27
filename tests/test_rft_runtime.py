@@ -88,6 +88,7 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
         task_partition="eval",
         task_eval_split_fraction=0.25,
         task_eval_min_rows=2,
+        task_eval_task_count=50,
         verify_submissions=True,
         stage_name="positive_rft",
     )
@@ -100,6 +101,7 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
     assert captured_collector_kwargs["task_partition"] == "eval"
     assert captured_collector_kwargs["task_eval_split_fraction"] == 0.25
     assert captured_collector_kwargs["task_eval_min_rows"] == 2
+    assert captured_collector_kwargs["task_eval_task_count"] == 50
     assert captured_collector_kwargs["runtime_overrides"] == {"task_batch_size": 2, "verify_submissions": True}
     assert captured_collector_kwargs["stage_name"] == "positive_rft"
     turn_generator = captured_turn_generator["fn"]
@@ -123,6 +125,7 @@ def test_collect_onpolicy_rft_runtime_batch_writes_runtime_manifest(
     assert manifest_payload["task_partition"] == "eval"
     assert manifest_payload["task_eval_split_fraction"] == 0.25
     assert manifest_payload["task_eval_min_rows"] == 2
+    assert manifest_payload["task_eval_task_count"] == 50
     assert manifest_payload["verify_submissions"] is True
     assert manifest_payload["stage_name"] == "positive_rft"
     assert manifest_payload["rollout_count"] == 2

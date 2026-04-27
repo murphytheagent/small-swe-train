@@ -84,7 +84,7 @@ Current reward logic already exposes the verifier signals needed for a later pos
 
 Current RFT artifacts are useful but not sufficient for resume:
 
-- `src/trainer/rft_runtime_loop.py` writes per-step summaries, train/eval parquet shards, and checkpoints
+- `src/trainer/rft_runtime_loop.py` writes per-step summaries, train parquet shards, outer-step eval collector artifacts, and checkpoints
 - `scripts/run_sdpo.sh` can already warm-start from RFT manifests
 
 But current behavior is not replay-safe:
