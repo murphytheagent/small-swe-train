@@ -868,17 +868,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
     runtime_manifest["fixed_eval_task_count"] = len(fixed_eval_task_ids)
     runtime_manifest["fixed_eval_task_ids"] = list(fixed_eval_task_ids)
 
-    tokenizer = _load_tokenizer(config.initial_model)
-    token_cache_fingerprint = build_rft_token_cache_fingerprint(
-        tokenizer=tokenizer,
-        max_model_len=trainer_data_max_length,
-        data_max_length=trainer_data_max_length,
-        chat_template_kwargs=chat_template_kwargs,
-        project_root=config.project_root,
-    )
     runtime_manifest["rft_token_cache"] = {
         "schema_version": RFT_TOKEN_CACHE_SCHEMA_VERSION,
-        "fingerprint": token_cache_fingerprint,
         "chat_template_kwargs": dict(chat_template_kwargs),
     }
     vllm_controller = VLLMServerController(config=config, log_path=vllm_logs)
@@ -910,6 +901,21 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
             reset_step_artifacts(step_dir)
             step_dir.mkdir(parents=True, exist_ok=True)
             _append_unique_path(run_step_dirs, step_dir)
+            active_model_path = current_model_path
+            tokenizer = _load_tokenizer(active_model_path)
+            token_cache_fingerprint = build_rft_token_cache_fingerprint(
+                tokenizer=tokenizer,
+                max_model_len=trainer_data_max_length,
+                data_max_length=trainer_data_max_length,
+                chat_template_kwargs=chat_template_kwargs,
+                project_root=config.project_root,
+            )
+            runtime_manifest["rft_token_cache"] = {
+                "schema_version": RFT_TOKEN_CACHE_SCHEMA_VERSION,
+                "model_path": active_model_path,
+                "fingerprint": token_cache_fingerprint,
+                "chat_template_kwargs": dict(chat_template_kwargs),
+            }
 
             runtime_overrides: dict[str, int] = {
                 "task_batch_size": config.task_batch_size,
@@ -1310,6 +1316,8 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                 "inner_val_loss_delta": trainer_metrics.get("val_loss_delta"),
                 "step_duration_sec": step_duration_sec,
                 "train_parquet": str(train_parquet_path),
+                "token_cache_model_path": active_model_path,
+                "token_cache_fingerprint": token_cache_fingerprint,
                 "eval_parquet": None,
                 "outer_eval_artifact_dir": str(collector_eval_dir) if heldout_eval_enabled else None,
                 "trainer_checkpoint_root": str(trainer_checkpoint_root),

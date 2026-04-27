@@ -783,9 +783,16 @@ def test_run_loop_resumes_from_latest_committed_checkpoint(
         encoding="utf-8",
     )
 
-    captured: dict[str, object] = {"model_paths": [], "step_indexes": []}
+    captured: dict[str, object] = {
+        "model_paths": [],
+        "step_indexes": [],
+        "tokenizer_paths": [],
+    }
 
-    def _fake_load_tokenizer(_model_path: str):
+    def _fake_load_tokenizer(model_path: str):
+        tokenizer_paths = captured["tokenizer_paths"]
+        assert isinstance(tokenizer_paths, list)
+        tokenizer_paths.append(str(model_path))
         return _StubTokenizer()
 
     def _fake_collect(*, request, tokenizer):
@@ -917,6 +924,9 @@ def test_run_loop_resumes_from_latest_committed_checkpoint(
     model_paths = captured["model_paths"]
     assert isinstance(model_paths, list)
     assert model_paths == [str(previous_vllm)]
+    tokenizer_paths = captured["tokenizer_paths"]
+    assert isinstance(tokenizer_paths, list)
+    assert tokenizer_paths == [str(previous_vllm)]
     step_indexes = captured["step_indexes"]
     assert isinstance(step_indexes, list)
     assert step_indexes == [1]
@@ -932,6 +942,7 @@ def test_run_loop_resumes_from_latest_committed_checkpoint(
         )
     )
     assert [step["step_index"] for step in manifest["steps"]] == [0, 1]
+    assert manifest["steps"][1]["token_cache_model_path"] == str(previous_vllm)
 
 
 def test_run_loop_resume_rejects_changed_fixed_eval_task_pool(
@@ -1320,6 +1331,11 @@ def test_run_loop_uses_vllm_compatible_checkpoint_for_followup_steps(
         "controllers": [],
         "collect_calls": 0,
         "trainer_model_paths": [],
+        "tokenizer_model_paths": [],
+        "collect_tokenizer_paths": [],
+        "cache_write_model_paths": [],
+        "cache_write_fingerprints": [],
+        "trainer_cache_fingerprints": [],
     }
 
     class _FakeVLLMController:
@@ -1358,18 +1374,33 @@ def test_run_loop_uses_vllm_compatible_checkpoint_for_followup_steps(
             ],
         }
 
-    def _fake_load_tokenizer(_model_path: str):
-        return _StubTokenizer()
+    class _NamedStubTokenizer(_StubTokenizer):
+        def __init__(self, model_path: str) -> None:
+            self.name_or_path = model_path
+
+    def _fake_load_tokenizer(model_path: str):
+        tokenizer_model_paths = call_state["tokenizer_model_paths"]
+        assert isinstance(tokenizer_model_paths, list)
+        tokenizer_model_paths.append(str(model_path))
+        return _NamedStubTokenizer(str(model_path))
 
     def _fake_collect(*, request, tokenizer):
-        del tokenizer
+        collect_tokenizer_paths = call_state["collect_tokenizer_paths"]
+        assert isinstance(collect_tokenizer_paths, list)
+        collect_tokenizer_paths.append(str(tokenizer.name_or_path))
         step = call_state["collect_calls"]
         assert isinstance(step, int)
         call_state["collect_calls"] = step + 1
         assert request.start_step_index == step
         return {"selected_rows": [_selected_row(step)], "rejected_rows": []}
 
-    def _fake_write_selected_rows(_rows, parquet_path: Path, **_kwargs):
+    def _fake_write_selected_rows(_rows, parquet_path: Path, **kwargs):
+        cache_write_model_paths = call_state["cache_write_model_paths"]
+        assert isinstance(cache_write_model_paths, list)
+        cache_write_model_paths.append(str(kwargs["tokenizer"].name_or_path))
+        cache_write_fingerprints = call_state["cache_write_fingerprints"]
+        assert isinstance(cache_write_fingerprints, list)
+        cache_write_fingerprints.append(str(kwargs["cache_fingerprint"]))
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_path.write_text("stub", encoding="utf-8")
         return 1
@@ -1378,6 +1409,9 @@ def test_run_loop_uses_vllm_compatible_checkpoint_for_followup_steps(
         trainer_model_paths = call_state["trainer_model_paths"]
         assert isinstance(trainer_model_paths, list)
         trainer_model_paths.append(str(kwargs["model_path"]))
+        trainer_cache_fingerprints = call_state["trainer_cache_fingerprints"]
+        assert isinstance(trainer_cache_fingerprints, list)
+        trainer_cache_fingerprints.append(str(kwargs["token_cache_fingerprint"]))
         trainer_output_dir = Path(kwargs["trainer_output_dir"])
         return ["fake-trainer", str(trainer_output_dir)]
 
@@ -1475,6 +1509,21 @@ def test_run_loop_uses_vllm_compatible_checkpoint_for_followup_steps(
     assert len(trainer_model_paths) == 2
     assert trainer_model_paths[0] == "Qwen/Qwen3-0.6B"
     assert trainer_model_paths[1].endswith("huggingface_vllm_merged")
+    tokenizer_model_paths = call_state["tokenizer_model_paths"]
+    assert isinstance(tokenizer_model_paths, list)
+    assert tokenizer_model_paths == trainer_model_paths
+    collect_tokenizer_paths = call_state["collect_tokenizer_paths"]
+    assert isinstance(collect_tokenizer_paths, list)
+    assert collect_tokenizer_paths == trainer_model_paths
+    cache_write_model_paths = call_state["cache_write_model_paths"]
+    assert isinstance(cache_write_model_paths, list)
+    assert cache_write_model_paths == trainer_model_paths
+    cache_write_fingerprints = call_state["cache_write_fingerprints"]
+    trainer_cache_fingerprints = call_state["trainer_cache_fingerprints"]
+    assert isinstance(cache_write_fingerprints, list)
+    assert isinstance(trainer_cache_fingerprints, list)
+    assert trainer_cache_fingerprints == cache_write_fingerprints
+    assert len(set(cache_write_fingerprints)) == 2
 
     controllers = call_state["controllers"]
     assert isinstance(controllers, list)
@@ -1482,6 +1531,20 @@ def test_run_loop_uses_vllm_compatible_checkpoint_for_followup_steps(
     controller = controllers[0]
     assert controller.start_calls[0] == "Qwen/Qwen3-0.6B"
     assert controller.start_calls[1].endswith("huggingface_vllm_merged")
+    summary_0 = json.loads(
+        (config.output_dir / "rft_step_00000" / "rft_step_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    summary_1 = json.loads(
+        (config.output_dir / "rft_step_00001" / "rft_step_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary_0["token_cache_model_path"] == trainer_model_paths[0]
+    assert summary_1["token_cache_model_path"] == trainer_model_paths[1]
+    assert summary_0["token_cache_fingerprint"] == cache_write_fingerprints[0]
+    assert summary_1["token_cache_fingerprint"] == cache_write_fingerprints[1]
 
 
 def test_run_loop_upsamples_selected_rows_to_effective_batch_multiple(

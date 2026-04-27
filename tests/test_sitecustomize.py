@@ -991,6 +991,13 @@ def test_sitecustomize_defaults_apply_chat_template_to_no_thinking(monkeypatch) 
     tokenizer.apply_chat_template(
         [{"role": "user", "content": "hi"}],
         enable_thinking=True,
+    )
+    assert tokenizer.calls[-1]["enable_thinking"] is True
+    assert tokenizer.calls[-1]["chat_template_kwargs"] == {}
+
+    tokenizer.apply_chat_template(
+        [{"role": "user", "content": "hi"}],
+        enable_thinking=True,
         chat_template_kwargs={"enable_thinking": True},
     )
     assert tokenizer.calls[-1]["enable_thinking"] is True

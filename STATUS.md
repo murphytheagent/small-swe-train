@@ -12,6 +12,7 @@ Last updated: 2026-04-27.
 - The disabled-validation SFT entrypoint now tears down the verl global process group with `finally` after initialization, including dataset-construction and `trainer.fit()` failures.
 - Qwen3-8B system optimization is implemented behind the live defaults: `Qwen/Qwen3-8B`, thinking-off tokenizer/vLLM defaults, RFT pre-tokenized full-transcript cache consumption, length bucketing without packing, conservative RFT/SDPO memory defaults, and `profiler/*` telemetry.
 - Cached RFT inner SFT length bucketing now uses the DP-normalized per-rank train batch size for the sampler and `StatefulDataLoader`, so `drop_last=True` no longer treats the global target as a per-rank batch.
+- PR #35 review feedback is addressed locally: RFT token caches now use the active checkpoint tokenizer/fingerprint for each outer step, and explicit `enable_thinking` caller kwargs no longer receive a contradictory no-thinking chat-template map.
 - JS/TS work should stay focused on repo-aware Node verifier adapters, not a generic `node_test` command toggle.
 - Root documentation policy is now: keep only `AGENTS.md`, `README.md`, and `STATUS.md` at repo root; keep research, design, migration, and evaluation plans under `docs/`.
 - JSON remains the default assistant payload format; XML action format is implemented as an opt-in path with reusable schema derivation, dual parsing, prompt/render support, and JSON fallback for non-XML-representable structured tool calls.

@@ -847,9 +847,9 @@ def _install_qwen_no_thinking_chat_template_default(tokenizer: Any) -> None:
         caller_provided_enable_thinking = (
             "enable_thinking" in kwargs or "enable_thinking" in template_kwargs
         )
-        template_kwargs.setdefault("enable_thinking", False)
         if not caller_provided_enable_thinking:
             kwargs["enable_thinking"] = False
+            template_kwargs["enable_thinking"] = False
         kwargs["chat_template_kwargs"] = template_kwargs
         return original_apply_chat_template(*args, **kwargs)
 
