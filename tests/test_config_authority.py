@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Mapping
 
@@ -45,6 +48,72 @@ def test_output_contract_exports_match_runtime_defaults() -> None:
     assert config.TERMINAL_VALIDITY_PENALTY == float(output_contract.get("terminal_validity_penalty", 0.2))
     assert config.ACTION_PAYLOAD_FORMAT == str(output_contract.get("action_payload_format", "json")).strip().lower()
     assert config.ACTION_PARSE_MODE == str(output_contract.get("action_parse_mode", "json_only")).strip().lower()
+
+
+def test_training_policy_config_selector_loads_checked_in_preflight_policy() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{repo_root / 'src'}:{env.get('PYTHONPATH', '')}"
+    env["SMALL_SWE_TRAINING_POLICY_CONFIG"] = "training_policy_preflight_positive_xml.v1.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, config; "
+                "payload=config.training_policy_defaults(); "
+                "print(json.dumps({"
+                "'path': str(config.training_policy_config_path()), "
+                "'format': payload['output_contract']['action_payload_format'], "
+                "'steps': payload['rft_runtime']['loop']['steps'], "
+                "'train_batch_size': payload['rft_runtime']['loop']['train_batch_size'], "
+                "'train_min_rows': payload['rft_runtime']['loop']['train_min_rows']"
+                "}, sort_keys=True))"
+            ),
+        ],
+        cwd=repo_root,
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["path"].endswith("configs/runtime/training_policy_preflight_positive_xml.v1.json")
+    assert payload["format"] == "xml"
+    assert payload["steps"] == 5
+    assert payload["train_batch_size"] == 4
+    assert payload["train_min_rows"] == 4
+
+
+@pytest.mark.parametrize(
+    ("filename", "payload_format", "train_batch_size", "train_min_rows"),
+    [
+        ("training_policy_preflight_format_json.v1.json", "json", 32, 32),
+        ("training_policy_preflight_format_xml.v1.json", "xml", 32, 32),
+        ("training_policy_preflight_positive_json.v1.json", "json", 4, 4),
+        ("training_policy_preflight_positive_xml.v1.json", "xml", 4, 4),
+    ],
+)
+def test_preflight_policy_configs_encode_paired_payload_matrix(
+    filename: str,
+    payload_format: str,
+    train_batch_size: int,
+    train_min_rows: int,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    payload = json.loads((repo_root / "configs" / "runtime" / filename).read_text(encoding="utf-8"))
+    loop = payload["rft_runtime"]["loop"]
+
+    assert payload["output_contract"]["action_payload_format"] == payload_format
+    assert payload["output_contract"]["action_parse_mode"] == "dual"
+    assert loop["steps"] == 5
+    assert loop["samples_per_task"] == 4
+    assert loop["task_batch_size"] == 512
+    assert loop["sft_num_epoch_per_batch"] == 1
+    assert loop["train_batch_size"] == train_batch_size
+    assert loop["train_min_rows"] == train_min_rows
+    assert loop["eval_task_count"] == 50
 
 
 def test_xml_tool_schema_is_derived_from_tool_schemas() -> None:

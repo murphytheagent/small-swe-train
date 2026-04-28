@@ -1673,7 +1673,7 @@ def test_run_loop_upsamples_selected_rows_to_effective_batch_multiple(
 
     rft_runtime_loop.run_rft_runtime_loop(config)
 
-    assert write_counts == [3, 4]
+    assert write_counts == [4]
     summary_path = config.output_dir / "rft_step_00000" / "rft_step_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["selected_count_raw"] == 3
@@ -2225,7 +2225,7 @@ def test_run_loop_rejects_empty_eval_selection_without_train_fallback(
         rft_runtime_loop.run_rft_runtime_loop(config)
 
     assert request_partitions == ["train", "eval"]
-    assert write_calls == [("accepted_trajectories.parquet", 2)]
+    assert write_calls == []
 
 
 def test_run_loop_positive_stage_requests_resolved_only_selection(

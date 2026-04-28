@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/` holds the Python package. Key areas include `src/schemas/` (JSON schema contracts), `src/rollout/` (ChatML parsing and rollout collection), `src/data/` (canonicalization and adapters), `src/teacher/` (prompt builders), and `src/trainer/` (RFT/SDPO scaffolds and runtime loop). 
+- `src/` holds the Python package. Key areas include `src/schemas/` (Python-native typed schema contracts and validators), `src/rollout/` (ChatML parsing and rollout collection), `src/data/` (canonicalization and adapters), `src/teacher/` (prompt builders), and `src/trainer/` (RFT/SDPO scaffolds and runtime loop).
 - `tests/` contains pytest suites; most tests follow `tests/test_*.py` naming.
 - `configs/` stores runtime defaults and training configs; see `configs/README.md` and `configs/runtime/training_policy_defaults.v1.json`.
 - `scripts/` provides launch helpers for RFT/SDPO and utilities (e.g., `scripts/run_rft.sh`, `scripts/run_sdpo.sh`).

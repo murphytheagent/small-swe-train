@@ -20,6 +20,13 @@ tracks the canonical staged pipeline as:
 - optional `positive_rft`
 - `turn_sdpo`
 
+Set `SMALL_SWE_TRAINING_POLICY_CONFIG` to select a different checked-in policy
+JSON under `configs/`, for example the JSON/XML preflight variants in
+`configs/runtime/training_policy_preflight_*.v1.json`. This selector is for
+experiment policy files; launch-only values such as output directories,
+ports, stage name, and checkpoint handoff remain script arguments or
+environment values.
+
 ## Hydra Composition (Current)
 
 - `sdpo_swe.yaml` defaults: `model_defaults`, `ppo_trainer`, `_self_`

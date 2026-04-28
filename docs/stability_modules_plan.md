@@ -1,9 +1,14 @@
 # Stability Modules Implementation Plan
 
 Generated: 2026-03-11 03:34 UTC
-Updated: 2026-03-16 23:08 UTC
+Updated: 2026-04-28 00:00 UTC
 Thread: 1773182046.432339
-Status: planning, no implementation yet
+Status: historical implementation plan; the active contract is now implemented as `format_rft -> positive_rft -> turn_sdpo`
+
+This document records the plan that led to the current staged pipeline. It is
+not the live implementation tracker. Current status and open blockers live in
+`../STATUS.md`, while current launch/config behavior lives in
+`../configs/runtime/training_policy_defaults.v1.json` and the launcher scripts.
 
 ## 1. Goal
 
@@ -41,19 +46,24 @@ Third:
 - require verifier-backed correctness for selection
 - do not use heuristic resolution as the positive selector
 
-## 3. Code-Grounded Current State
+## 3. Original Code-Grounded State
 
-### 3.1 Pipeline drift
+### 3.1 Pipeline drift at plan time
 
-Current `main` still reflects the old pipeline in multiple places:
+At the time this plan was written, `main` still reflected the old pipeline in
+multiple places:
 
-- `configs/runtime/training_policy_defaults.v1.json` still advertises `rft -> sdft_optional -> sdpo_main`
-- `scripts/run_sdft.sh` still exists as a first-class launcher
-- `../README.md`, `design.md`, and launcher docs still contain `sdft`, `sdpo_main`, and `step_sdpo` naming
+- `configs/runtime/training_policy_defaults.v1.json` still advertised `rft -> sdft_optional -> sdpo_main`
+- `scripts/run_sdft.sh` still existed as a first-class launcher
+- `../README.md`, `design.md`, and launcher docs still contained `sdft`, `sdpo_main`, and `step_sdpo` naming
 
-### 3.2 Masking drift
+Current `main` no longer has this active shape: the checked-in runtime policy
+uses `format_rft -> positive_rft -> turn_sdpo`, and the SDFT launcher has been
+removed.
 
-Mask semantics are currently split across multiple authorities:
+### 3.2 Masking drift at plan time
+
+Mask semantics were split across multiple authorities:
 
 - `src/losses/action_masking.py`
   - `rft` trains only `tool_call`
@@ -67,27 +77,27 @@ The cleanup phase should reduce this to one authority: assistant-turn supervisio
 
 ### 3.3 RFT selection and verifier state
 
-Current RFT stays format-first:
+At plan time, RFT stayed format-first:
 
 - `src/trainer/rft_rejection.py` selects on terminal submit plus format-validity checks and optional error filters
 - `require_resolved` is `false` by default
 - `src/trainer/rft_runtime.py` forces `verify_submissions=false` for the shared RFT runtime helper
 
-Current reward logic already exposes the verifier signals needed for a later positive-RFT stage:
+Reward logic already exposed the verifier signals needed for a later positive-RFT stage:
 
 - `src/verl_integration/reward_function.py` emits `fail_to_pass_verified`
 - `src/verl_integration/reward_function.py` emits `pass_to_pass_verified`
 - `src/verl_integration/reward_function.py` emits `reward_verification_missing`
 - `src/verl_integration/reward_function.py` distinguishes `missing_verifier` from `missing_verifier_targets` through `resolved_source`
 
-### 3.4 Resume is not safe yet
+### 3.4 Resume safety at plan time
 
-Current RFT artifacts are useful but not sufficient for resume:
+RFT artifacts were useful but not sufficient for resume:
 
 - `src/trainer/rft_runtime_loop.py` writes per-step summaries, train parquet shards, outer-step eval collector artifacts, and checkpoints
 - `scripts/run_sdpo.sh` can already warm-start from RFT manifests
 
-But current behavior is not replay-safe:
+But behavior was not replay-safe:
 
 - `src/trainer/rft_runtime_loop.py` unconditionally calls `reset_step_artifacts(step_dir)` before each outer step
 - old checkpoints and payloads are pruned by `checkpoint_keep_last` recency, not by committed state

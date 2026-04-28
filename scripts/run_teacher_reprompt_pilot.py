@@ -122,6 +122,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Timeout (sec) for submission verification.",
     )
     parser.add_argument(
+        "--partial-flush-every-rows",
+        type=_positive_int,
+        default=_env_positive_int("PILOT_PARTIAL_FLUSH_EVERY_ROWS", 1),
+        help=(
+            "Flush and fsync partial JSONL outputs every N appended rows. "
+            "Default 1 preserves per-row durability."
+        ),
+    )
+    parser.add_argument(
+        "--partial-summary-every-rows",
+        type=_positive_int,
+        default=_env_positive_int("PILOT_PARTIAL_SUMMARY_EVERY_ROWS", 1),
+        help=(
+            "Rewrite pilot_summary.json every N rollout rows. "
+            "Default 1 preserves the previous live-summary cadence."
+        ),
+    )
+    parser.add_argument(
         "--rft-checkpoint",
         default="",
         help="Optional model/checkpoint override for vLLM requests.",
@@ -149,6 +167,20 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(str(value).strip())
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be >= 1")
+    return parsed
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return int(default)
+    return _positive_int(raw)
 
 
 def _is_tool_response_block(value: str) -> bool:
@@ -604,6 +636,45 @@ def _empty_pair_reward_summary() -> dict[str, Any]:
 
 
 @dataclass
+class _PairRewardAccumulator:
+    pair_count: int = 0
+    student_reward_total: float = 0.0
+    teacher_reward_total: float = 0.0
+    reward_delta_total: float = 0.0
+    improved_count: int = 0
+    worsened_count: int = 0
+    tied_count: int = 0
+
+    def add(self, record: Mapping[str, Any]) -> None:
+        student_reward = float(record["student_reward"])
+        teacher_reward = float(record["teacher_reward"])
+        reward_delta = float(record["reward_delta"])
+        self.pair_count += 1
+        self.student_reward_total += student_reward
+        self.teacher_reward_total += teacher_reward
+        self.reward_delta_total += reward_delta
+        if reward_delta > 0:
+            self.improved_count += 1
+        elif reward_delta < 0:
+            self.worsened_count += 1
+        else:
+            self.tied_count += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        if self.pair_count <= 0:
+            return _empty_pair_reward_summary()
+        return {
+            "pair_count": self.pair_count,
+            "student_mean_reward": float(self.student_reward_total / self.pair_count),
+            "teacher_mean_reward": float(self.teacher_reward_total / self.pair_count),
+            "mean_reward_delta": float(self.reward_delta_total / self.pair_count),
+            "improved_count": self.improved_count,
+            "worsened_count": self.worsened_count,
+            "tied_count": self.tied_count,
+        }
+
+
+@dataclass
 class _FormatMetricAccumulator:
     row_count: int = 0
     metric_totals: dict[str, float] = field(default_factory=dict)
@@ -632,10 +703,18 @@ class PilotPartialWriter:
         output_dir: Path,
         summary_seed: Mapping[str, Any],
         max_tool_calls: int,
+        partial_flush_every_rows: int = 1,
+        partial_summary_every_rows: int = 1,
     ) -> None:
         self._output_dir = output_dir
         self._summary_seed = dict(summary_seed)
         self._max_tool_calls = int(max_tool_calls)
+        self._partial_flush_every_rows = int(partial_flush_every_rows)
+        self._partial_summary_every_rows = int(partial_summary_every_rows)
+        if self._partial_flush_every_rows < 1:
+            raise ValueError("partial_flush_every_rows must be >= 1.")
+        if self._partial_summary_every_rows < 1:
+            raise ValueError("partial_summary_every_rows must be >= 1.")
         self._lock = threading.Lock()
         self._phase = "initializing"
         self._status = "running"
@@ -643,6 +722,7 @@ class PilotPartialWriter:
 
         self._baseline_metrics = _FormatMetricAccumulator()
         self._teacher_metrics = _FormatMetricAccumulator()
+        self._pair_reward_accumulator = _PairRewardAccumulator()
         self._baseline_row_count = 0
         self._teacher_row_count = 0
         self._baseline_reward_map: dict[tuple[str, int], float] = {}
@@ -655,6 +735,8 @@ class PilotPartialWriter:
         self._teacher_rows_path = self._output_dir / "teacher_rollout_rows.jsonl"
         self._pair_rewards_path = self._output_dir / "pair_rewards.jsonl"
         self._summary_path = self._output_dir / "pilot_summary.json"
+        self._pending_jsonl_rows = 0
+        self._rows_since_summary = 0
 
         self._initialize_output_files()
 
@@ -670,8 +752,10 @@ class PilotPartialWriter:
             self._write_summary_locked()
 
     def close(self) -> None:
-        for handle in (self._baseline_handle, self._teacher_handle, self._pair_handle):
-            handle.close()
+        with self._lock:
+            self._flush_jsonl_handles_locked()
+            for handle in (self._baseline_handle, self._teacher_handle, self._pair_handle):
+                handle.close()
 
     def set_phase(self, phase: str) -> None:
         with self._lock:
@@ -717,7 +801,9 @@ class PilotPartialWriter:
             else:
                 raise ValueError(f"Unsupported pilot partial-write phase: {phase!r}")
 
-            self._write_summary_locked()
+            self._rows_since_summary += 1
+            if self._rows_since_summary >= self._partial_summary_every_rows:
+                self._write_summary_locked()
 
     def finalize_completed(self) -> dict[str, Any]:
         with self._lock:
@@ -735,8 +821,17 @@ class PilotPartialWriter:
     def _append_jsonl_row_locked(self, handle: Any, row: Mapping[str, Any]) -> None:
         handle.write(json.dumps(dict(row), ensure_ascii=True, sort_keys=True))
         handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+        self._pending_jsonl_rows += 1
+        if self._pending_jsonl_rows >= self._partial_flush_every_rows:
+            self._flush_jsonl_handles_locked()
+
+    def _flush_jsonl_handles_locked(self) -> None:
+        if self._pending_jsonl_rows <= 0:
+            return
+        for handle in (self._baseline_handle, self._teacher_handle, self._pair_handle):
+            handle.flush()
+            os.fsync(handle.fileno())
+        self._pending_jsonl_rows = 0
 
     def _append_pair_locked(
         self,
@@ -760,6 +855,7 @@ class PilotPartialWriter:
         }
         self._paired_keys.add(key)
         self._pair_records.append(record)
+        self._pair_reward_accumulator.add(record)
         self._append_jsonl_row_locked(self._pair_handle, record)
 
     def _append_missing_pairs_locked(self) -> None:
@@ -776,6 +872,7 @@ class PilotPartialWriter:
             )
 
     def _write_summary_locked(self) -> dict[str, Any]:
+        self._flush_jsonl_handles_locked()
         summary = dict(self._summary_seed)
         summary.update(
             {
@@ -788,16 +885,13 @@ class PilotPartialWriter:
                 "missing_teacher_rows": max(len(self._baseline_key_order) - len(self._paired_keys), 0),
                 "baseline_format_metrics": self._baseline_metrics.snapshot(),
                 "teacher_format_metrics": self._teacher_metrics.snapshot(),
-                "reward_summary": (
-                    summarize_pair_rewards(self._pair_records)
-                    if self._pair_records
-                    else _empty_pair_reward_summary()
-                ),
+                "reward_summary": self._pair_reward_accumulator.snapshot(),
             }
         )
         if self._error:
             summary["error"] = self._error
         _write_json(self._summary_path, summary)
+        self._rows_since_summary = 0
         return summary
 
 
@@ -962,10 +1056,14 @@ def main() -> None:
             "vllm_model_name": str(vllm_config.model_name),
             "student_temperature": float(student_vllm_config.temperature),
             "teacher_temperature": float(teacher_vllm_config.temperature),
+            "partial_flush_every_rows": int(args.partial_flush_every_rows),
+            "partial_summary_every_rows": int(args.partial_summary_every_rows),
             "rft_checkpoint_override": resolved_rft_checkpoint,
             "rft_manifest_path": str(resolved_rft_manifest) if resolved_rft_manifest is not None else None,
         },
         max_tool_calls=settings.runtime.max_tool_calls_per_turn,
+        partial_flush_every_rows=int(args.partial_flush_every_rows),
+        partial_summary_every_rows=int(args.partial_summary_every_rows),
     )
 
     try:

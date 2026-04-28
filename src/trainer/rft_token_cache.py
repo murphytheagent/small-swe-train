@@ -65,7 +65,8 @@ def write_selected_rows_to_token_cache_parquet(
     max_sequence_length: int | None = None,
     cache_fingerprint: str,
     chat_template_kwargs: Mapping[str, Any] | None = None,
-) -> int:
+    return_records: bool = False,
+) -> int | tuple[int, list[dict[str, Any]]]:
     """Write selected rows as one pre-tokenized SFT sample per parquet row."""
     if tokenizer is None:
         raise ValueError("tokenizer is required to build full multiturn RFT token cache rows.")
@@ -79,6 +80,8 @@ def write_selected_rows_to_token_cache_parquet(
         chat_template_kwargs=chat_template_kwargs,
     )
     _write_records_to_parquet(records, output_path)
+    if return_records:
+        return len(records), records
     return len(records)
 
 

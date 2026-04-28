@@ -153,6 +153,8 @@ fi
 SLURM_GPU_COUNT_RAW="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS_PER_NODE:-}}"
 if [[ "${SLURM_GPU_COUNT_RAW}" =~ ^[0-9]+$ ]]; then
   DEFAULT_TP_SIZE="${SLURM_GPU_COUNT_RAW}"
+elif [[ "${SLURM_GPU_COUNT_RAW}" =~ :([0-9]+)$ ]]; then
+  DEFAULT_TP_SIZE="${BASH_REMATCH[1]}"
 elif [[ "${SLURM_GPU_COUNT_RAW}" =~ ([0-9]+) ]]; then
   DEFAULT_TP_SIZE="${BASH_REMATCH[1]}"
 else
@@ -170,14 +172,29 @@ export SMALL_SWE_VLLM_MODEL="${SMALL_SWE_VLLM_MODEL:-${SERVED_MODEL}}"
 export SMALL_SWE_VLLM_REQUEST_TIMEOUT_SEC="${SMALL_SWE_VLLM_REQUEST_TIMEOUT_SEC:-300}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 
+read -r PILOT_VLLM_HOST PILOT_VLLM_PORT <<<"$("${PYTHON_RESOLVER_BIN}" - "${SMALL_SWE_VLLM_BASE_URL}" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+parsed = urlsplit(sys.argv[1])
+if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.port is None:
+    raise SystemExit(
+        "SMALL_SWE_VLLM_BASE_URL must include scheme, host, and explicit port."
+    )
+if parsed.hostname not in {"127.0.0.1", "localhost"}:
+    raise SystemExit("Teacher pilot vLLM must bind a local loopback host.")
+print(parsed.hostname, parsed.port)
+PY
+)"
+
 VLLM_LOG_DIR="${PROJECT_ROOT}/outputs/slurm"
 mkdir -p "${VLLM_LOG_DIR}"
 VLLM_LOG="${VLLM_LOG_DIR}/teacher-pilot-vllm-${SLURM_JOB_ID:-manual}.log"
 
 VLLM_CMD=(
   "${PYTHON_BIN}" -m trainer.vllm_api_server_entry
-  --host 127.0.0.1
-  --port 8000
+  --host "${PILOT_VLLM_HOST}"
+  --port "${PILOT_VLLM_PORT}"
   --model "${MODEL_PATH}"
   --served-model-name "${SERVED_MODEL}"
   --tensor-parallel-size "${TP_SIZE}"
@@ -194,7 +211,7 @@ if [[ -n "${PILOT_VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS:-}" ]]; then
   VLLM_CMD+=(--default-chat-template-kwargs "${PILOT_VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS}")
 fi
 
-OUTPUT_DIR="${PROJECT_ROOT}/outputs/teacher_reprompt_pilot/job${SLURM_JOB_ID:-manual}"
+OUTPUT_DIR="${PILOT_OUTPUT_DIR:-${PROJECT_ROOT}/outputs/teacher_reprompt_pilot/job${SLURM_JOB_ID:-manual}}"
 mkdir -p "${OUTPUT_DIR}"
 
 TURN_INDEX_MODE_RAW="${PILOT_TEACHER_TURN_INDEX_MODE:-dynamic_middle}"
@@ -244,6 +261,8 @@ PILOT_CMD=(
   --verifier-feedback-mode "${PILOT_VERIFIER_FEEDBACK_MODE:-all_turns}"
   --max-reprompt-len "${PILOT_MAX_REPROMPT_LEN:-16384}"
   --num-recent-raw-blocks "${PILOT_NUM_RECENT_RAW_BLOCKS:-3}"
+  --partial-flush-every-rows "${PILOT_PARTIAL_FLUSH_EVERY_ROWS:-1}"
+  --partial-summary-every-rows "${PILOT_PARTIAL_SUMMARY_EVERY_ROWS:-1}"
 )
 if [[ -n "${RESOLVED_RFT_CHECKPOINT}" ]]; then
   PILOT_CMD+=(--rft-checkpoint "${RESOLVED_RFT_CHECKPOINT}")
@@ -283,7 +302,7 @@ for _ in $(seq 1 300); do
     tail -n 120 "${VLLM_LOG}" >&2 || true
     exit 1
   fi
-  if curl -fsS --max-time 5 "http://127.0.0.1:8000/v1/models" >/dev/null 2>&1; then
+  if curl -fsS --max-time 5 "${SMALL_SWE_VLLM_BASE_URL%/}/models" >/dev/null 2>&1; then
     READY=1
     break
   fi

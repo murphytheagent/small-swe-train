@@ -305,6 +305,35 @@ def test_cached_dataset_validates_fingerprint_and_collates_to_batch_max(tmp_path
         )
 
 
+def test_token_cache_writer_can_return_records_for_profiler_reuse(tmp_path) -> None:
+    pytest.importorskip("pandas")
+    parquet_path = tmp_path / "cache.parquet"
+    tokenizer = _Tokenizer()
+
+    result = write_selected_rows_to_token_cache_parquet(
+        [
+            _selected_row(
+                [1, 2],
+                [1, 1],
+                prompt="Task prompt",
+                assistant_response="Action",
+            )
+        ],
+        parquet_path,
+        tokenizer=tokenizer,
+        cache_fingerprint="expected",
+        chat_template_kwargs={"enable_thinking": False},
+        return_records=True,
+    )
+
+    count, records = result
+    assert count == 1
+    assert parquet_path.is_file()
+    assert len(records) == 1
+    assert records[0]["attention_mask"]
+    assert records[0]["loss_mask"]
+
+
 def test_cache_fingerprint_changes_when_added_vocab_changes() -> None:
     base = build_rft_token_cache_fingerprint(
         tokenizer=_Tokenizer({"<extra_a>": 10}),

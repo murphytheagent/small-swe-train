@@ -1,0 +1,154 @@
+{
+  "generated_utc": "2026-04-28 00:00 UTC",
+  "thread_ts": "preflight_format_xml",
+  "pipeline": {
+    "pre_main_sequence": [
+      "format_rft",
+      "positive_rft",
+      "turn_sdpo"
+    ],
+    "positive_rft_enabled_default": false
+  },
+  "output_contract": {
+    "format_mode": "chatml_with_multi_tool_calls",
+    "chat_template": "qwen3_chatml",
+    "chatml_turn_delimiters": [
+      "<|im_start|>",
+      "<|im_end|>"
+    ],
+    "thinking_delimiters": [
+      "<think>",
+      "</think>"
+    ],
+    "tool_call_delimiters": [
+      "<tool_call>",
+      "</tool_call>"
+    ],
+    "tool_response_delimiters": [
+      "<tool_response>",
+      "</tool_response>"
+    ],
+    "action_payload_format": "xml",
+    "action_parse_mode": "dual",
+    "allow_optional_thinking": false,
+    "min_tool_calls_per_turn": 1,
+    "max_tool_calls_per_turn": 1,
+    "terminal_tool": "submit",
+    "submit_must_be_only_tool_call": true,
+    "terminal_validity_penalty": 0.2,
+    "legacy_answer_alias_for_canonicalization": true
+  },
+  "teacher": {
+    "regularization": "ema",
+    "ema_beta_default": 0.005,
+    "ema_beta_sweep": [
+      0.001,
+      0.01
+    ],
+    "top_k_distillation": {
+      "k": 100,
+      "schedule_enabled": false
+    },
+    "include_student_attempt_default": true,
+    "include_student_attempt_rule": "always_true_v1_6"
+  },
+  "feedback_processing": {
+    "canonicalization_version": "v1",
+    "deterministic_truncation": {
+      "head_tokens": 368,
+      "tail_tokens": 368,
+      "apply_after_payload_canonicalization": true,
+      "apply_before_teacher_prompt_wrapping": true
+    },
+    "extract_self_containment_signals": false,
+    "self_containment_rule": "disabled",
+    "self_containment_usage": "disabled"
+  },
+  "masking_policy": {
+    "format_rft": {
+      "supervision": "assistant_turn"
+    },
+    "positive_rft": {
+      "supervision": "assistant_turn"
+    },
+    "turn_sdpo": {
+      "supervision": "assistant_turn"
+    }
+  },
+  "adaptation": {
+    "mode": "lora",
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ],
+    "lora_rank": 16,
+    "lora_alpha": 32,
+    "compute_precision": "bf16"
+  },
+  "on_policy": {
+    "enabled": true,
+    "rollout_only": true,
+    "max_turns_per_attempt": 16,
+    "tool_timeout_sec": 60,
+    "container_start_timeout_sec": 120,
+    "attempt_timeout_sec": 300,
+    "max_tool_calls_per_turn": 1,
+    "verify_submissions": false,
+    "verifier_timeout_sec": 600
+  },
+  "rft_handoff": {
+    "max_sequence_length": 16384,
+    "pad_token_id": 0,
+    "selection": {
+      "require_terminal": true,
+      "require_format_valid": true,
+      "require_resolved": false,
+      "require_zero_exit_code": false,
+      "reject_on_collector_error": false,
+      "reject_on_bridge_error": false,
+      "reject_on_timeout_error": false,
+      "reject_on_executor_error": false,
+      "reject_on_parse_error": false,
+      "reject_on_validation_errors": false,
+      "reject_on_invalid_final_submit": true,
+      "relabel_rejected_attempts": true
+    }
+  },
+  "rft_runtime": {
+    "loop": {
+      "sft_num_epoch_per_batch": 1,
+      "steps": 5,
+      "samples_per_task": 4,
+      "task_batch_size": 512,
+      "collector_max_in_flight_tasks": 32,
+      "train_batch_size": 32,
+      "train_min_rows": 32,
+      "eval_split_fraction": 0.1,
+      "eval_min_rows": 1,
+      "eval_task_count": 50,
+      "checkpoint_keep_last": 1
+    },
+    "vllm": {
+      "base_url": "http://127.0.0.1:8000/v1",
+      "model_name": "Qwen/Qwen3-8B",
+      "request_timeout_sec": 180,
+      "max_tokens": 1024,
+      "temperature": 0.6,
+      "top_p": 1.0
+    },
+    "vllm_parallelism": {
+      "default_tensor_parallel_size": 2
+    }
+  },
+  "runtime": {
+    "sandbox": "docker",
+    "internet_access": true,
+    "filesystem_access": "read_write",
+    "bash_policy": "allowlist_and_denylist"
+  }
+}

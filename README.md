@@ -2,7 +2,7 @@
 
 Repository for a chat-style SWE training stack with `format_rft`, optional `positive_rft`, and `turn_sdpo` stages.
 
-Latest doc update: 2026-04-25.
+Latest doc update: 2026-04-28.
 
 ## Current status
 See `STATUS.md` for the current tracker and open follow-ups.
@@ -26,7 +26,7 @@ Canonical staged pipeline:
 - RFT rejection now enforces trajectory-level checks (all tool calls formatted, terminal submit present, terminal submit args valid).
 - `scripts/run_rft.sh` now defaults to a real RFT runtime loop:
   - collect live rollouts from vLLM + Docker envs,
-  - write selected trajectories to `MultiTurnSFTDataset`-compatible parquet shards,
+  - write selected trajectories to pre-tokenized `trainer.rft_token_cache.CachedRFTSFTDataset` parquet shards,
   - collect fixed held-out eval telemetry once per outer step (`rft_runtime.loop.eval_task_count`, default `50`),
   - train through `verl_integration.fsdp_sft_trainer_entry` with per-step `data.train_files=<accepted_step.parquet>` and inner verl validation disabled,
   - detect the latest trainer checkpoint and restart vLLM on that snapshot for the next RFT step.
@@ -35,7 +35,7 @@ Canonical staged pipeline:
 - `src/verl_integration/` keeps thin compatibility wrappers for trainer-owned runtime/handoff modules.
 
 ## Layout
-- `src/schemas/`: frozen JSON schema contracts + typed protocol models.
+- `src/schemas/`: Python-native typed schema contracts, validators, and protocol models.
 - `src/rollout/`: ChatML turn parser.
 - `src/data/`: feedback canonicalizer + external tool-schema adapters.
 - `src/losses/`: stage-aware action masking helpers.

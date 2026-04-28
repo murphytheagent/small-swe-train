@@ -80,6 +80,78 @@ def test_summarize_pair_rewards_computes_delta_statistics() -> None:
     assert summary["tied_count"] == 1
 
 
+def test_pair_reward_accumulator_matches_batch_summary() -> None:
+    pilot = _load_pilot_module()
+    pairs = [
+        {"student_reward": 0.0, "teacher_reward": 1.0, "reward_delta": 1.0},
+        {"student_reward": 1.0, "teacher_reward": 0.0, "reward_delta": -1.0},
+        {"student_reward": 1.0, "teacher_reward": 1.0, "reward_delta": 0.0},
+    ]
+
+    accumulator = pilot._PairRewardAccumulator()
+    for pair in pairs:
+        accumulator.add(pair)
+
+    assert accumulator.snapshot() == pilot.summarize_pair_rewards(pairs)
+
+
+def test_partial_writer_can_delay_summary_updates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pilot = _load_pilot_module()
+    output_dir = tmp_path / "pilot-output"
+    reward_payloads = [
+        ([0.0], {"format_metrics": [{"parse_valid_rate": 1.0}]}),
+        ([1.0], {"format_metrics": [{"parse_valid_rate": 1.0}]}),
+    ]
+
+    def _fake_reward_fn(rows, *, max_tool_calls):
+        del rows, max_tool_calls
+        return reward_payloads.pop(0)
+
+    monkeypatch.setattr(pilot, "reward_fn", _fake_reward_fn)
+    writer = pilot.PilotPartialWriter(
+        output_dir=output_dir,
+        summary_seed={"pilot": "test"},
+        max_tool_calls=4,
+        partial_flush_every_rows=2,
+        partial_summary_every_rows=2,
+    )
+    try:
+        writer.set_phase("collecting_baseline")
+        writer.record_row(
+            phase="baseline",
+            row={
+                "task_id": "task-1",
+                "attempt_index": 0,
+                "assistant_response": "baseline",
+            },
+        )
+        first_summary = json.loads(
+            (output_dir / "pilot_summary.json").read_text(encoding="utf-8")
+        )
+        assert first_summary["baseline_row_count"] == 0
+
+        writer.record_row(
+            phase="teacher",
+            row={
+                "task_id": "task-1",
+                "attempt_index": 0,
+                "assistant_response": "teacher",
+            },
+        )
+        second_summary = json.loads(
+            (output_dir / "pilot_summary.json").read_text(encoding="utf-8")
+        )
+        assert second_summary["baseline_row_count"] == 1
+        assert second_summary["teacher_row_count"] == 1
+        assert second_summary["reward_summary"]["pair_count"] == 1
+        assert second_summary["reward_summary"]["improved_count"] == 1
+    finally:
+        writer.close()
+
+
 def test_extract_format_metrics_uses_reward_fn_contract_payload() -> None:
     pilot = _load_pilot_module()
 

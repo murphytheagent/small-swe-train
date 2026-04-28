@@ -1074,19 +1074,6 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
 
                 world_size = config.nnodes * config.nproc_per_node
                 if not trainer_skipped:
-                    token_cache_write_start = time.monotonic()
-                    selected_count_for_train = write_selected_rows_to_multiturn_parquet(
-                        selected_rows_for_train,
-                        train_parquet_path,
-                        tokenizer=tokenizer,
-                        max_sequence_length=effective_keep_budget,
-                        cache_fingerprint=token_cache_fingerprint,
-                        chat_template_kwargs=chat_template_kwargs,
-                    )
-                    token_cache_write_duration_sec = time.monotonic() - token_cache_write_start
-                    token_cache_write_duration_sec = (
-                        time.monotonic() - token_cache_write_start
-                    )
                     if heldout_eval_enabled and not selected_rows_for_eval:
                         raise RuntimeError(
                             "Held-out RFT eval produced zero selected rows after filtering; "
@@ -1095,7 +1082,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
 
                     effective_train_batch_size = resolve_effective_train_batch_size(
                         requested=config.train_batch_size,
-                        selected_count=selected_count_for_train,
+                        selected_count=selected_count_for_train_raw,
                         world_size=world_size,
                         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
                     )
@@ -1109,28 +1096,35 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                                 global_batch_size=effective_train_batch_size,
                             )
                         )
-                        if selected_rows_upsampled > 0:
-                            token_cache_rewrite_start = time.monotonic()
-                            selected_count_for_train = write_selected_rows_to_multiturn_parquet(
-                                selected_rows_for_train,
-                                train_parquet_path,
-                                tokenizer=tokenizer,
-                                max_sequence_length=effective_keep_budget,
-                                cache_fingerprint=token_cache_fingerprint,
-                                chat_template_kwargs=chat_template_kwargs,
-                            )
-                            token_cache_write_duration_sec += (
-                                time.monotonic() - token_cache_rewrite_start
-                            )
-                        profiler_attention_masks, profiler_loss_masks = (
-                            _selected_rows_masks_for_profiler(
-                                selected_rows_for_train,
-                                tokenizer=tokenizer,
-                                max_sequence_length=effective_keep_budget,
-                                cache_fingerprint=token_cache_fingerprint,
-                                chat_template_kwargs=chat_template_kwargs,
-                            )
+                        token_cache_write_start = time.monotonic()
+                        (
+                            selected_count_for_train,
+                            token_cache_records_for_profiler,
+                        ) = _write_selected_rows_token_cache_for_train(
+                            selected_rows_for_train,
+                            train_parquet_path,
+                            tokenizer=tokenizer,
+                            max_sequence_length=effective_keep_budget,
+                            cache_fingerprint=token_cache_fingerprint,
+                            chat_template_kwargs=chat_template_kwargs,
                         )
+                        token_cache_write_duration_sec = time.monotonic() - token_cache_write_start
+                        if token_cache_records_for_profiler is not None:
+                            profiler_attention_masks, profiler_loss_masks = (
+                                _token_cache_records_masks_for_profiler(
+                                    token_cache_records_for_profiler
+                                )
+                            )
+                        else:
+                            profiler_attention_masks, profiler_loss_masks = (
+                                _selected_rows_masks_for_profiler(
+                                    selected_rows_for_train,
+                                    tokenizer=tokenizer,
+                                    max_sequence_length=effective_keep_budget,
+                                    cache_fingerprint=token_cache_fingerprint,
+                                    chat_template_kwargs=chat_template_kwargs,
+                                )
+                            )
                         trainer_command = build_trainer_step_command(
                             python_bin=config.python_bin,
                             nnodes=config.nnodes,
@@ -2304,6 +2298,50 @@ def _selected_rows_masks_for_profiler(
         cache_fingerprint=cache_fingerprint,
         chat_template_kwargs=chat_template_kwargs,
     )
+    for record in records:
+        attention_mask = record.get("attention_mask")
+        loss_mask = record.get("loss_mask")
+        if (
+            not isinstance(attention_mask, Sequence)
+            or isinstance(attention_mask, (str, bytes))
+            or not isinstance(loss_mask, Sequence)
+            or isinstance(loss_mask, (str, bytes))
+        ):
+            continue
+        attention_masks.append([1 if _coerce_bool_value(item) else 0 for item in attention_mask])
+        loss_masks.append([1 if _coerce_bool_value(item) else 0 for item in loss_mask])
+    return attention_masks, loss_masks
+
+
+def _write_selected_rows_token_cache_for_train(
+    selected_rows: Sequence[Mapping[str, Any]],
+    train_parquet_path: Path,
+    *,
+    tokenizer: Any,
+    max_sequence_length: int,
+    cache_fingerprint: str,
+    chat_template_kwargs: Mapping[str, Any],
+) -> tuple[int, list[dict[str, Any]] | None]:
+    result = write_selected_rows_to_multiturn_parquet(
+        selected_rows,
+        train_parquet_path,
+        tokenizer=tokenizer,
+        max_sequence_length=max_sequence_length,
+        cache_fingerprint=cache_fingerprint,
+        chat_template_kwargs=chat_template_kwargs,
+        return_records=True,
+    )
+    if isinstance(result, tuple):
+        count, records = result
+        return int(count), [dict(record) for record in records]
+    return int(result), None
+
+
+def _token_cache_records_masks_for_profiler(
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[list[list[int]], list[list[int]]]:
+    attention_masks: list[list[int]] = []
+    loss_masks: list[list[int]] = []
     for record in records:
         attention_mask = record.get("attention_mask")
         loss_mask = record.get("loss_mask")

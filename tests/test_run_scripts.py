@@ -533,6 +533,25 @@ def test_run_rft_script_dry_run_propagates_positive_stage_to_loop_runtime() -> N
     assert "stage_name=positive_rft" in result.stdout
 
 
+def test_run_rft_script_dry_run_uses_selected_preflight_policy_config() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        env_overrides={
+            "SMALL_SWE_TRAINING_POLICY_CONFIG": "training_policy_preflight_positive_json.v1.json",
+            "NPROC_PER_NODE": "4",
+            "RFT_STAGE_NAME": "positive_rft",
+        },
+    )
+    assert "stage_name=positive_rft" in result.stdout
+    assert "steps=5" in result.stdout
+    assert "task_batch_size=512" in result.stdout
+    assert "samples_per_task=4" in result.stdout
+    assert "train_min_rows=4" in result.stdout
+    assert "--nproc_per_node 4" in result.stdout
+    assert "data.train_batch_size=4" in result.stdout
+    assert "data.train_min_rows=4" in result.stdout
+
+
 def test_run_rft_script_dry_run_direct_mode_wires_positive_selection_overrides() -> None:
     result = _run_script(
         "run_rft.sh",

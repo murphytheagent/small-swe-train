@@ -1,6 +1,7 @@
 """Centralized runtime config loader with schema-consistent exports.
 
-Runtime policy defaults live in ``configs/runtime/training_policy_defaults.v1.json``.
+Runtime policy defaults live in ``configs/runtime/training_policy_defaults.v1.json``
+unless ``SMALL_SWE_TRAINING_POLICY_CONFIG`` selects another checked-in config.
 Dataset config for on-policy collection lives in ``configs/data/*.yaml``.
 This module is the import surface for runtime knobs used by code paths across
 rollout, prompting, trainer adapters, and environment orchestration.
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -30,7 +32,8 @@ from verifier_utils import normalize_verifier_kind
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIGS_DIR = _PROJECT_ROOT / "configs"
 _DATA_CONFIGS_DIR = _CONFIGS_DIR / "data"
-_TRAINING_POLICY_PATH = _CONFIGS_DIR / "runtime" / "training_policy_defaults.v1.json"
+_TRAINING_POLICY_CONFIG_ENV = "SMALL_SWE_TRAINING_POLICY_CONFIG"
+_DEFAULT_TRAINING_POLICY_PATH = _CONFIGS_DIR / "runtime" / "training_policy_defaults.v1.json"
 _PHASE_TRANSITION_GATES_PATH = _CONFIGS_DIR / "runtime" / "phase_transition_gates.v1.json"
 _VERL_MODEL_DEFAULTS_PATH = _CONFIGS_DIR / "verl" / "model_defaults.yaml"
 _MODEL_METADATA_DIR = _CONFIGS_DIR / "model_metadata"
@@ -38,6 +41,42 @@ _MODEL_CONFIG_OVERRIDE_DIR = _CONFIGS_DIR / "model"
 _BUNDLED_MODEL_CONFIGS_DIR = Path(__file__).resolve().parent / "prompts" / "model_configs"
 
 DEFAULT_ON_POLICY_DATA_CONFIG_NAME = "on_policy_swe_smith"
+
+
+def _resolve_configs_path(raw_value: str, *, default_dir: Path, env_name: str) -> Path:
+    raw_path = Path(raw_value.strip())
+    if raw_path.is_absolute():
+        candidate = raw_path
+    elif raw_path.parts and raw_path.parts[0] == "configs":
+        candidate = _PROJECT_ROOT / raw_path
+    elif len(raw_path.parts) == 1:
+        candidate = default_dir / raw_path
+    else:
+        candidate = _CONFIGS_DIR / raw_path
+
+    resolved = candidate.resolve()
+    configs_root = _CONFIGS_DIR.resolve()
+    try:
+        resolved.relative_to(configs_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"{env_name} must point to a file under {configs_root}; got {raw_value!r}."
+        ) from exc
+    if not resolved.is_file():
+        raise FileNotFoundError(f"{env_name} points to a missing config file: {resolved}")
+    return resolved
+
+
+def training_policy_config_path() -> Path:
+    """Return the active training policy config path."""
+    override = os.environ.get(_TRAINING_POLICY_CONFIG_ENV, "").strip()
+    if not override:
+        return _DEFAULT_TRAINING_POLICY_PATH
+    return _resolve_configs_path(
+        override,
+        default_dir=_CONFIGS_DIR / "runtime",
+        env_name=_TRAINING_POLICY_CONFIG_ENV,
+    )
 
 
 @dataclass(frozen=True)
@@ -128,7 +167,7 @@ class DeterministicTruncationSettings:
 @functools.lru_cache(maxsize=1)
 def training_policy_defaults() -> dict[str, Any]:
     """Load and cache the full training policy defaults dict."""
-    with _TRAINING_POLICY_PATH.open() as fh:
+    with training_policy_config_path().open() as fh:
         return json.load(fh)
 
 
