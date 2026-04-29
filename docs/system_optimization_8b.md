@@ -1,6 +1,6 @@
 # Qwen3-8B System Optimization Tracker
 
-Last updated: 2026-04-26.
+Last updated: 2026-04-29.
 
 ## Goal
 
@@ -23,7 +23,11 @@ RFT runtime now writes a per-outer-step pre-tokenized parquet cache and launches
 - Required columns: `input_ids`, `attention_mask`, `position_ids`, `loss_mask`, `sequence_length`, `loss_token_count`, `cache_schema_version`, `cache_fingerprint`.
 - Cache fingerprint covers tokenizer metadata, chat template, `data.apply_chat_template_kwargs`, added vocab, max lengths, selected prompt/tokenization/action-format/feedback/RFT source files, and `MAX_TOOL_CALLS_PER_TURN`.
 - The inner trainer disables verl `MultiTurnSFTDataset` fallback and inner validation. Fixed held-out convergence eval remains outer-loop only.
-- `data.train_min_rows` defaults to the global train batch size; too-few selected rows fail before trainer launch.
+- Inner SFT can launch once selected rows cover one distributed micro-step:
+  `NNODES * NPROC_PER_NODE * data.micro_batch_size_per_gpu`. With the 8B default
+  micro-batch `1`, an 8-GPU preflight needs `8` selected rows. The requested
+  global SFT batch is separate and may be clamped downward to a valid multiple
+  when fewer rows are selected.
 
 ## Length Bucketing
 

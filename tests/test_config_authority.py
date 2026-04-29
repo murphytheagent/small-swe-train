@@ -82,17 +82,17 @@ def test_training_policy_config_selector_loads_checked_in_preflight_policy() -> 
     assert payload["path"].endswith("configs/runtime/training_policy_preflight_positive_xml.v1.json")
     assert payload["format"] == "xml"
     assert payload["steps"] == 5
-    assert payload["train_batch_size"] == 4
-    assert payload["train_min_rows"] == 4
+    assert payload["train_batch_size"] == 16
+    assert payload["train_min_rows"] == 8
 
 
 @pytest.mark.parametrize(
     ("filename", "payload_format", "train_batch_size", "train_min_rows"),
     [
-        ("training_policy_preflight_format_json.v1.json", "json", 4, 4),
-        ("training_policy_preflight_format_xml.v1.json", "xml", 4, 4),
-        ("training_policy_preflight_positive_json.v1.json", "json", 4, 4),
-        ("training_policy_preflight_positive_xml.v1.json", "xml", 4, 4),
+        ("training_policy_preflight_format_json.v1.json", "json", 16, 8),
+        ("training_policy_preflight_format_xml.v1.json", "xml", 16, 8),
+        ("training_policy_preflight_positive_json.v1.json", "json", 16, 8),
+        ("training_policy_preflight_positive_xml.v1.json", "xml", 16, 8),
     ],
 )
 def test_preflight_policy_configs_encode_paired_payload_matrix(
@@ -189,7 +189,7 @@ def test_8b_memory_defaults_are_configured() -> None:
     assert rft_rollout["gpu_memory_utilization"] == 0.75
     assert rft_rollout["max_num_seqs"] == 32
     assert rft_rollout["max_num_batched_tokens"] == 131072
-    assert runtime_defaults["loop"]["train_min_rows"] == runtime_defaults["loop"]["train_batch_size"]
+    assert runtime_defaults["loop"]["train_min_rows"] >= 1
     assert runtime_defaults["vllm"]["model_name"] == "Qwen/Qwen3-8B"
 
     actor_cfg = sdpo_payload["actor_rollout_ref"]["actor"]

@@ -400,6 +400,9 @@ _load_rft_runtime_defaults() {
   "${PYTHON_BIN}" - <<'PY'
 import os
 from collections.abc import Mapping
+from pathlib import Path
+
+import yaml
 
 from config import (
     adaptation_defaults,
@@ -427,6 +430,10 @@ if not isinstance(handoff, Mapping):
 adaptation = adaptation_defaults()
 if not isinstance(adaptation, Mapping):
     raise ValueError("`adaptation` must be configured as a mapping.")
+verl_config = yaml.safe_load((Path(os.environ["PROJECT_ROOT"]) / "configs" / "verl" / "rft_swe.yaml").read_text(encoding="utf-8"))
+verl_data = verl_config.get("data") if isinstance(verl_config, Mapping) else None
+if not isinstance(verl_data, Mapping):
+    raise ValueError("`configs/verl/rft_swe.yaml:data` must be configured as a mapping.")
 
 
 def _required_positive_int(value, *, label):
@@ -493,9 +500,9 @@ train_batch_size = _required_positive_int(
     loop.get("train_batch_size"),
     label="rft_runtime.loop.train_batch_size",
 )
-train_min_rows = _required_positive_int(
-    loop.get("train_min_rows", train_batch_size),
-    label="rft_runtime.loop.train_min_rows",
+micro_batch_size_per_gpu = _required_positive_int(
+    verl_data.get("micro_batch_size_per_gpu", 1),
+    label="data.micro_batch_size_per_gpu",
 )
 eval_split_fraction = _required_number(
     loop.get("eval_split_fraction", 0.1),
@@ -592,7 +599,7 @@ print(
     sft_num_epoch_per_batch,
     checkpoint_keep_last,
     train_batch_size,
-    train_min_rows,
+    micro_batch_size_per_gpu,
     eval_split_fraction,
     eval_min_rows,
     eval_task_count,
@@ -697,7 +704,7 @@ PY
 }
 
 RFT_DEFAULTS="$(_load_rft_runtime_defaults)"
-read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_RFT_TRAIN_MIN_ROWS DEFAULT_RFT_EVAL_SPLIT_FRACTION DEFAULT_RFT_EVAL_MIN_ROWS DEFAULT_RFT_EVAL_TASK_COUNT DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT DEFAULT_RFT_MAX_SEQUENCE_LENGTH DEFAULT_ADAPTATION_MODE DEFAULT_ADAPTATION_COMPUTE_PRECISION DEFAULT_LORA_RANK DEFAULT_LORA_ALPHA DEFAULT_LORA_TARGET_MODULES <<<"${RFT_DEFAULTS}"
+read -r DEFAULT_RFT_STEPS DEFAULT_SAMPLES_PER_TASK DEFAULT_RFT_TASK_BATCH_SIZE DEFAULT_RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH DEFAULT_RFT_CHECKPOINT_KEEP_LAST DEFAULT_RFT_TRAIN_BATCH_SIZE DEFAULT_RFT_MICRO_BATCH_SIZE_PER_GPU DEFAULT_RFT_EVAL_SPLIT_FRACTION DEFAULT_RFT_EVAL_MIN_ROWS DEFAULT_RFT_EVAL_TASK_COUNT DEFAULT_VLLM_TP_SIZE DEFAULT_VLLM_DP_SIZE DEFAULT_VLLM_BASE_URL DEFAULT_VLLM_MODEL DEFAULT_VLLM_REQUEST_TIMEOUT DEFAULT_VLLM_MAX_TOKENS DEFAULT_VLLM_TEMPERATURE DEFAULT_VLLM_TOP_P DEFAULT_ON_POLICY_MAX_TURNS_PER_ATTEMPT DEFAULT_RFT_MAX_SEQUENCE_LENGTH DEFAULT_ADAPTATION_MODE DEFAULT_ADAPTATION_COMPUTE_PRECISION DEFAULT_LORA_RANK DEFAULT_LORA_ALPHA DEFAULT_LORA_TARGET_MODULES <<<"${RFT_DEFAULTS}"
 
 RFT_STEPS="${RFT_STEPS:-${DEFAULT_RFT_STEPS}}"
 SAMPLES_PER_TASK="${SAMPLES_PER_TASK:-${DEFAULT_SAMPLES_PER_TASK}}"
@@ -706,17 +713,11 @@ RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS="${RFT_COLLECTOR_MAX_IN_FLIGHT_TASKS:-${DEFAUL
 RFT_SFT_NUM_EPOCH_PER_BATCH="${RFT_SFT_NUM_EPOCH_PER_BATCH:-${DEFAULT_RFT_SFT_NUM_EPOCH_PER_BATCH}}"
 RFT_CHECKPOINT_KEEP_LAST="${RFT_CHECKPOINT_KEEP_LAST:-${DEFAULT_RFT_CHECKPOINT_KEEP_LAST}}"
 RFT_BATCH_SIZE="${RFT_BATCH_SIZE:-$((SAMPLES_PER_TASK * RFT_TASK_BATCH_SIZE))}"
-RFT_TRAIN_BATCH_SIZE_WAS_SET=0
-if [[ -n "${RFT_TRAIN_BATCH_SIZE:-}" ]]; then
-  RFT_TRAIN_BATCH_SIZE_WAS_SET=1
-fi
 RFT_TRAIN_BATCH_SIZE="${RFT_TRAIN_BATCH_SIZE:-${DEFAULT_RFT_TRAIN_BATCH_SIZE}}"
-if [[ -z "${RFT_TRAIN_MIN_ROWS:-}" ]]; then
-  if [[ "${RFT_TRAIN_BATCH_SIZE_WAS_SET}" -eq 1 ]]; then
-    RFT_TRAIN_MIN_ROWS="${RFT_TRAIN_BATCH_SIZE}"
-  else
-    RFT_TRAIN_MIN_ROWS="${DEFAULT_RFT_TRAIN_MIN_ROWS}"
-  fi
+RFT_TRAIN_MIN_ROWS="$(( NNODES * NPROC_PER_NODE * DEFAULT_RFT_MICRO_BATCH_SIZE_PER_GPU ))"
+RFT_EFFECTIVE_TRAIN_BATCH_SIZE="${RFT_TRAIN_BATCH_SIZE}"
+if (( RFT_EFFECTIVE_TRAIN_BATCH_SIZE < RFT_TRAIN_MIN_ROWS )); then
+  RFT_EFFECTIVE_TRAIN_BATCH_SIZE="${RFT_TRAIN_MIN_ROWS}"
 fi
 RFT_EVAL_SPLIT_FRACTION="${RFT_EVAL_SPLIT_FRACTION:-${DEFAULT_RFT_EVAL_SPLIT_FRACTION}}"
 RFT_EVAL_MIN_ROWS="${RFT_EVAL_MIN_ROWS:-${DEFAULT_RFT_EVAL_MIN_ROWS}}"
@@ -742,10 +743,10 @@ RFT_STAGE_NAME="$(_to_lower_ascii "${RFT_STAGE_NAME}")"
 case "${RFT_STAGE_NAME}" in
   format|format_rft)
     RFT_STAGE_NAME="format_rft"
-    RFT_SELECTION_REQUIRE_TERMINAL="true"
+    RFT_SELECTION_REQUIRE_TERMINAL="false"
     RFT_SELECTION_REQUIRE_FORMAT_VALID="true"
     RFT_SELECTION_REQUIRE_RESOLVED="false"
-    RFT_SELECTION_REJECT_ON_INVALID_FINAL_SUBMIT="true"
+    RFT_SELECTION_REJECT_ON_INVALID_FINAL_SUBMIT="false"
     RFT_VERIFY_SUBMISSIONS="false"
     ;;
   positive|positive_rft)
@@ -858,7 +859,8 @@ if [[ "${RFT_RUNTIME_MODE}" == "direct" ]]; then
     trainer.total_epochs="${RFT_SFT_NUM_EPOCH_PER_BATCH}"
     trainer.total_training_steps="${RFT_STEPS}"
     trainer.test_freq=0
-    data.train_batch_size="${RFT_TRAIN_BATCH_SIZE}"
+    data.train_batch_size="${RFT_EFFECTIVE_TRAIN_BATCH_SIZE}"
+    data.train_min_rows="${RFT_TRAIN_MIN_ROWS}"
     data.val_files=[]
     model.partial_pretrain="${RFT_INITIAL_MODEL}"
     model.fsdp_config.model_dtype="${RFT_MODEL_DTYPE}"

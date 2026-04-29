@@ -66,6 +66,19 @@ sbatch \
 To keep runtime artifacts under the Slurm tree, add:
 `export RFT_OUTPUT_ROOT=$PWD/outputs/slurm/rft_runtime` inside `--wrap`.
 
+RFT row floor and SFT batch sizing:
+- `NPROC_PER_NODE` must match the requested GPU count.
+- `data.micro_batch_size_per_gpu` is loaded from `configs/verl/rft_swe.yaml`
+  and is `1` for the Qwen3-8B path.
+- The minimum number of selected rows required to launch inner SFT is derived as
+  `NNODES * NPROC_PER_NODE * data.micro_batch_size_per_gpu`.
+- `rft_runtime.loop.train_batch_size` is the requested global SFT batch target,
+  not the selected-row floor. The runtime clamps it to a valid distributed
+  multiple for the selected rows.
+- Do not tune `RFT_TRAIN_MIN_ROWS` for preflights. For an 8-GPU run with
+  micro-batch `1`, the floor is `8` selected rows; the checked-in preflight
+  configs request global SFT batch `16`.
+
 To make an RFT run resumable from Slurm, set a stable `RFT_OUTPUT_DIR` (or stable
 `RFT_RUN_LABEL`) and reuse it on restart/requeue. Under current code, resume is:
 - outer-loop only

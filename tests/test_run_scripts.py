@@ -548,7 +548,7 @@ def test_run_rft_script_dry_run_uses_selected_preflight_policy_config() -> None:
     assert "samples_per_task=4" in result.stdout
     assert "train_min_rows=4" in result.stdout
     assert "--nproc_per_node 4" in result.stdout
-    assert "data.train_batch_size=4" in result.stdout
+    assert "data.train_batch_size=16" in result.stdout
     assert "data.train_min_rows=4" in result.stdout
 
 
@@ -565,6 +565,22 @@ def test_run_rft_script_dry_run_direct_mode_wires_positive_selection_overrides()
     assert "+data.on_policy.runtime_overrides.verify_submissions=true" in result.stdout
     assert "+data.on_policy.rft_handoff_overrides.selection.require_resolved=true" in result.stdout
     assert "+data.on_policy.rft_handoff_overrides.selection.require_format_valid=false" in result.stdout
+
+
+def test_run_rft_script_dry_run_direct_mode_wires_format_only_selection_overrides() -> None:
+    result = _run_script(
+        "run_rft.sh",
+        env_overrides={
+            "RFT_RUNTIME_MODE": "direct",
+            "RFT_STAGE_NAME": "format_rft",
+            "NPROC_PER_NODE": "1",
+        },
+    )
+    assert "+data.on_policy.stage_name=format_rft" in result.stdout
+    assert "+data.on_policy.runtime_overrides.verify_submissions=false" in result.stdout
+    assert "+data.on_policy.rft_handoff_overrides.selection.require_terminal=false" in result.stdout
+    assert "+data.on_policy.rft_handoff_overrides.selection.require_format_valid=true" in result.stdout
+    assert "+data.on_policy.rft_handoff_overrides.selection.reject_on_invalid_final_submit=false" in result.stdout
 
 
 def test_run_rft_script_rejects_unpatched_trainer_module() -> None:
@@ -831,31 +847,20 @@ def test_run_rft_script_dry_run_defaults_train_min_rows_to_effective_train_batch
     result = _run_script(
         "run_rft.sh",
         "trainer.total_training_steps=1",
-        env_overrides={"RFT_TRAIN_BATCH_SIZE": "8"},
+        env_overrides={"NPROC_PER_NODE": "8", "RFT_TRAIN_BATCH_SIZE": "8"},
     )
     assert "data.train_batch_size=8" in result.stdout
     assert "data.train_min_rows=8" in result.stdout
 
 
-def test_run_rft_script_dry_run_honors_configured_train_min_rows_default(
-    tmp_path: Path,
-) -> None:
-    fake_python = _write_python_defaults_stub(
-        tmp_path,
-        (
-            "100 8 64 32 1 1 32 50 0.1 1 50 2 2 "
-            "http://127.0.0.1:8000/v1 "
-            f"{config.DEFAULT_TRAINING_MODEL_NAME} 90 1024 0.0 1.0 8 12288 "
-            "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
-        ),
-    )
+def test_run_rft_script_dry_run_derives_train_min_rows_from_world_size() -> None:
     result = _run_script(
         "run_rft.sh",
         "trainer.total_training_steps=1",
-        env_overrides={"PYTHON_BIN": str(fake_python)},
+        env_overrides={"NPROC_PER_NODE": "8", "RFT_TRAIN_BATCH_SIZE": "4"},
     )
-    assert "data.train_batch_size=32" in result.stdout
-    assert "data.train_min_rows=50" in result.stdout
+    assert "data.train_batch_size=8" in result.stdout
+    assert "data.train_min_rows=8" in result.stdout
 
 
 def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topology(
@@ -864,7 +869,7 @@ def test_run_rft_script_dry_run_honors_centralized_default_dp_for_divisible_topo
     fake_python = _write_python_defaults_stub(
         tmp_path,
         (
-            "100 8 64 32 1 1 512 512 0.1 1 50 2 2 "
+            "100 8 64 32 1 1 512 1 0.1 1 50 2 2 "
             "http://127.0.0.1:8000/v1 "
             f"{config.DEFAULT_TRAINING_MODEL_NAME} 90 1024 0.0 1.0 8 12288 "
             "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
@@ -888,7 +893,7 @@ def test_run_rft_script_dry_run_defaults_nproc_to_detected_gpu_count(
     fake_python = _write_python_defaults_stub(
         tmp_path,
         (
-            "100 8 64 32 1 1 512 512 0.1 1 50 2 4 "
+            "100 8 64 32 1 1 512 1 0.1 1 50 2 4 "
             "http://127.0.0.1:8000/v1 "
             f"{config.DEFAULT_TRAINING_MODEL_NAME} 90 1024 0.0 1.0 8 12288 "
             "lora bf16 16 32 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"

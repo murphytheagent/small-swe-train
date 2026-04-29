@@ -27,6 +27,7 @@ from trainer.rft_runtime_loop import (
     resolve_data_max_length,
     resolve_effective_train_batch_size,
     resolve_micro_batch_size_per_gpu,
+    resolve_min_selected_rows_for_sft,
     resolve_latest_hf_checkpoint,
     split_selected_rows_for_eval,
     upsample_selected_rows_to_batch_multiple,
@@ -2494,6 +2495,15 @@ def test_resolve_effective_train_batch_size_returns_none_when_below_world_size()
     assert resolved is None
 
 
+def test_resolve_effective_train_batch_size_raises_requested_batch_to_distributed_floor() -> None:
+    resolved = resolve_effective_train_batch_size(
+        requested=4,
+        selected_count=27,
+        world_size=8,
+    )
+    assert resolved == 8
+
+
 def test_resolve_effective_train_batch_size_rejects_invalid_inputs() -> None:
     with pytest.raises(ValueError, match="requested"):
         resolve_effective_train_batch_size(requested=0, selected_count=8, world_size=8)
@@ -2518,6 +2528,11 @@ def test_resolve_effective_train_batch_size_enforces_micro_batch_divisibility() 
         micro_batch_size_per_gpu=4,
     )
     assert resolved == 32
+
+
+def test_resolve_min_selected_rows_for_sft_matches_world_size_times_micro_batch() -> None:
+    assert resolve_min_selected_rows_for_sft(world_size=8, micro_batch_size_per_gpu=1) == 8
+    assert resolve_min_selected_rows_for_sft(world_size=8, micro_batch_size_per_gpu=4) == 32
 
 
 def test_upsample_selected_rows_to_batch_multiple_repeats_rows_to_fit_batch() -> None:
@@ -2608,8 +2623,10 @@ def test_resolve_rft_stage_helpers_cover_format_and_positive_modes() -> None:
     assert rft_runtime_loop.resolve_rft_stage_verify_submissions("positive_rft") is True
     assert rft_runtime_loop.resolve_rft_stage_selection_contract("format_rft") == {
         "mode": "format_first_rft",
-        "require_terminal": True,
+        "require_terminal": False,
         "require_format_valid": True,
+        "require_resolved": False,
+        "reject_on_invalid_final_submit": False,
     }
     assert rft_runtime_loop.resolve_rft_stage_selection_contract("positive_rft") == {
         "mode": "positive_rft",
@@ -2620,7 +2637,14 @@ def test_resolve_rft_stage_helpers_cover_format_and_positive_modes() -> None:
     }
     assert rft_runtime_loop.resolve_rft_stage_correctness_contract("format_rft") == "heuristic"
     assert rft_runtime_loop.resolve_rft_stage_correctness_contract("positive_rft") == "verifier"
-    assert rft_runtime_loop.resolve_rft_stage_handoff_overrides("format_rft") == {}
+    assert rft_runtime_loop.resolve_rft_stage_handoff_overrides("format_rft") == {
+        "selection": {
+            "require_terminal": False,
+            "require_format_valid": True,
+            "require_resolved": False,
+            "reject_on_invalid_final_submit": False,
+        }
+    }
     assert rft_runtime_loop.resolve_rft_stage_handoff_overrides("positive_rft") == {
         "selection": {
             "require_terminal": False,

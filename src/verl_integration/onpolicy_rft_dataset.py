@@ -342,18 +342,25 @@ def _merge_stage_handoff_overrides(
     stage_name: str,
 ) -> dict[str, Any]:
     resolved = dict(handoff_overrides)
-    if _resolve_stage_name(stage_name) != _POSITIVE_RFT_STAGE_NAME:
-        return resolved
-
     selection = _mapping_or_empty(resolved.get("selection"))
-    selection.update(
-        {
-            "require_terminal": False,
-            "require_format_valid": False,
-            "require_resolved": True,
-            "reject_on_invalid_final_submit": False,
-        }
-    )
+    if _resolve_stage_name(stage_name) == _POSITIVE_RFT_STAGE_NAME:
+        selection.update(
+            {
+                "require_terminal": False,
+                "require_format_valid": False,
+                "require_resolved": True,
+                "reject_on_invalid_final_submit": False,
+            }
+        )
+    else:
+        selection.update(
+            {
+                "require_terminal": False,
+                "require_format_valid": True,
+                "require_resolved": False,
+                "reject_on_invalid_final_submit": False,
+            }
+        )
     resolved["selection"] = selection
     return resolved
 

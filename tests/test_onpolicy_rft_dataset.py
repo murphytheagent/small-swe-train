@@ -350,6 +350,48 @@ def test_onpolicy_dataset_positive_stage_derives_runtime_contract(
     }
 
 
+def test_onpolicy_dataset_format_stage_derives_format_only_runtime_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests = []
+
+    def _fake_collect(*, request, tokenizer):
+        del tokenizer
+        captured_requests.append(request)
+        return _runtime_result(1)
+
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch_module())
+    monkeypatch.setattr(dataset_module, "collect_onpolicy_rft_runtime_batch", _fake_collect)
+
+    dataset_module.OnPolicyRFTDataset(
+        parquet_files=["/tmp/train.parquet"],
+        tokenizer=_TokenizerStub(name_or_path="checkpoint-a", vocab_size=50000),
+        config={
+            "on_policy": {
+                "enabled": True,
+                "stage_name": "format_rft",
+                "rft_handoff_overrides": {
+                    "selection": {
+                        "require_terminal": True,
+                        "reject_on_invalid_final_submit": True,
+                    }
+                },
+            }
+        },
+    )
+
+    assert len(captured_requests) == 1
+    request = captured_requests[0]
+    assert request.stage_name == "format_rft"
+    assert request.verify_submissions is False
+    assert request.handoff_overrides["selection"] == {
+        "require_terminal": False,
+        "reject_on_invalid_final_submit": False,
+        "require_format_valid": True,
+        "require_resolved": False,
+    }
+
+
 def test_onpolicy_dataset_routes_train_and_eval_partitions_from_dataset_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

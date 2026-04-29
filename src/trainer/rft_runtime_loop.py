@@ -158,6 +158,15 @@ def resolve_rft_stage_name(stage_name: str) -> str:
 
 def resolve_rft_stage_handoff_overrides(stage_name: str) -> dict[str, Any]:
     resolved_stage_name = resolve_rft_stage_name(stage_name)
+    if resolved_stage_name == _FORMAT_RFT_STAGE_NAME:
+        return {
+            "selection": {
+                "require_terminal": False,
+                "require_format_valid": True,
+                "require_resolved": False,
+                "reject_on_invalid_final_submit": False,
+            }
+        }
     if resolved_stage_name == _POSITIVE_RFT_STAGE_NAME:
         return {
             "selection": {
@@ -516,8 +525,10 @@ def _latest_committed_checkpoint_path(output_dir: Path) -> Path:
 def _selection_contract_for_rft() -> dict[str, Any]:
     return {
         "mode": "format_first_rft",
-        "require_terminal": True,
+        "require_terminal": False,
         "require_format_valid": True,
+        "require_resolved": False,
+        "reject_on_invalid_final_submit": False,
     }
 
 
@@ -768,6 +779,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         config_name=config.config_name,
         trainer_overrides=config.trainer_overrides,
     )
+    world_size = config.nnodes * config.nproc_per_node
     trainer_data_max_length = resolve_data_max_length(
         config_dir=config.config_dir,
         config_name=config.config_name,
@@ -778,8 +790,9 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         config_name=config.config_name,
         trainer_overrides=config.trainer_overrides,
     )
-    effective_train_min_rows = (
-        config.train_min_rows if config.train_min_rows is not None else config.train_batch_size
+    effective_train_min_rows = resolve_min_selected_rows_for_sft(
+        world_size=world_size,
+        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
     )
     default_manifest_config = {
         "rft_steps": config.rft_steps,
@@ -845,6 +858,7 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
         _print_dry_run_plan(
             config=config,
             collector_max_in_flight_tasks=collector_max_in_flight_tasks,
+            effective_train_min_rows=effective_train_min_rows,
         )
         return
 
@@ -1069,10 +1083,10 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                         "RFT selected train rows are below the required minimum before "
                         "inner SFT launch: "
                         f"{selected_count_for_train_raw} < {effective_train_min_rows}. "
-                        "Increase collection volume or lower --train-min-rows explicitly."
+                        "Increase collection volume or reduce the distributed SFT floor "
+                        "by lowering world size or data.micro_batch_size_per_gpu."
                     )
 
-                world_size = config.nnodes * config.nproc_per_node
                 if not trainer_skipped:
                     if heldout_eval_enabled and not selected_rows_for_eval:
                         raise RuntimeError(
@@ -1966,6 +1980,7 @@ def _print_dry_run_plan(
     config: RFTLoopConfig,
     *,
     collector_max_in_flight_tasks: int,
+    effective_train_min_rows: int,
 ) -> None:
     resolved_stage_name = resolve_rft_stage_name(config.stage_name)
     preview_steps = min(config.rft_steps, 2)
@@ -1977,7 +1992,7 @@ def _print_dry_run_plan(
         f"task_batch_size={config.task_batch_size}",
         f"eval_split_fraction={config.eval_split_fraction}",
         f"eval_min_rows={config.eval_min_rows}",
-        f"train_min_rows={config.train_min_rows or config.train_batch_size}",
+        f"train_min_rows={effective_train_min_rows}",
         f"eval_task_count={config.eval_task_count}",
         f"collector_max_in_flight_tasks={collector_max_in_flight_tasks}",
         "collector_max_turns_per_attempt="
@@ -2015,8 +2030,8 @@ def _print_dry_run_plan(
             model_path=config.initial_model,
             train_parquet_path=train_parquet_path,
             trainer_output_dir=checkpoint_root,
-            train_batch_size=config.train_batch_size,
-            train_min_rows=config.train_min_rows or config.train_batch_size,
+            train_batch_size=max(config.train_batch_size, effective_train_min_rows),
+            train_min_rows=effective_train_min_rows,
             sft_num_epoch_per_batch=config.sft_num_epoch_per_batch,
             token_cache_fingerprint="0" * 64,
             trainer_overrides=config.trainer_overrides,
@@ -2695,15 +2710,28 @@ def resolve_effective_train_batch_size(
     if micro_batch_size_per_gpu < 1:
         raise ValueError("micro_batch_size_per_gpu must be >= 1.")
 
-    max_global = min(requested, selected_count)
     divisor = world_size * micro_batch_size_per_gpu
-    if max_global < divisor:
+    if selected_count < divisor:
         return None
 
+    max_global = min(max(requested, divisor), selected_count)
     divisible = (max_global // divisor) * divisor
     if divisible < 1:
         return None
     return divisible
+
+
+def resolve_min_selected_rows_for_sft(
+    *,
+    world_size: int,
+    micro_batch_size_per_gpu: int = 1,
+) -> int:
+    """Return the smallest selected-row count that can feed one distributed SFT batch."""
+    if world_size < 1:
+        raise ValueError("world_size must be >= 1.")
+    if micro_batch_size_per_gpu < 1:
+        raise ValueError("micro_batch_size_per_gpu must be >= 1.")
+    return world_size * micro_batch_size_per_gpu
 
 
 def upsample_selected_rows_to_batch_multiple(

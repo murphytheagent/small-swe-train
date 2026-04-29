@@ -105,7 +105,7 @@
     "max_sequence_length": 16384,
     "pad_token_id": 0,
     "selection": {
-      "require_terminal": true,
+      "require_terminal": false,
       "require_format_valid": true,
       "require_resolved": false,
       "require_zero_exit_code": false,
@@ -115,7 +115,7 @@
       "reject_on_executor_error": false,
       "reject_on_parse_error": false,
       "reject_on_validation_errors": false,
-      "reject_on_invalid_final_submit": true,
+      "reject_on_invalid_final_submit": false,
       "relabel_rejected_attempts": true
     }
   },
