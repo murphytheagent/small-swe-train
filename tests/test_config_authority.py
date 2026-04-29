@@ -89,8 +89,8 @@ def test_training_policy_config_selector_loads_checked_in_preflight_policy() -> 
 @pytest.mark.parametrize(
     ("filename", "payload_format", "train_batch_size", "train_min_rows"),
     [
-        ("training_policy_preflight_format_json.v1.json", "json", 32, 32),
-        ("training_policy_preflight_format_xml.v1.json", "xml", 32, 32),
+        ("training_policy_preflight_format_json.v1.json", "json", 4, 4),
+        ("training_policy_preflight_format_xml.v1.json", "xml", 4, 4),
         ("training_policy_preflight_positive_json.v1.json", "json", 4, 4),
         ("training_policy_preflight_positive_xml.v1.json", "xml", 4, 4),
     ],
