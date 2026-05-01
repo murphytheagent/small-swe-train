@@ -313,6 +313,7 @@ def test_teacher_output_contract_block_wraps_shared_contract() -> None:
     assert "use text_search to locate exact strings or symbols inside a known scope" in prompt
     assert "always include both args.path and args.patch" in prompt
     assert "You may reuse an exact repo-relative path the student already found" in prompt
+    assert "If your corrected action completes the task, use the terminal submit tool in this turn" in prompt
     assert "Now correctly solve the original issue, focus only on what to do best in the next turn." in prompt
     assert "Do not repeat an identical previously-failed command without a new hypothesis." not in prompt
     assert "ls/search" not in prompt

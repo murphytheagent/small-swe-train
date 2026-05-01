@@ -1088,12 +1088,6 @@ def run_rft_runtime_loop(config: RFTLoopConfig) -> None:
                     )
 
                 if not trainer_skipped:
-                    if heldout_eval_enabled and not selected_rows_for_eval:
-                        raise RuntimeError(
-                            "Held-out RFT eval produced zero selected rows after filtering; "
-                            "refusing to run the inner SFT trainer without outer-step eval telemetry."
-                        )
-
                     effective_train_batch_size = resolve_effective_train_batch_size(
                         requested=config.train_batch_size,
                         selected_count=selected_count_for_train_raw,

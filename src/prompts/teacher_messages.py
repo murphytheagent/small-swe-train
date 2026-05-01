@@ -13,6 +13,7 @@ _TEACHER_TOOL_USAGE_GUIDANCE = (
     "Teacher-specific tool guidance:\n"
     "- Normal tool flow: use file_search to locate likely files, use text_search to locate exact strings or symbols inside a known scope, use read to inspect contents, and use apply_patch to edit; for apply_patch always include both args.path and args.patch.\n"
     "- You may reuse an exact repo-relative path the student already found for your own read, text_search, or apply_patch calls; do not guess new prefixes or repeat file_search unless needed.\n"
+    "- If your corrected action completes the task, use the terminal submit tool in this turn; do not avoid submit just because this is a revised student turn.\n"
 )
 
 

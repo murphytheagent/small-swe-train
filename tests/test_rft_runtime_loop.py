@@ -2076,7 +2076,7 @@ def test_run_loop_keeps_outer_eval_out_of_inner_sft_batching(
     assert summary["eval_split_fallback_to_train"] is False
 
 
-def test_run_loop_rejects_empty_eval_selection_without_train_fallback(
+def test_run_loop_treats_empty_eval_selection_as_telemetry_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2127,7 +2127,10 @@ def test_run_loop_rejects_empty_eval_selection_without_train_fallback(
         return len(rows)
 
     def _fake_build_trainer_step_command(**kwargs):
-        raise AssertionError("trainer command should not be built when held-out eval is empty")
+        assert kwargs["train_batch_size"] == 1
+        assert kwargs["train_min_rows"] == 1
+        trainer_output_dir = Path(kwargs["trainer_output_dir"])
+        return ["fake-trainer", str(trainer_output_dir)]
 
     def _fake_run_command(command, *, cwd: Path):
         del cwd
@@ -2222,11 +2225,17 @@ def test_run_loop_rejects_empty_eval_selection_without_train_fallback(
         eval_min_rows=1,
     )
 
-    with pytest.raises(RuntimeError, match="outer-step eval telemetry"):
-        rft_runtime_loop.run_rft_runtime_loop(config)
+    rft_runtime_loop.run_rft_runtime_loop(config)
 
     assert request_partitions == ["train", "eval"]
-    assert write_calls == []
+    assert write_calls == [("accepted_trajectories.parquet", 2)]
+    summary_path = config.output_dir / "rft_step_00000" / "rft_step_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["eval_selected_count_raw"] == 0
+    assert summary["eval_selected_count_after_length_filter"] == 0
+    assert summary["selected_count_for_eval"] == 0
+    assert summary["trainer_skipped"] is False
+    assert summary["skip_reason"] is None
 
 
 def test_run_loop_positive_stage_requests_resolved_only_selection(
